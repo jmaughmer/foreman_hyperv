@@ -124,8 +124,7 @@ module ForemanHyperv
     end
 
     def new_vm(attr = {})
-      firmware_type = attr.delete(:firmware_type).to_s
-      attr.merge!(process_firmware_attributes(attr[:foreman_firmware], firmware_type)) #, attr[:provision_method]))
+      apply_firmware_attributes(attr)
       attr.delete :id
 
       # logger.debug "New VM with arguments;\n#{attr}"
@@ -157,8 +156,7 @@ module ForemanHyperv
       attr.delete :computer_name if attr[:computer_name].blank?
       start = Foreman::Cast.to_bool(attr.delete(:start))
 
-      firmware_type = attr.delete(:firmware_type).to_s
-      attr.merge!(process_firmware_attributes(attr[:foreman_firmware], firmware_type)) #, attr[:provision_method]))
+      apply_firmware_attributes(attr)
 
       validate_vm(attr, new: true)
       validate_interfaces(attr)
@@ -234,9 +232,8 @@ module ForemanHyperv
         security.save
       end
       if attr[:foreman_firmware].present?
-        firmware_type = attr.delete(:firmware_type).to_s
-        attr.merge!(process_firmware_attributes(attr[:foreman_firmware], firmware_type)) #, attr[:provision_method]))
-
+        # The generation of an existing VM can not be changed, only its secure boot setting
+        apply_firmware_attributes(attr, set_generation: false)
         vm.secure_boot_enabled = attr[:secure_boot_enabled]
       end
 
@@ -401,6 +398,24 @@ module ForemanHyperv
       return unless Foreman::Cast.to_bool(attr[:dynamic_memory_enabled])
       raise Foreman::Exception, 'VM lacks memory minimum' unless attr[:memory_minimum].to_i.positive?
       raise Foreman::Exception, 'VM lacks memory maximum' unless attr[:memory_maximum].to_i.positive?
+    end
+
+    # Hyper-V has no firmware setting of its own: generation 1 VMs boot from BIOS,
+    # generation 2 VMs from UEFI. Let Foreman resolve the firmware that was selected
+    # for the host (including the PXE loader based 'automatic' firmware) and turn it
+    # into the generation the VM has to be created with, along with the secure boot
+    # settings that belong to the firmware.
+    def apply_firmware_attributes(attr, set_generation: true)
+      firmware_type = attr.delete(:firmware_type).to_s
+      attr.merge!(process_firmware_attributes(attr[:foreman_firmware], firmware_type, attr[:provision_method]))
+
+      # The generation is only set when a firmware was actually chosen, hosts that
+      # carry no firmware at all keep the default generation.
+      return attr if !set_generation || attr[:foreman_firmware].blank?
+
+      firmware = resolve_automatic_firmware(attr[:firmware], firmware_type)
+      attr[:generation] = firmware == 'bios' ? 1 : 2
+      attr
     end
 
     def generate_secure_boot_settings(firmware)
