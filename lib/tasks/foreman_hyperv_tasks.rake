@@ -14,7 +14,7 @@ end
 namespace :foreman_hyperv do
   task :rubocop do
     begin
-      require 'rubocop/take_task'
+      require 'rubocop/rake_task'
       RuboCop::RakeTask.new :rubocop_foreman_hyperv do |task|
         task.patterns = [
           '/app/**/*.rb',
@@ -22,11 +22,10 @@ namespace :foreman_hyperv do
           '/test/**/*.rb'
         ].map { |p| "#{ForemanHyperv::Engine.root}#{p}" }
       end
-    rescue StandardError
+      Rake::Task['rubocop_foreman_hyperv'].invoke
+    rescue LoadError
       puts 'Rubocop not loaded'
     end
-
-    Rake::Task['rubocop_foreman_hyperv'].invoke
   end
 end
 
