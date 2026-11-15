@@ -8,7 +8,7 @@ module ForemanHyperv
     initializer 'foreman_hyperv.register_plugin', :before => :finisher_hook do |app|
       app.reloader.to_prepare do
         Foreman::Plugin.register :foreman_hyperv do
-          requires_foreman '>= 3.13'
+          requires_foreman '>= 3.14'
           register_gettext
 
           compute_resource ForemanHyperv::Hyperv

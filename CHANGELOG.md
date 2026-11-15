@@ -1,3 +1,7 @@
+## Unreleased
+
+- Require Foreman 3.14 or newer
+
 ## v0.2.0 2026-06-11
 
 - Replace firmware selection with common methods
