@@ -33,7 +33,7 @@
 <%= field(f, :foreman_firmware, :label => _('Firmware'), :label_help => _("Choose 'Automatic' to set the firmware based on the PXE loader of the host. If no PXE loader is selected, firmware defaults to BIOS."), :label_size => "col-md-2") do
   compute_resource.firmware_types.collect do |type, name|
     enabled = new_vm
-    enabled ||= firmware_type != :bios && type.to_s.start_with?('uefi')
+    enabled ||= firmware_type != 'bios' && type.to_s.start_with?('uefi')
 
     radio_button_f f, :foreman_firmware, { :checked => (firmware_type == type), :disabled => !enabled, :value => type, :text => _(name) }
   end.join(' ').html_safe

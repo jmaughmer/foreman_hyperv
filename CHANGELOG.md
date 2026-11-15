@@ -3,6 +3,7 @@
 - Require Foreman 3.14 or newer
 - Fix new VMs never being started, regardless of the "Power ON this machine" setting
 - Select the VM generation from the chosen firmware
+- Fix firmware selection offering UEFI for VMs that are BIOS based
 
 ## v0.2.0 2026-06-11
 
