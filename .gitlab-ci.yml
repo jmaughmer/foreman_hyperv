@@ -1,4 +1,0 @@
----
-include:
-  - project: ITI/ci-pipelines
-    file: '/foreman-module.yaml'
