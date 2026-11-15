@@ -8,9 +8,6 @@ AllCops:
   TargetRubyVersion: 3.0
   NewCops: enable
 
-Rails:
-  Enabled: true # always run the rails cops
-
 # Don't enforce documentation
 Style/Documentation:
   Enabled: false
@@ -20,10 +17,6 @@ Style/HashSyntax:
   SupportedStyles:
     - ruby19
     - hash_rockets
-
-# Force before_filter until upgrade to Rails 4
-Rails/ActionFilter:
-  EnforcedStyle: filter
 
 Metrics/MethodLength:
   Max: 20
