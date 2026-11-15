@@ -4,6 +4,7 @@
 - Fix new VMs never being started, regardless of the "Power ON this machine" setting
 - Select the VM generation from the chosen firmware
 - Fix firmware selection offering UEFI for VMs that are BIOS based
+- Fix VMs without network adapters raising an error
 
 ## v0.2.0 2026-06-11
 

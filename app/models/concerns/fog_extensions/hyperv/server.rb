@@ -15,7 +15,7 @@ module FogExtensions
       end
 
       def mac
-        network_adapters.first.mac
+        network_adapters.first&.mac
       end
 
       def interfaces
@@ -59,6 +59,7 @@ module FogExtensions
 
       def vlan
         nic = network_adapters.first
+        return if nic.nil?
 
         nic.access_vlan_id || nic.native_vlan_id || nic.primary_vlan_id
       end
@@ -100,13 +101,6 @@ module FogExtensions
         format _('%{cpus} CPUs and %{ram} memory'),
                cpus: processor_count,
                ram: number_to_human_size(memory_startup)
-      end
-
-      def compute_attributes
-        attributes.merge(
-          interfaces_attributes: vm.network_adapters.each_with_index.to_h { |nic, idx| [idx, nic.compute_attributes] },
-          volumes_attributes: vm.hard_drives.each_with_index.to_h { |hdd, idx| [idx, hdd.compute_attributes] }
-        )
       end
 
       def select_nic(fog_nics, nic)
