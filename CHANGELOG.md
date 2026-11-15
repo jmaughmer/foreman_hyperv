@@ -1,5 +1,6 @@
-## Unreleased
+## v0.2.1 2026-11-15
 
+- Support Foreman 5.0
 - Require Foreman 3.14 or newer
 - Fix new VMs never being started, regardless of the "Power ON this machine" setting
 - Select the VM generation from the chosen firmware
