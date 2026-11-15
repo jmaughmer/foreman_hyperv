@@ -5,6 +5,7 @@
 - Select the VM generation from the chosen firmware
 - Fix firmware selection offering UEFI for VMs that are BIOS based
 - Fix VMs without network adapters raising an error
+- Add a translation template for the strings the plugin adds
 
 ## v0.2.0 2026-06-11
 
