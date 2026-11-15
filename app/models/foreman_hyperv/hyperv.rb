@@ -155,7 +155,7 @@ module ForemanHyperv
     def create_vm(attr = {})
       attr = vm_instance_defaults.merge(attr.to_hash.deep_symbolize_keys)
       attr.delete :computer_name if attr[:computer_name].blank?
-      attr.delete :start
+      start = Foreman::Cast.to_bool(attr.delete(:start))
 
       firmware_type = attr.delete(:firmware_type).to_s
       attr.merge!(process_firmware_attributes(attr[:foreman_firmware], firmware_type)) #, attr[:provision_method]))
@@ -195,7 +195,7 @@ module ForemanHyperv
       create_interfaces(vm, attr)
       create_volumes(vm, attr)
 
-      vm.start if attr[:start] == '1'
+      vm.start if start
       vm
     rescue StandardError
       if vm&.persisted?
