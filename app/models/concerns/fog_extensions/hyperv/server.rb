@@ -98,7 +98,7 @@ module FogExtensions
       end
 
       def vm_description
-        format _('%{cpus} CPUs and %{ram} memory'),
+        format _('%<cpus>s CPUs and %<ram>s memory'),
                cpus: processor_count,
                ram: number_to_human_size(memory_startup)
       end
@@ -135,7 +135,8 @@ module FogExtensions
             if nic_attrs['vlan_private_mode'] == 'Promiscuous'
               if nic_attrs['secondary_vlan_ids'].present?
                 potential.select! do |fn|
-                  fn.secondary_vlan_ids.split(',').map(&:strip) == nic_attrs['secondary_vlan_ids'].split(',').map(&:strip)
+                  fn.secondary_vlan_ids.split(',').map(&:strip) ==
+                    nic_attrs['secondary_vlan_ids'].split(',').map(&:strip)
                 end
               end
             elsif nic_attrs['secondary_vlan_id'].present?
