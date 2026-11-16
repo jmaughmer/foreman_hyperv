@@ -1,4 +1,4 @@
-## Unreleased
+## v0.2.2 2026-11-16
 
 - Fix rendering Hyper-V compute resources over the API, the provider specific
   rabl partial core renders for every provider was missing
