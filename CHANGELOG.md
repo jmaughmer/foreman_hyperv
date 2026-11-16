@@ -1,3 +1,8 @@
+## Unreleased
+
+- Fix rendering Hyper-V compute resources over the API, the provider specific
+  rabl partial core renders for every provider was missing
+
 ## v0.2.1 2026-11-15
 
 - Support Foreman 5.0
