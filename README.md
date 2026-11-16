@@ -27,6 +27,22 @@ semodule_package -o foreman_winrm.pp -m foreman_winrm.mod
 semodule -i foreman_winrm.pp
 ```
 
+## Hyper-V host prerequisites
+
+The compute resource authenticates over WinRM, so on every host that should be
+managed:
+
+* `winrm quickconfig`, and over plain HTTP also
+  `winrm set winrm/config/service '@{AllowUnencrypted="true"}'`
+* an inbound firewall rule for TCP 5985 (5986 for HTTPS), ideally scoped to the
+  Foreman server's address
+* a service account in the local *Administrators* group. *Hyper-V
+  Administrators* plus *Remote Management Users* is not enough: a WinRM logon
+  is a network logon and Hyper-V rejects its un-elevated token with an
+  "authorization policy" error on every cmdlet. Local (non-domain) accounts
+  also need `LocalAccountTokenFilterPolicy=1`. Both are covered in the
+  [`fog-hyperv` documentation](https://github.com/ananace/fog-hyperv#troubleshooting)
+
 ## Testing/Installing
 
 Follow the Foreman manual for [advanced installation from gems](https://theforeman.org/plugins/#2.3AdvancedInstallationfromGems) for `fog-hyperv` and `foreman_hyperv`.
