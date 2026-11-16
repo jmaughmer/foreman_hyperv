@@ -51,6 +51,20 @@ There are RPMs packaged for the `fog-hyperv` dependencies under [Release v0.0.1]
 
 Do bear in mind that this is still very early in development, so plenty of issues may exist.
 
+### Verifying a compute resource
+
+Listing the virtual switches exercises the whole path, so the API endpoint for
+them is the quickest check that credentials, host permissions and SELinux are
+all in order:
+
+```console
+curl -k -u admin 'https://foreman.example.com/api/compute_resources/1/available_networks'
+```
+
+Note that Foreman 5.0 has no `compute_resources/:id/test` endpoint and
+`hammer compute-resource create --provider` does not list Hyper-V, so create and
+check Hyper-V resources over the API.
+
 ## Contributing
 
 Bug reports and pull requests are welcome on GitHub at https://github.com/ananace/foreman_hyperv.
