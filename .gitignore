@@ -8,3 +8,7 @@
 /test/reports/
 /tmp/
 /vendor/
+
+# gem build writes the packaged gem next to the gemspec; rake build puts it in
+# /pkg above
+*.gem
