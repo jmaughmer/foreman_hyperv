@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require 'rake/testtask'
 
 namespace :test do
@@ -12,20 +14,18 @@ namespace :test do
 end
 
 namespace :foreman_hyperv do
-  task :rubocop do
-    begin
-      require 'rubocop/rake_task'
-      RuboCop::RakeTask.new :rubocop_foreman_hyperv do |task|
-        task.patterns = [
-          '/app/**/*.rb',
-          '/lib/**/*.rb',
-          '/test/**/*.rb'
-        ].map { |p| "#{ForemanHyperv::Engine.root}#{p}" }
-      end
-      Rake::Task['rubocop_foreman_hyperv'].invoke
-    rescue LoadError
-      puts 'Rubocop not loaded'
+  task :rubocop => :environment do
+    require 'rubocop/rake_task'
+    RuboCop::RakeTask.new :rubocop_foreman_hyperv do |task|
+      task.patterns = [
+        '/app/**/*.rb',
+        '/lib/**/*.rb',
+        '/test/**/*.rb'
+      ].map { |p| "#{ForemanHyperv::Engine.root}#{p}" }
     end
+    Rake::Task['rubocop_foreman_hyperv'].invoke
+  rescue LoadError
+    puts 'Rubocop not loaded'
   end
 end
 

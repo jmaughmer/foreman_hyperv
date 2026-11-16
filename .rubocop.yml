@@ -12,6 +12,12 @@ AllCops:
 Style/Documentation:
   Enabled: false
 
+Gemspec/DevelopmentDependencies:
+  Enabled: false
+
+Gemspec/RequireMFA:
+  Enabled: false
+
 Style/HashSyntax:
   Enabled: false
   SupportedStyles:
