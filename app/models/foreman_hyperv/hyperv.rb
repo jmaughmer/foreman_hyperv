@@ -100,6 +100,14 @@ module ForemanHyperv
       )
     end
 
+    # Mirror available_networks above: core renders the clusters endpoint from
+    # vSphere flavoured fields the Hyper-V cluster model does not have.
+    ApiCluster = Struct.new(:name, :id, :full_path, :datacenter, :num_host)
+
+    def available_clusters
+      clusters.map { |cluster| ApiCluster.new(cluster.name, cluster.id, nil, nil, nil) }
+    end
+
     def hypervisor
       client.hosts.new(
         cache.cache(:hypervisor) do

@@ -4,6 +4,8 @@
   rabl partial core renders for every provider was missing
 - Implement available_networks, the API endpoint used to list virtual switches
   raised "Not implemented for Hyper-V"
+- Implement available_clusters, the API endpoint used to list Hyper-V
+  failover clusters raised "Not implemented for Hyper-V"
 
 ## v0.2.1 2026-11-15
 
