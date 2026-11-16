@@ -51,6 +51,21 @@ There are RPMs packaged for the `fog-hyperv` dependencies under [Release v0.0.1]
 
 Do bear in mind that this is still very early in development, so plenty of issues may exist.
 
+### Which `fog-hyperv` you get
+
+The plugin asks for `fog-hyperv ~> 0.2`, and the released 0.2.0 covers
+standalone hosts: connecting, listing virtual switches and VMs, and creating,
+editing and destroying VMs all work with it. Failover clusters are the
+exception. `Compute#supports_clusters?` in 0.2.0 reads a field that the query
+result no longer carries, so it answers false for every host and
+`available_clusters` comes back empty even when the host belongs to a cluster.
+That is fixed on `fog-hyperv`'s development branch, which has not been released,
+so clustered hosts need the gem from source:
+
+```console
+gem 'fog-hyperv', github: 'ananace/fog-hyperv'
+```
+
 ### Verifying a compute resource
 
 Listing the virtual switches exercises the whole path, so the API endpoint for
