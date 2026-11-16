@@ -22,6 +22,7 @@ Gem::Specification.new do |spec|
   spec.required_ruby_version = '>= 3.0'
 
   spec.add_runtime_dependency 'fog-hyperv', '~> 0.2'
+  spec.add_runtime_dependency 'logging', '~> 2'
 
   spec.add_development_dependency 'bundler'
   spec.add_development_dependency 'rake'

@@ -8,6 +8,8 @@
   failover clusters raised "Not implemented for Hyper-V"
 - Report an error when the compute resource can not be reached, broken
   connections were saved silently and "Test Connection" always succeeded
+- Depend on the logging gem, fog-hyperv requires it without declaring it and
+  winrm 2.4 stopped bringing it in, so connecting failed with a LoadError
 
 ## v0.2.1 2026-11-15
 
