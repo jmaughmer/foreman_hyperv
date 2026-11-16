@@ -43,17 +43,27 @@ module ForemanHyperv
       return unless connection_properties_valid?
       return false if errors.any?
 
-      client.valid?
-    rescue Fog::Hyperv::Errors::ServiceError, ArgumentError, WinRM::WinRMAuthorizationError => e
-      errors.add(:base, e.message)
+      error = connection_error
+      errors.add(:base, error) if error
+    end
+
+    # Fog's valid? reads a Msvm_ComputerSystem instance, which any authenticated
+    # user may query: it reports success for hosts the account can not manage,
+    # and before fog-hyperv 0.2.2 (unreleased) it never returned true for a
+    # remote host at all. Get-VMHost is the call the rest of the provider needs
+    # anyway, so validating with it also proves the account can manage Hyper-V.
+    #
+    # @return [String, nil] the reason the connection can not be used
+    def connection_error
+      client.hosts.first ? nil : _('%{url} did not return a Hyper-V host') % { url: url }
+    rescue StandardError => e
+      e.message
     end
 
     def connection_valid?
       return false if url.blank? || user.blank? || password.blank?
 
-      client&.valid?
-    rescue StandardError
-      false
+      connection_error.nil?
     end
 
     def connection_properties_valid?

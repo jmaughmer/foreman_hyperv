@@ -13,6 +13,10 @@ msgstr ""
 msgid "%{cpus} CPUs and %{ram} memory"
 msgstr ""
 
+#: app/models/foreman_hyperv/hyperv.rb:58
+msgid "%{url} did not return a Hyper-V host"
+msgstr ""
+
 #: app/views/compute_resources_vms/form/hyperv/_network.html.erb:12
 msgid "Access VLAN"
 msgstr ""

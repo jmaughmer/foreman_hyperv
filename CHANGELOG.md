@@ -6,6 +6,8 @@
   raised "Not implemented for Hyper-V"
 - Implement available_clusters, the API endpoint used to list Hyper-V
   failover clusters raised "Not implemented for Hyper-V"
+- Report an error when the compute resource can not be reached, broken
+  connections were saved silently and "Test Connection" always succeeded
 
 ## v0.2.1 2026-11-15
 
