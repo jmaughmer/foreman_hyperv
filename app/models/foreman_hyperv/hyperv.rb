@@ -510,7 +510,7 @@ module ForemanHyperv
       end
 
       unless vm.network_adapters.all(_return_fields: %i[dynamic_mac_address_enabled])
-                               .any?(&:dynamic_mac_address_enabled)
+               .any?(&:dynamic_mac_address_enabled)
         return
       end
 
