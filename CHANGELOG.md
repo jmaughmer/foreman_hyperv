@@ -2,6 +2,8 @@
 
 - Fix rendering Hyper-V compute resources over the API, the provider specific
   rabl partial core renders for every provider was missing
+- Implement available_networks, the API endpoint used to list virtual switches
+  raised "Not implemented for Hyper-V"
 
 ## v0.2.1 2026-11-15
 

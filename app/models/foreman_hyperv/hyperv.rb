@@ -123,6 +123,16 @@ module ForemanHyperv
       )
     end
 
+    # Core's api/v2/compute_resources/available_networks.rabl renders a flat
+    # collection of VMware/libvirt flavoured network objects. Hyper-V exposes
+    # virtual switches instead of fog networks, and the switch models are
+    # bound to a live connection, so map them into plain structs.
+    ApiNetwork = Struct.new(:name, :id, :datacenter, :virtualswitch, :vlanid)
+
+    def available_networks(_cluster_id = nil)
+      switches(nil).map { |switch| ApiNetwork.new(switch.name, switch.id, nil, switch.name, nil) }
+    end
+
     def new_vm(attr = {})
       apply_firmware_attributes(attr)
       attr.delete :id
