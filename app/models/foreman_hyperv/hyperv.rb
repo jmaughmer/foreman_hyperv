@@ -218,6 +218,17 @@ module ForemanHyperv
               .detect { |domain| domain.id == name || domain.name == name }
     end
 
+    # Hyper-V has no zones — the word names another provider's layout (core aliases
+    # it to EC2 availability zones) — and core's base raises "Not implemented for
+    # Hyper-V", which the API serves as a 500 for a question whose honest answer is
+    # that there are none. Same reasoning as available_storage_domains above. The
+    # other endpoints core leaves unimplemented (folders, resource pools, storage
+    # pods, flavors, security groups) are left as they are: nothing on the Hyper-V
+    # path asks them, and each deserves its own answer rather than a blanket [].
+    def available_zones
+      []
+    end
+
     def new_vm(attr = {})
       apply_firmware_attributes(attr)
       attr.delete :id
