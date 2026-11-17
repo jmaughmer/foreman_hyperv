@@ -90,7 +90,7 @@ module ForemanHyperv
     def available_hypervisors
       client.hosts.load(
         cache.cache(:available_hypervisor) do
-          client.hosts.all.map(&:attributes)
+          cluster_backed_hosts(endpoint_cluster).map(&:attributes)
         end
       )
     end
@@ -115,7 +115,9 @@ module ForemanHyperv
     ApiCluster = Struct.new(:name, :id, :full_path, :datacenter, :num_host)
 
     def available_clusters
-      clusters.map { |cluster| ApiCluster.new(cluster.name, cluster.id, nil, nil, nil) }
+      clusters.map do |cluster|
+        ApiCluster.new(cluster.name, cluster.id, nil, nil, cluster_node_count(cluster))
+      end
     end
 
     def hypervisor
@@ -147,8 +149,38 @@ module ForemanHyperv
     # bound to a live connection, so map them into plain structs.
     ApiNetwork = Struct.new(:name, :id, :datacenter, :virtualswitch, :vlanid)
 
-    def available_networks(_cluster_id = nil)
-      switches(nil).map { |switch| ApiNetwork.new(switch.name, switch.id, nil, switch.name, nil) }
+    # Core renders this from one flat list of network objects. With a cluster named
+    # the choices are the switches its nodes have, which is not one host's list: a
+    # virtual switch exists per node, and the same name on two nodes is two switches
+    # with two GUIDs. A machine is connected by name, so names are what this lists —
+    # all of them, including a name one node is missing, because dropping it silently
+    # would leave the user wondering where the switch they built went. What is missing
+    # where is logged; picking such a name for a machine that lands on the node
+    # without it stays a creation error, which is the honest place to say it.
+    def available_networks(cluster_id = nil)
+      cluster = cluster_named(cluster_id)
+      return api_networks(switches(nil)) if cluster.nil?
+
+      hosts = cluster_backed_hosts(cluster)
+      return api_networks(switches(nil)) if hosts.empty?
+
+      switches_by_host = hosts.each_with_object({}) do |host, acc|
+        acc[host.name] = begin
+          switches(host)
+        rescue StandardError => e
+          Rails.logger.warn "Hyper-V switches for #{host.name} could not be read: #{e.message.lines.first}"
+          []
+        end
+      end
+      first_by_name = {}
+      switches_by_host.each_value { |list| list.each { |sw| first_by_name[sw.name] ||= sw } }
+      shared = switches_by_host.values.map { |list| list.map(&:name) }.reduce(&:&)
+      (first_by_name.keys - shared).each do |name|
+        without = switches_by_host.reject { |_host, list| list.any? { |sw| sw.name == name } }.keys
+        Rails.logger.warn "Hyper-V switch #{name} is missing from #{without.join(', ')} in cluster #{cluster.name}"
+      end
+
+      first_by_name.values.map { |sw| ApiNetwork.new(sw.name, sw.id, nil, sw.name, nil) }
     end
 
     # Core's base #available_storage_domains answers "Not implemented for Hyper-V",
@@ -450,6 +482,59 @@ module ForemanHyperv
       client.clusters.all
     rescue StandardError
       []
+    end
+
+    # The cluster an endpoint belongs to, or nil for a stand-alone host — and for a
+    # fog too old to have read a cluster's node list, which is the same nothing as far
+    # as a caller is concerned.
+    def endpoint_cluster
+      return nil unless client.respond_to?(:supports_clusters?) && client.respond_to?(:cluster_nodes)
+      return nil unless client.supports_clusters?
+
+      clusters.first
+    rescue StandardError
+      nil
+    end
+
+    def cluster_named(identifier)
+      return nil if identifier.blank?
+
+      clusters.detect { |cluster| cluster.id == identifier || cluster.name == identifier }
+    end
+
+    # The hosts a placement choice is made between: the endpoint on its own, or every
+    # node of the cluster when it belongs to one. Get-VMHost answers for the machine it
+    # ran on and nothing else, so a cluster's other nodes come from the cluster's node
+    # list and their details from each node in turn. A node that answers the cluster
+    # but not WinRM stays in the list with only its name: the machine form leans on
+    # this listing, and one node being down is a thing to report, not a reason to hide
+    # the node or to fail the page.
+    def cluster_backed_hosts(cluster = nil)
+      return client.hosts.all unless cluster
+
+      cluster.nodes.each_with_object([]) do |node, hosts|
+        hosts << begin
+          node.host
+        rescue StandardError => e
+          Rails.logger.warn "Hyper-V node #{node.name} is in cluster #{cluster.name} but not reachable over WinRM: #{e.message.lines.first}"
+          client.hosts.new(name: node.name)
+        end
+      end
+    end
+
+    # vSphere's clusters endpoint reports a size as a node count; for Hyper-V that is
+    # Get-ClusterNode's list. Nil when fog cannot read it, because zero reads as an
+    # empty cluster, which is a different claim from an unreadable one.
+    def cluster_node_count(cluster)
+      return nil unless cluster.respond_to?(:nodes)
+
+      cluster.nodes.count
+    rescue StandardError
+      nil
+    end
+
+    def api_networks(list)
+      list.map { |switch| ApiNetwork.new(switch.name, switch.id, nil, switch.name, nil) }
     end
 
     def validate_vm(attr, new: false)
