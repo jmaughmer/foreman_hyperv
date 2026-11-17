@@ -151,6 +151,41 @@ module ForemanHyperv
       switches(nil).map { |switch| ApiNetwork.new(switch.name, switch.id, nil, switch.name, nil) }
     end
 
+    # Core's base #available_storage_domains answers "Not implemented for Hyper-V",
+    # which the API returns as a 500 for a question that has an honest answer: a
+    # stand-alone Hyper-V host has no datastores. A clustered one has its Cluster
+    # Shared Volumes, and those are what a machine's disks go on, so this returns
+    # them once there is a cluster to ask. An empty list rather than an exception
+    # means the UI says "no datastores" and the API says 200 with [], which is the
+    # truth about this host.
+    #
+    # The fields are core's rabl's (available_storage_domains.rabl reads name, id,
+    # capacity, freespace, uncommitted) rather than Hyper-V's own names.
+    ApiStorageDomain = Struct.new(:name, :id, :capacity, :freespace, :uncommitted)
+
+    def available_storage_domains(cluster_id = nil)
+      return [] if cluster_id.blank?
+
+      # Looked up in the cached cluster list rather than asked for by name: on a host
+      # with no cluster, asking fog for one raises, and a stale cluster id in a URL is
+      # not a reason to find out whether it does.
+      cluster = clusters.detect { |c| c.id == cluster_id || c.name == cluster_id }
+      return [] unless cluster&.respond_to?(:shared_volumes)
+
+      cluster.shared_volumes.map do |volume|
+        ApiStorageDomain.new(volume.name, volume.volume_path,
+                             volume.shared_volume&.[](:size),
+                             volume.shared_volume&.[](:free_space), nil)
+      end
+    end
+
+    # The deprecated /available_storage_domains/:name route asks for one by name with
+    # no cluster named to look in, so it looks in all of them.
+    def storage_domain(name)
+      clusters.flat_map { |cluster| available_storage_domains(cluster.id) }
+              .detect { |domain| domain.id == name || domain.name == name }
+    end
+
     def new_vm(attr = {})
       apply_firmware_attributes(attr)
       attr.delete :id
