@@ -89,7 +89,7 @@ module ForemanHyperv
 
     def available_hypervisors
       client.hosts.load(
-        cache.cache(:available_hypervisor) do
+        cache.cache(hypervisors_cache_key) do
           cluster_backed_hosts(endpoint_cluster).map(&:attributes)
         end
       )
@@ -122,7 +122,7 @@ module ForemanHyperv
 
     def hypervisor
       client.hosts.new(
-        cache.cache(:hypervisor) do
+        cache.cache(hypervisor_cache_key) do
           client.hosts.first.attributes
         end
       )
@@ -137,7 +137,7 @@ module ForemanHyperv
     def switches(host)
       host ||= hosts.first
       client.switches.load(
-        cache.cache(:"#{host.name}-switches") do
+        cache.cache(switches_cache_key(host)) do
           host.switches.all.map(&:attributes)
         end
       )
@@ -580,7 +580,16 @@ module ForemanHyperv
           node.host
         rescue StandardError => e
           Rails.logger.warn "Hyper-V node #{node.name} is in cluster #{cluster.name} but not reachable over WinRM: #{e.message.lines.first}"
-          client.hosts.new(name: node.name)
+          node_only = client.hosts.new(name: node.name)
+          # A node that answers the cluster but not WinRM is where the plugin learns a
+          # node has gone quiet, so what it cached for that node while it answered goes
+          # with it: a switch list read through an outage is a placement guess, and the
+          # first read after the node comes back asks the node instead of serving that
+          # list out its remaining lifetime. Nowhere else can this be noticed — a
+          # cached switch list means the node is never asked, and a failed read means
+          # there was nothing cached to drop.
+          invalidate_hyperv_cache(switches_cache_key(node_only))
+          node_only
         end
       end
     end
@@ -598,6 +607,94 @@ module ForemanHyperv
 
     def api_networks(list)
       list.map { |switch| ApiNetwork.new(switch.name, switch.id, nil, switch.name, nil) }
+    end
+
+    # How long this resource's listings are held. Core's own three hours suits a
+    # stand-alone host: its node list and virtual switches change when an
+    # administrator changes them, and each of those reads costs seconds of WinRM. A
+    # cluster has no such quiet — nodes join, drain and stop answering without
+    # touching the Foreman record, and Hyper-V gives out no event to listen for — so
+    # its answers do not get to live as long. Five minutes puts a node that joined the
+    # cluster into the next page load rather than hours away, and costs one re-read of
+    # the cluster per page load.
+    CLUSTER_CACHE_EXPIRY = 5.minutes
+
+    # Core's cache object, built with the lifetime this endpoint deserves. The cluster
+    # question is asked of fog rather than of the listings, because what is being
+    # decided here is how long those listings live: reading them would ask the cache
+    # object that is still being built.
+    def cache
+      @cache ||= if cluster_endpoint?
+                   ComputeResourceCache.new(self, cache_duration: CLUSTER_CACHE_EXPIRY)
+                 else
+                   ComputeResourceCache.new(self)
+                 end
+    end
+
+    # Whether the endpoint answers as a cluster, asked once and remembered: fog asks
+    # the host every time, and every cache key would otherwise ask with it.
+    def cluster_endpoint?
+      return @cluster_endpoint if instance_variable_defined?(:@cluster_endpoint)
+
+      @cluster_endpoint = client.respond_to?(:supports_clusters?) && client.supports_clusters?
+    rescue StandardError => e
+      Rails.logger.warn "Hyper-V cluster support for #{name} could not be read: #{e.message.lines.first}"
+      @cluster_endpoint = false
+    end
+
+    # Which shape the cached listings hold: a stand-alone host's answers, or a named
+    # cluster's. A cluster forming around an endpoint changes the cluster and not the
+    # Foreman record, so nothing flushes the caches; naming the keys for the shape
+    # means a resource that has started listing nodes cannot be served the stand-alone
+    # answer it wrote when it was not. Parameterised because a deployment may be
+    # running a cache store whose keys take no spaces.
+    def hyperv_cache_scope
+      cluster = endpoint_cluster
+      return 'standalone' if cluster.nil?
+
+      cluster.name.to_s.parameterize.presence || 'cluster'
+    end
+
+    def hypervisors_cache_key
+      :"#{hyperv_cache_scope}-hypervisors"
+    end
+
+    def hypervisor_cache_key
+      :"#{hyperv_cache_scope}-hypervisor"
+    end
+
+    def switches_cache_key(host)
+      :"#{host.name.to_s.parameterize.presence || host.name}-switches"
+    end
+
+    # Drops a cached answer that has been shown wrong, so the next read asks the host
+    # again rather than repeating a stale answer until core's expiry — or until someone
+    # notices and saves the resource, which is the other way core's cache scope rolls.
+    def invalidate_hyperv_cache(*keys)
+      keys.compact.uniq.each do |key|
+        Rails.logger.info "Dropping the cached Hyper-V answer for #{key} on #{name}"
+        cache.delete(key)
+      end
+    end
+
+    # The node list is the cached answer the cluster can prove wrong: a role is owned
+    # by a node of this cluster by definition, so an owner the list does not name means
+    # the cluster has a node Foreman has not been told about. The names are read from
+    # the cache alone — checking against a fresh host read would answer the question
+    # with the thing being checked. The hypervisor key is deliberately not touched: it
+    # holds the endpoint node's own attributes, which a role moving to another node says
+    # nothing about.
+    def drop_hypervisor_list_unless_named(node_name)
+      return if node_name.blank?
+
+      key = hypervisors_cache_key
+      cached = cache.read(key)
+      return if cached.blank?
+
+      names = Array(cached).map { |attrs| attrs[:name] || attrs['name'] }.compact.map(&:downcase)
+      invalidate_hyperv_cache(key) unless names.include?(node_name.to_s.downcase)
+    rescue StandardError => e
+      Rails.logger.warn "The cached Hyper-V node list for #{name} could not be inspected: #{e.message.lines.first}"
     end
 
     # The shared volume a clustered machine's config and disks go on: the one its
@@ -650,6 +747,7 @@ module ForemanHyperv
       return nil unless role&.owner_node
 
       logger.info "Virtual machine #{uuid} is owned by cluster node #{role.owner_node}, reading it from there"
+      drop_hypervisor_list_unless_named(role.owner_node)
       client.servers.get(uuid, computer_name: role.owner_node)
     rescue StandardError => e
       logger.warn "Clustered lookup of virtual machine #{uuid} failed: #{e.message.lines.first}"
