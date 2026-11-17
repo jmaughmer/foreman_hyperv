@@ -258,6 +258,9 @@ module ForemanHyperv
       validate_volumes(attr)
 
       # logger.debug "Creating VM with arguments; #{attr}"
+      cluster = cluster_named(attr[:cluster_name])
+      storage = placement_storage(cluster, attr)
+
       vm = client.servers.new(
         name: attr[:name],
         computer_name: attr[:computer_name].presence || hypervisor.name,
@@ -272,8 +275,12 @@ module ForemanHyperv
       vm.create(
         # TODO: should be :VHD if image build - when image build support exists
         boot_device: attr[:boot_device].present? ? attr[:boot_device].to_sym : :NetworkAdapter,
-        path: hypervisor.virtual_machine_path
+        path: storage&.id || hypervisor.virtual_machine_path
       )
+      # The node's own disk path is the wrong drive for a clustered machine: every
+      # node has to be able to read the VHDXs, so they go under the shared volume
+      # the config was placed on, in a folder named for the machine.
+      vm.placement_path = [storage.id, vm.name].join('\\') if storage
 
       if vm.generation == :UEFI
         vm.secure_boot_enabled = attr[:secure_boot_enabled]
@@ -288,10 +295,33 @@ module ForemanHyperv
       create_interfaces(vm, attr)
       create_volumes(vm, attr)
 
+      # The role goes on last, once the machine and its disks are where every node
+      # can reach them — Add-ClusterVirtualMachineRole will not take a machine whose
+      # storage is on a local path. It runs while the machine is off, which it still
+      # is at this point, and before the start below.
+      #
+      # A machine placed into a cluster is clustered by default: on shared storage
+      # with no role it fails over as nothing at all, and leaving that out should be
+      # the explicit choice (an HA checkbox per VM is the plan for the form; until
+      # it exists, ha_enabled answers "no" and nothing else does).
+      if cluster && clusterize?(attr)
+        unless client.respond_to?(:add_cluster_virtual_machine_role)
+          raise Foreman::Exception, 'Placing a virtual machine in a cluster needs a fog-hyperv that can add cluster roles'
+        end
+
+        client.add_cluster_virtual_machine_role(id: vm.id, computer_name: vm.computer_name)
+        role_added = true
+      end
+
       vm.start if start
       vm
     rescue StandardError
       if vm&.persisted?
+        # The role owns the machine's config and disks the way the node does not:
+        # taking the machine apart without taking the role apart first leaves the
+        # cluster trying to start a machine that is gone (and fog's own disk teardown
+        # ends up fighting the cluster over the files — TEST-RESULTS finding 22).
+        remove_cluster_role(vm) if role_added
         vm.stop
         vm.hard_drives.each { |hdd| hdd.destroy(underlying: true) }
         vm.destroy(vm.path.end_with?(vm.name))
@@ -339,8 +369,30 @@ module ForemanHyperv
       vm
     end
 
+    # Core's find_vm_by_uuid asks the endpoint for the machine, and Get-VM answers
+    # for the machines registered on the machine it ran on and nothing else. That is
+    # enough on a stand-alone host; on a cluster it goes stale the moment a role
+    # moves — the machine is the same GUID, it is just on another node now, and the
+    # endpoint can no longer see it. Every action on a machine starts with this
+    # lookup, so when the endpoint's answer fails, ask the cluster which node owns
+    # the machine and ask that node. Whatever the endpoint says stands.
+    def find_vm_by_uuid(uuid)
+      super
+    rescue ActiveRecord::RecordNotFound, Fog::Errors::NotFound, Fog::Hyperv::Errors::PSError => e
+      vm = vm_from_cluster_owner(uuid)
+      raise e unless vm
+
+      vm
+    end
+
     def destroy_vm(uuid)
       vm = find_vm_by_uuid(uuid)
+      # A role keeps its claim on the machine's config and disks after the node
+      # itself has stopped caring: take it out first, or the cluster is left holding
+      # a role for a machine that is gone. (Whether Remove alone takes a running role
+      # offline, or the role wants a Stop first, is the lab's to confirm — vm.stop
+      # below covers the power state either way.)
+      remove_cluster_role(vm) if vm.respond_to?(:clustered?) && vm.clustered?
       vm.stop turn_off: true
       vm.hard_drives.each { |hdd| hdd.destroy(underlying: true) }
       # TODO: Remove the empty VM folder
@@ -535,6 +587,62 @@ module ForemanHyperv
 
     def api_networks(list)
       list.map { |switch| ApiNetwork.new(switch.name, switch.id, nil, switch.name, nil) }
+    end
+
+    # The shared volume a clustered machine's config and disks go on: the one its
+    # volumes asked for (the volumes of a machine share one folder, so the first
+    # one named wins), or the cluster's first volume when nothing was named. Raising
+    # on a volume that is not there — silently placing onto a different one than the
+    # user asked for is how machines end up on the wrong storage.
+    def placement_storage(cluster, attr)
+      return nil unless cluster
+
+      domains = available_storage_domains(cluster.id)
+      raise Foreman::Exception, "Cluster #{cluster.name} has no shared volumes to place a virtual machine on" if domains.empty?
+
+      asked = nested_attributes_for(:volumes, attr[:volumes_attributes]).map { |vol| vol[:datastore] }.compact.first
+      return domains.first unless asked
+
+      domains.detect { |domain| domain.name == asked || domain.id == asked } ||
+        raise(Foreman::Exception, "Cluster #{cluster.name} has no shared volume named #{asked}")
+    end
+
+    # A machine placed into a cluster is clustered by default; the planned HA
+    # checkbox is the way to opt out, and until the form has one, only ha_enabled=0
+    # (API and hammer) says so.
+    def clusterize?(attr)
+      attr[:ha_enabled].to_s != '0'
+    end
+
+    # Takes the clustered role off a machine, leaving the machine itself alone. A
+    # role the cluster will not give up stops the teardown rather than continuing
+    # under it: deleting a machine whose role still points at its files leaves the
+    # cluster holding a claim on storage that no longer describes anything, which is
+    # worse to clean up than a machine that refused to delete.
+    def remove_cluster_role(vm)
+      return unless client.respond_to?(:remove_cluster_virtual_machine_role)
+
+      node = vm.respond_to?(:owner_node) ? vm.owner_node : vm.computer_name
+      client.remove_cluster_virtual_machine_role(id: vm.id, computer_name: node)
+    rescue StandardError => e
+      raise Foreman::Exception, "Refusing to delete a clustered virtual machine while the cluster still holds its role: #{e.message.lines.first}"
+    end
+
+    # The machine as the node that owns it right now sees it, or nil when no cluster
+    # role claims it — the whole point being the case where the endpoint no longer
+    # answers for it.
+    def vm_from_cluster_owner(uuid)
+      return nil unless client.respond_to?(:cluster_virtual_machine_roles) &&
+                        client.respond_to?(:supports_clusters?) && client.supports_clusters?
+
+      role = [client.cluster_virtual_machine_roles.all(vm_id: uuid)].flatten.compact.first
+      return nil unless role&.owner_node
+
+      logger.info "Virtual machine #{uuid} is owned by cluster node #{role.owner_node}, reading it from there"
+      client.servers.get(uuid, computer_name: role.owner_node)
+    rescue StandardError => e
+      logger.warn "Clustered lookup of virtual machine #{uuid} failed: #{e.message.lines.first}"
+      nil
     end
 
     def validate_vm(attr, new: false)
