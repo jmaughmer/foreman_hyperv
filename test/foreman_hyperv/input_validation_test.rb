@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'test_helper'
+require 'active_support/test_case'
 
 # The two refusal classes live under app/ and autoload inside a booted Foreman
 # app; the pure validator tests supply stand-ins when the app is not booted,
@@ -10,7 +11,11 @@ unless ForemanHyperv.const_defined?(:UnsafeIdentifier)
   ForemanHyperv.const_set(:OperationRefused, Class.new(StandardError))
 end
 
-class InputValidationTest < Minitest::Test
+class InputValidationTest < ActiveSupport::TestCase
+  # Foreman's own test helper ships assert_not; bare ActiveSupport stops at
+  # assert_not_equal and the plugin's minimal helper ships neither, so this
+  # one alias is owned here and the file runs in every one of those worlds.
+  alias_method :assert_not, :refute
   IV = ForemanHyperv::InputValidation
 
   # v4 GUID — the shape fog's own constant demands.

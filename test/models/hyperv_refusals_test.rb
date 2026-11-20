@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'test_helper'
+require 'active_support/test_case'
 
 # Model-level refusals: the seven sites, the URL VM id, the edit path, and the
 # promise that no fog call ever carries the user's string. These need a booted
@@ -28,7 +29,10 @@ if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
   require 'fog/hyperv/compute/models/server'
 end
 
-class HypervRefusalsTest < Minitest::Test
+# ActiveSupport::TestCase (not bare Minitest) so the assert_not_* family the
+# Foreman style demands actually resolves; mocha's API lands on subclasses
+# the same way it did on the plain one.
+class HypervRefusalsTest < ActiveSupport::TestCase
   VALID_GUID = '94f8b7b0-2a1d-4a1d-9f2e-6c0f1d2e3a4b'
   OTHER_GUID = '11b62f52-3c60-4b8e-a5d1-8f2b7c9d0e41'
 
