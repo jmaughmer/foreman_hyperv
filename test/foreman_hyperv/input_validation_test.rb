@@ -15,7 +15,7 @@ class InputValidationTest < ActiveSupport::TestCase
   # Foreman's own test helper ships assert_not; bare ActiveSupport stops at
   # assert_not_equal and the plugin's minimal helper ships neither, so this
   # one alias is owned here and the file runs in every one of those worlds.
-  alias_method :assert_not, :refute
+  alias assert_not refute
   IV = ForemanHyperv::InputValidation
 
   # v4 GUID — the shape fog's own constant demands.
