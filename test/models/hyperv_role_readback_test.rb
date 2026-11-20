@@ -320,7 +320,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
 
     assert_same vm, result
     assert_equal 1, fog.servers.new_calls.size,
-                 'the create must build its machine through fog\'s servers collection'
+                 'the create must build its machine through the fog servers collection'
     assert_equal VM_NAME, fog.servers.new_calls.first[:name]
     assert_includes vm.calls, :start, 'a proven role must not strand the create before its start'
     assert_equal 1, fog.role_calls.size, 'the first proof ends the retries'
