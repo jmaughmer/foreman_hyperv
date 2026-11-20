@@ -1032,8 +1032,17 @@ module ForemanHyperv
         'to join the cluster and the outcome is unproven (%<reason>s). Left untouched: machine, disks, ' \
         'role. An operator must reconcile it by hand.',
         uuid: strand_param(vm&.id), name: strand_param(vm&.name), path: strand_param(vm&.path),
-        reason: error ? "#{strand_param(error.class.name)}: #{sanitize_text(error.message.to_s.lines.first)}" : 'readback-empty'
+        reason: strand_reason(error)
       )
+    end
+
+    # Either the send's own first line, or the fact that no readback ever
+    # answered. Both go through the sanitizer, so neither can carry a percent
+    # sign or a control character into the log line.
+    def strand_reason(error)
+      return 'readback-empty' unless error
+
+      "#{strand_param(error.class.name)}: #{sanitize_text(error.message.to_s.lines.first)}"
     end
 
     # The template and params are handed to Foreman::Exception, which sprintfs

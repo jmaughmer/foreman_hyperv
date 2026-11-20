@@ -27,9 +27,13 @@ require FOREMAN_BOOT if FOREMAN_BOOT && !(defined?(Rails) && Rails.application)
 require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 
 # ActiveSupport::TestCase (not bare Minitest) because these cover model-level
-# semantics with Active Record compute resources. Assertions use the native
-# refute_* family: the assert_not_* spellings are Foreman-only aliases.
+# semantics with Active Record compute resources. Rails/RefuteMethods in this
+# repo's RuboCop prefers the assert_not_* family over refute_*: assert_not_includes
+# ships with ActiveSupport itself, and bare assert_not ships with Foreman's test
+# helper, so it is aliased here for the same reason the sister suite aliases it.
 class HypervRoleReadbackTest < ActiveSupport::TestCase
+  alias assert_not refute
+
   STRAND_GUID = '94f8b7b0-2a1d-4a1d-9f2e-6c0f1d2e3a4b'
   VM_NAME = 'plg21a-vm'
 
@@ -204,8 +208,9 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
       name: 'lab-cr', url: 'http://hv-node1.lab.maughmer.net:5985/wsman', user: 'u', password: 'p'
     )
     cr.stubs(:client).returns(fog)
-    cr.stubs(:hypervisor).returns(stub('hypervisor', name: 'hv-node1.lab.maughmer.net',
-                                       virtual_machine_path: 'C:\\VMs'))
+    cr.stubs(:hypervisor).returns(
+      stub('hypervisor', name: 'hv-node1.lab.maughmer.net', virtual_machine_path: 'C:\\VMs')
+    )
     cr.stubs(:create_allowed?).returns(true)
     cr.stubs(:cluster_named).returns(stub('cluster'))
     cr.stubs(:placement_storage).returns(nil)
@@ -247,11 +252,11 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     fog.role_calls.each { |filters| assert_equal STRAND_GUID, filters[:vm_id] }
 
     assert_includes vm.calls, :create
-    refute_includes vm.calls, :stop
-    refute_includes vm.calls, :start
-    refute(vm.calls.any? { |call| call.is_a?(Array) && call.first == :destroy },
-           'an indeterminate create must never destroy the machine')
-    refute(vm.calls.include?(:hard_drives), 'must not even enumerate drives in order to delete them')
+    assert_not_includes vm.calls, :stop
+    assert_not_includes vm.calls, :start
+    assert_not vm.calls.any? { |call| call.is_a?(Array) && call.first == :destroy },
+               'an indeterminate create must never destroy the machine'
+    assert_not vm.calls.include?(:hard_drives), 'must not even enumerate drives to delete them'
     assert_empty fog.teardown_calls, 'no fog teardown call may reach the client on an indeterminate create'
 
     # The strand record: operator-visible, quoting the failure in safe text.
@@ -270,8 +275,8 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     assert_includes message, STRAND_GUID
     assert_includes message, 'Fog::JSON::DecodeError'
     assert_includes message, 'could not parse reply', 'the first line survives, sanitized'
-    refute_includes message, '%'
-    refute_includes message, "\e", 'terminal escapes must not reach the log line or the UI'
+    assert_not_includes message, '%'
+    assert_not_includes message, "\e", 'terminal escapes must not reach the log line or the UI'
     assert_includes message, 'could not parse reply: s and',
                     'the percent token inside the quoted first line is neutralised, the text survives'
   end
@@ -292,8 +297,8 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
         cr.create_vm(create_attrs)
       end
       assert_includes strand.message, failure.class.name
-      refute_includes vm.calls, :stop
-      refute(vm.calls.any? { |call| call.is_a?(Array) && call.first == :destroy })
+      assert_not_includes vm.calls, :stop
+      assert_not(vm.calls.any? { |call| call.is_a?(Array) && call.first == :destroy })
       assert_empty fog.teardown_calls
       assert_equal 3, fog.role_calls.size
     end
@@ -309,7 +314,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     strand = assert_raises(ForemanHyperv::StrandIndeterminate) { cr.create_vm(create_attrs) }
 
     assert_equal 3, fog.role_calls.size
-    refute(vm.calls.include?(:stop))
+    assert_not vm.calls.include?(:stop)
     assert_empty fog.teardown_calls
     assert_includes strand.message, 'Fog::Hyperv::Errors::ServiceError'
     assert(log.warnings.any? { |line| line.include?('cluster role strand') })
@@ -330,7 +335,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     assert_equal VM_NAME, fog.servers.new_calls.first[:name]
     assert_includes vm.calls, :start, 'a proven role must not strand the create before its start'
     assert_equal 1, fog.role_calls.size, 'the first proof ends the retries'
-    refute(log.warnings.any? { |line| line.include?('cluster role strand') })
+    assert_not(log.warnings.any? { |line| line.include?('cluster role strand') })
     assert_empty fog.teardown_calls
   end
 
@@ -355,10 +360,10 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     strand = assert_raises(ForemanHyperv::StrandIndeterminate) { cr.create_vm(create_attrs) }
 
     assert_equal 3, fog.role_calls.size
-    refute(vm.calls.include?(:stop))
+    assert_not vm.calls.include?(:stop)
     assert_empty fog.teardown_calls
     assert_includes strand.message, 'readback-empty'
-    refute_includes strand.message, '%'
+    assert_not_includes strand.message, '%'
     assert(log.warnings.any? { |line| line.include?('readback-empty') })
   end
 
@@ -374,7 +379,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     assert_raises(ForemanHyperv::StrandIndeterminate) { cr.create_vm(create_attrs) }
     assert_equal 3, fog.role_calls.size
     assert_empty fog.teardown_calls
-    refute(vm.calls.include?(:stop))
+    assert_not vm.calls.include?(:stop)
   end
 
   # --- retry shape ------------------------------------------------------------
@@ -401,8 +406,8 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     cr, _fog, _vm, _log = build_cr(vm: vm, add_defined: false)
 
     error = assert_raises(Foreman::Exception) { cr.create_vm(create_attrs) }
-    refute_kind_of ForemanHyperv::StrandIndeterminate, error,
-                   'a pre-send refusal is deterministic, not a strand'
+    assert_not error.is_a?(ForemanHyperv::StrandIndeterminate),
+               'the deterministic pre-send refusal is not a strand'
     assert_includes vm.calls, :stop, 'deterministic failures keep rollback'
     assert(vm.calls.any? { |call| call.is_a?(Array) && call.first == :destroy },
            'deterministic failures keep rollback')
@@ -412,7 +417,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
   # of: an indeterminate create may never be folded into a reported success.
   def test_strand_class_sits_outside_the_folding_rescues
     assert_operator ForemanHyperv::StrandIndeterminate, :<, Foreman::Exception
-    refute_operator ForemanHyperv::StrandIndeterminate, :<, ActiveRecord::RecordNotFound
-    refute_operator ForemanHyperv::StrandIndeterminate, :<, Fog::Errors::NotFound
+    assert_not ForemanHyperv::StrandIndeterminate < ActiveRecord::RecordNotFound
+    assert_not ForemanHyperv::StrandIndeterminate < Fog::Errors::NotFound
   end
 end
