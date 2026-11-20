@@ -912,7 +912,11 @@ module ForemanHyperv
       node = vm.respond_to?(:owner_node) ? vm.owner_node : vm.computer_name
       client.remove_cluster_virtual_machine_role(id: vm.id, computer_name: node)
     rescue StandardError => e
-      raise Foreman::Exception, "Refusing to delete a clustered virtual machine while the cluster still holds its role: #{e.message.lines.first}"
+      # A fog failure's own text can carry the remote command line, including
+      # percent signs, and Foreman::Exception sprintfs its message again when
+      # it renders: the class is quoted, the text is not.
+      logger.warn "The Hyper-V cluster would not release the role: #{e.class}"
+      raise Foreman::Exception, 'Refusing to delete a clustered virtual machine while the cluster still holds its role'
     end
 
     # The machine as the node that owns it right now sees it, or nil when no cluster
