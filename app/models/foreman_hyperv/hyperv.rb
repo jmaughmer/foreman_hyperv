@@ -4,6 +4,21 @@ module ForemanHyperv
   class Hyperv < ::ComputeResource
     include ComputeResourceCaching
 
+    # The enablement condition, quoted verbatim from the reviewed plan at every
+    # site that refuses one of these operations, so the operator who reads the
+    # flash sees the same contract the reviewers did: the refusal lifts by a
+    # merged PR once named lab rows have landed, never by configuration.
+    REFUSAL_SENTENCE = 'All disk removals and VM destroys on cluster compute resources are refused in code until FOG-10, PLG-15b and PLG-21b have merged and (m) and its (k″) rows have landed; removal based solely on an absent role additionally requires a named method that proves node-set completeness; enablement is a code PR, not a configuration.'
+
+    CREATE_REFUSAL = ('Creating virtual machines is refused in every Hyper-V compute resource in this '
+                      'plugin version. ' + REFUSAL_SENTENCE)
+
+    DESTROY_REFUSAL = ('Destroying virtual machines is refused in every Hyper-V compute resource in this '
+                       'plugin version. ' + REFUSAL_SENTENCE)
+
+    DISK_REFUSAL = ('Removing disks from a virtual machine is refused in every Hyper-V compute resource '
+                    'in this plugin version. ' + REFUSAL_SENTENCE)
+
     validates :url, :user, :password, presence: true
     after_validation :validate_connectivity unless Rails.env.test?
 
@@ -96,10 +111,15 @@ module ForemanHyperv
     end
     alias hosts available_hypervisors
 
+    # The public accessor the VM form and the API use. Routed through
+    # cluster_named, which compares a cached listing in Ruby: fog's
+    # clusters.get(name) interpolated the name into a Get-Cluster filter, so
+    # this was the one public method a view-permission parameter could push
+    # into the builder by itself. A name that is not a member now answers nil
+    # — the form falls back to the resource's own hosts — where it used to
+    # raise Fog::Errors::NotFound and error the page.
     def cluster(name)
-      return nil unless name
-
-      client.clusters.get name
+      cluster_named(name)
     end
 
     def clusters
@@ -230,6 +250,12 @@ module ForemanHyperv
     end
 
     def new_vm(attr = {})
+      # Before super: core's new_vm mass-assigns this whole hash onto the fog
+      # model, and the fog_extensions cluster_name= setter asks the host during
+      # assignment. Nothing of the user's has reached fog by the time these two
+      # lines finish, and nothing hostile gets past them.
+      ForemanHyperv::InputValidation.validate_hash!(attr, context: :vm)
+      validate_placement!(attr)
       apply_firmware_attributes(attr)
       attr.delete :id
 
@@ -258,6 +284,13 @@ module ForemanHyperv
     end
 
     def create_vm(attr = {})
+      # PLG-15: machine creates are refused on every Hyper-V compute resource,
+      # as the very first act — before defaults, before validation, before any
+      # fog call. Input is still validated first so a hostile hash hears about
+      # the string, not just about the refusal.
+      ForemanHyperv::InputValidation.validate_hash!(attr, context: :vm)
+      raise ForemanHyperv::OperationRefused, CREATE_REFUSAL unless create_allowed?
+
       attr = vm_instance_defaults.merge(attr.to_hash.deep_symbolize_keys)
       attr.delete :computer_name if attr[:computer_name].blank?
       start = Foreman::Cast.to_bool(attr.delete(:start))
@@ -342,7 +375,18 @@ module ForemanHyperv
     end
 
     def save_vm(uuid, web_attr)
+      ForemanHyperv::InputValidation.validate_id!(uuid)
       attr = web_attr.deep_symbolize_keys
+      ForemanHyperv::InputValidation.validate_hash!(attr, context: :vm)
+      # Disk removals are refused everywhere this version runs, checked on the
+      # submitted form before anything is fetched: the fog call that answers
+      # hard_drives.get(id) interpolates the id, and the destroy behind it is
+      # the Remove-Item path the wildcard campaign measured.
+      refuse_disk_removal!(attr)
+      # Placement strings the edit form round-trips (computer_name, cluster_name
+      # and per-volume datastore) must still be members of what the hypervisor
+      # reports, character allowlist first, membership read unfiltered.
+      validate_placement!(attr)
       attr.delete :start
 
       validate_vm(attr)
@@ -388,6 +432,10 @@ module ForemanHyperv
     # lookup, so when the endpoint's answer fails, ask the cluster which node owns
     # the machine and ask that node. Whatever the endpoint says stands.
     def find_vm_by_uuid(uuid)
+      # The URL VM id is a view-permission surface, and fog's Servers#get sends
+      # any non-GUID identifier down its name path — straight into the builder
+      # sink. GUID-only, before super, before the cluster-owner lookup.
+      ForemanHyperv::InputValidation.validate_id!(uuid)
       super
     rescue ActiveRecord::RecordNotFound, Fog::Errors::NotFound, Fog::Hyperv::Errors::PSError => e
       vm = vm_from_cluster_owner(uuid)
@@ -397,6 +445,14 @@ module ForemanHyperv
     end
 
     def destroy_vm(uuid)
+      # Refused outright (PLG-15) — and the id is checked first so a hostile id
+      # raises rather than arriving below, where the rescue turns NotFound into
+      # a successful delete: reporting a refused destroy as success would drop
+      # the host record and orphan the machine. UnsafeIdentifier and
+      # OperationRefused are outside that rescue by class.
+      ForemanHyperv::InputValidation.validate_id!(uuid)
+      raise ForemanHyperv::OperationRefused, DESTROY_REFUSAL unless destroy_allowed?
+
       vm = find_vm_by_uuid(uuid)
       # A role keeps its claim on the machine's config and disks after the node
       # itself has stopped caring: take it out first, or the cluster is left holding
@@ -469,10 +525,12 @@ module ForemanHyperv
     # end
 
     def new_interface(attr = {})
+      ForemanHyperv::InputValidation.validate_hash!(attr, context: :nic)
       Fog::Hyperv::Compute::NetworkAdapter.new attr
     end
 
     def new_volume(attr = {})
+      ForemanHyperv::InputValidation.validate_hash!(attr, context: :hdd)
       basename = attr.delete(:basename) { 'Disk' }
       size = attr.delete(:size)
 
@@ -480,7 +538,12 @@ module ForemanHyperv
       Fog::Hyperv::Compute::HardDrive.new vhd: vhd, **attr
     end
 
+    # No caller in this plugin, and the fog model's mass-assign is raw, so this
+    # is validated rather than deleted: a core form or API surface that grows a
+    # cdrom path today would otherwise walk straight past every guard the other
+    # seven sites have.
     def new_cdrom(attr = {})
+      ForemanHyperv::InputValidation.validate_hash!(attr, context: :dvd)
       Fog::Hyperv::Compute::DvdDrive.new attr
     end
 
@@ -538,6 +601,99 @@ module ForemanHyperv
     end
 
     private
+
+    # PLG-15's refusal switchboard. Every answer here is the current code state
+    # of this plugin version — creates, destroys and disk removals are refused
+    # everywhere, clusters and stand-alone hosts alike — and lifting one is a
+    # reviewed PR whose gate the refusal messages quote, never a setting. They
+    # read as predicates rather than bare raises so the code below each guard
+    # stays live for the reader: it is the path that runs the day a guard
+    # flips, not dead text.
+    def create_allowed?
+      false
+    end
+
+    def destroy_allowed?
+      false
+    end
+
+    def disk_removal_allowed?
+      false
+    end
+
+    # Where a machine (or a disk of one) is asked to go, checked against what
+    # the hypervisor itself named — never by asking the hypervisor about the
+    # string. computer_name must be the endpoint host, the name the host gives
+    # itself, or a name on the cluster's unfiltered Get-ClusterNode list;
+    # cluster_name must be a member of the cached cluster listing; a volume's
+    # datastore must be one of that cluster's shared volumes. The character
+    # allowlist already ran (InputValidation is the first act at every site),
+    # so the strings reaching the fog reads below are ours, not the user's, and
+    # every read is unfiltered — a membership read IS a fog call, and it is the
+    # one the user's string never enters.
+    #
+    # Fail closed: a membership read that does not answer refuses the
+    # operation. Falling back to "probably fine" is how a machine gets placed
+    # somewhere nobody checked.
+    def validate_placement!(attr)
+      # Form hashes arrive with string keys and API hashes with symbols; the
+      # membership reads below are keyed by symbol either way.
+      attr = attr.to_hash.deep_symbolize_keys if attr.respond_to?(:to_hash)
+
+      computer = attr[:computer_name].presence
+      if computer && placement_target_names.none? { |host| host == computer.to_s.downcase }
+        raise ForemanHyperv::OperationRefused,
+              'Refusing to place a machine on a computer this compute resource has not seen its own host or cluster report; nothing was asked of the host with that name'
+      end
+
+      cluster_name = attr[:cluster_name].presence
+      if cluster_name && cluster_named(cluster_name).nil?
+        raise ForemanHyperv::OperationRefused,
+              'Refusing to place a machine in a cluster this compute resource has not read from its endpoint; nothing was asked of the host with that name'
+      end
+
+      asked_volumes = nested_attributes_for(:volumes, attr[:volumes_attributes]).map { |vol| vol[:datastore] }.compact
+      return if asked_volumes.empty?
+
+      cluster = cluster_name ? cluster_named(cluster_name) : endpoint_cluster
+      domains = cluster ? available_storage_domains(cluster.id) : []
+      asked_volumes.each do |asked|
+        next if domains.any? { |domain| domain.name == asked || domain.id == asked }
+
+        raise ForemanHyperv::OperationRefused,
+              'Refusing to place a disk on a shared volume this compute resource has not read from its cluster; nothing was asked of the host with that name'
+      end
+    end
+
+    # The node names a machine may be placed on: the configured endpoint, the
+    # name the host gives itself, and every node of the cluster it belongs to.
+    # Read fresh rather than cached — placement is exactly the decision a stale
+    # list gets wrong — and a failed read is a refusal, not an empty set.
+    def placement_target_names
+      names = [uri.host]
+      begin
+        names << hypervisor.name
+        if (cluster = endpoint_cluster)
+          names.concat(cluster.nodes.map(&:name))
+        end
+      rescue StandardError => e
+        raise ForemanHyperv::OperationRefused,
+              "Refusing to choose a placement target while the hypervisor could not report its own nodes: #{e.message.lines.first}"
+      end
+      names.compact.map { |host| host.to_s.downcase }
+    end
+
+    # Disk removals are refused on every Hyper-V compute resource, checked on
+    # the submitted hash so the refusal lands before any lookup — and carrying
+    # the canonical enablement sentence in the message.
+    def refuse_disk_removal!(attr)
+      return if disk_removal_allowed?
+
+      volumes = nested_attributes_for(:volumes, attr[:volumes_attributes])
+      return if volumes.none? { |vol| vol[:_delete].to_s == '1' }
+
+      raise ForemanHyperv::OperationRefused, DISK_REFUSAL
+    end
 
     def _clusters
       return [] if client.respond_to?(:supports_clusters?) && !client.supports_clusters?
@@ -740,6 +896,11 @@ module ForemanHyperv
     # role claims it — the whole point being the case where the endpoint no longer
     # answers for it.
     def vm_from_cluster_owner(uuid)
+      # Checked before the StandardError rescue below can fold it into nil: a
+      # hostile id must raise, not answer "no owner", and this read takes the
+      # id to fog, so GUID-only here as well (find_vm_by_uuid already refuses
+      # it; this is the same gate at the second door).
+      ForemanHyperv::InputValidation.validate_id!(uuid)
       return nil unless client.respond_to?(:cluster_virtual_machine_roles) &&
                         client.respond_to?(:supports_clusters?) && client.supports_clusters?
 
@@ -750,6 +911,8 @@ module ForemanHyperv
       drop_hypervisor_list_unless_named(role.owner_node)
       client.servers.get(uuid, computer_name: role.owner_node)
     rescue StandardError => e
+      raise if e.is_a?(ForemanHyperv::UnsafeIdentifier)
+
       logger.warn "Clustered lookup of virtual machine #{uuid} failed: #{e.message.lines.first}"
       nil
     end
