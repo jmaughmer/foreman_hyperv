@@ -8,16 +8,32 @@ module ForemanHyperv
     # site that refuses one of these operations, so the operator who reads the
     # flash sees the same contract the reviewers did: the refusal lifts by a
     # merged PR once named lab rows have landed, never by configuration.
-    REFUSAL_SENTENCE = 'All disk removals and VM destroys on cluster compute resources are refused in code until FOG-10, PLG-15b and PLG-21b have merged and (m) and its (k″) rows have landed; removal based solely on an absent role additionally requires a named method that proves node-set completeness; enablement is a code PR, not a configuration.'
+    # Each is one run of adjacent string literals joined by explicit line
+    # continuations: a multiline literal list ending in `+ CONST` silently
+    # drops its leading fragments on the parser this plugin is built with
+    # (measured on Ruby 3.0.7), and a refusal whose sentence arrives truncated
+    # quotes the reviewed plan wrongly. No shared REFUSAL_SENTENCE either, so
+    # no literal-plus-constant concatenation anywhere here.
+    CREATE_REFUSAL = 'Creating virtual machines is refused in every Hyper-V compute resource in this ' \
+                     'plugin version. All disk removals and VM destroys on cluster compute resources ' \
+                     'are refused in code until FOG-10, PLG-15b and PLG-21b have merged and (m) and ' \
+                     'its (k″) rows have landed; removal based solely on an absent role additionally ' \
+                     'requires a named method that proves node-set completeness; enablement is a code ' \
+                     'PR, not a configuration.'
 
-    CREATE_REFUSAL = ('Creating virtual machines is refused in every Hyper-V compute resource in this '
-                      'plugin version. ' + REFUSAL_SENTENCE)
+    DESTROY_REFUSAL = 'Destroying virtual machines is refused in every Hyper-V compute resource in this ' \
+                      'plugin version. All disk removals and VM destroys on cluster compute resources ' \
+                      'are refused in code until FOG-10, PLG-15b and PLG-21b have merged and (m) and ' \
+                      'its (k″) rows have landed; removal based solely on an absent role additionally ' \
+                      'requires a named method that proves node-set completeness; enablement is a code ' \
+                      'PR, not a configuration.'
 
-    DESTROY_REFUSAL = ('Destroying virtual machines is refused in every Hyper-V compute resource in this '
-                       'plugin version. ' + REFUSAL_SENTENCE)
-
-    DISK_REFUSAL = ('Removing disks from a virtual machine is refused in every Hyper-V compute resource '
-                    'in this plugin version. ' + REFUSAL_SENTENCE)
+    DISK_REFUSAL = 'Removing disks from a virtual machine is refused in every Hyper-V compute resource ' \
+                   'in this plugin version. All disk removals and VM destroys on cluster compute ' \
+                   'resources are refused in code until FOG-10, PLG-15b and PLG-21b have merged and ' \
+                   '(m) and its (k″) rows have landed; removal based solely on an absent role ' \
+                   'additionally requires a named method that proves node-set completeness; ' \
+                   'enablement is a code PR, not a configuration.'
 
     validates :url, :user, :password, presence: true
     after_validation :validate_connectivity unless Rails.env.test?
@@ -643,16 +659,18 @@ module ForemanHyperv
       computer = attr[:computer_name].presence
       if computer && placement_target_names.none? { |host| host == computer.to_s.downcase }
         raise ForemanHyperv::OperationRefused,
-              'Refusing to place a machine on a computer this compute resource has not seen its own host or cluster report; nothing was asked of the host with that name'
+              'Refusing to place a machine on a computer this compute resource has not seen its own ' \
+              'host or cluster report; nothing was asked of the host with that name'
       end
 
       cluster_name = attr[:cluster_name].presence
       if cluster_name && cluster_named(cluster_name).nil?
         raise ForemanHyperv::OperationRefused,
-              'Refusing to place a machine in a cluster this compute resource has not read from its endpoint; nothing was asked of the host with that name'
+              'Refusing to place a machine in a cluster this compute resource has not read from its ' \
+              'endpoint; nothing was asked of the host with that name'
       end
 
-      asked_volumes = nested_attributes_for(:volumes, attr[:volumes_attributes]).map { |vol| vol[:datastore] }.compact
+      asked_volumes = nested_attributes_for(:volumes, attr[:volumes_attributes]).filter_map { |vol| vol[:datastore] }
       return if asked_volumes.empty?
 
       cluster = cluster_name ? cluster_named(cluster_name) : endpoint_cluster
@@ -661,7 +679,8 @@ module ForemanHyperv
         next if domains.any? { |domain| domain.name == asked || domain.id == asked }
 
         raise ForemanHyperv::OperationRefused,
-              'Refusing to place a disk on a shared volume this compute resource has not read from its cluster; nothing was asked of the host with that name'
+              'Refusing to place a disk on a shared volume this compute resource has not read from ' \
+              'its cluster; nothing was asked of the host with that name'
       end
     end
 
@@ -670,15 +689,19 @@ module ForemanHyperv
     # Read fresh rather than cached — placement is exactly the decision a stale
     # list gets wrong — and a failed read is a refusal, not an empty set.
     def placement_target_names
-      names = [uri.host]
+      names = []
       begin
+        names << URI.parse(url.to_s).host
         names << hypervisor.name
         if (cluster = endpoint_cluster)
           names.concat(cluster.nodes.map(&:name))
         end
       rescue StandardError => e
+        # The fog error's own text can echo the remote command line, so it is
+        # logged as its class only and never quoted back to the user.
+        logger.warn "Refusing to read placement targets: the membership read answered #{e.class}"
         raise ForemanHyperv::OperationRefused,
-              "Refusing to choose a placement target while the hypervisor could not report its own nodes: #{e.message.lines.first}"
+              'Refusing to choose a placement target while the hypervisor could not report its own nodes'
       end
       names.compact.map { |host| host.to_s.downcase }
     end

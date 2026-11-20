@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require 'test_helper'
-require 'ostruct'
 
 # Model-level refusals: the seven sites, the URL VM id, the edit path, and the
 # promise that no fog call ever carries the user's string. These need a booted
@@ -13,9 +12,21 @@ ENV['RAILS_ENV'] = 'test'
 FOREMAN_BOOT = [
   File.expand_path('../../config/environment.rb', __dir__),
   File.expand_path('../../../config/environment.rb', __dir__),
-  File.expand_path('../../../../config/environment.rb', __dir__),
+  File.expand_path('../../../../config/environment.rb', __dir__)
 ].find { |path| File.exist?(path) }
 require FOREMAN_BOOT if FOREMAN_BOOT && !(defined?(Rails) && Rails.application)
+
+if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
+  # The device constructors below build the real fog model classes. fog only
+  # requires them when a real compute driver is instantiated — which these
+  # refusal tests deliberately never do — so load exactly these models.
+  require 'fog/hyperv'
+  require 'fog/hyperv/compute/models/network_adapter'
+  require 'fog/hyperv/compute/models/vhd'
+  require 'fog/hyperv/compute/models/hard_drive'
+  require 'fog/hyperv/compute/models/dvd_drive'
+  require 'fog/hyperv/compute/models/server'
+end
 
 class HypervRefusalsTest < Minitest::Test
   VALID_GUID = '94f8b7b0-2a1d-4a1d-9f2e-6c0f1d2e3a4b'
@@ -57,7 +68,7 @@ class HypervRefusalsTest < Minitest::Test
 
   def setup
     unless FOREMAN_BOOT || (defined?(Rails) && Rails.application)
-      skip 'No Foreman app (config/environment.rb) around this plugin checkout; these tests run from a booted Foreman (rake test:plugins).'
+      skip 'Needs a booted Foreman (rake test:plugins): these cover model-level refusals.'
     end
     begin
       require 'mocha/minitest'
@@ -70,7 +81,7 @@ class HypervRefusalsTest < Minitest::Test
       name: 'lab-cr', url: 'http://hv-node1.lab.maughmer.net:5985/wsman', user: 'u', password: 'p'
     )
     @cr.stubs(:client).returns(@fog)
-    @cr.stubs(:hypervisor).returns(OpenStruct.new(name: 'hv-node1.lab.maughmer.net'))
+    @cr.stubs(:hypervisor).returns(stub('hypervisor', name: 'hv-node1.lab.maughmer.net'))
     @cr.stubs(:endpoint_cluster).returns(nil)
     @cr.stubs(:clusters).returns([])
   end
@@ -144,7 +155,11 @@ class HypervRefusalsTest < Minitest::Test
     assert_raises(ForemanHyperv::UnsafeIdentifier) { @cr.new_cdrom(path: "x';whoami;'") }
     assert_empty @fog.calls
 
-    # Legitimate hashes are not collateral damage.
+    # Legitimate hashes are not collateral damage. The disk one runs through
+    # the real fog model classes (loaded at the top of this file), so the vhd
+    # its constructor demands is a real Vhd, handed out by a stubbed collection.
+    vhd = Fog::Hyperv::Compute::Vhd.new(basename: 'Disk 1', size: 1024)
+    @fog.stubs(:vhds).returns(stub('vhds', new: vhd))
     @cr.new_interface(name: 'Network Adapter', switch_name: 'Default Switch')
     @cr.new_volume(basename: 'Disk 1', size: 1024)
     @cr.new_cdrom(path: 'C:\\images\\app.iso')
@@ -164,26 +179,28 @@ class HypervRefusalsTest < Minitest::Test
   end
 
   def test_a_membership_read_that_will_not_answer_refuses
-    @cr.stubs(:hypervisor).raises(Fog::Hyperv::Errors::PSError, 'winrm could not complete')
+    # Not a PSError instance: fog's PSError takes a parsed command output, and
+    # what matters to the placement gate is only that a membership read failed.
+    @cr.stubs(:hypervisor).raises(Fog::Errors::Error, 'membership read did not answer')
     assert_raises(ForemanHyperv::OperationRefused) { @cr.new_vm(computer_name: 'hv-node1.lab.maughmer.net') }
     assert_empty @fog.calls
   end
 
   def test_placement_names_are_read_unfiltered_and_matched_case_insensitively
-    @cr.stubs(:endpoint_cluster).returns(OpenStruct.new(nodes: [OpenStruct.new(name: 'HV-NODE2')]))
+    @cr.stubs(:endpoint_cluster).returns(stub('cluster', nodes: [stub('node', name: 'HV-NODE2')]))
 
     names = @cr.send(:placement_target_names)
     assert_includes names, 'hv-node2'
     assert_includes names, 'hv-node1.lab.maughmer.net' # endpoint host from the URL and Get-VMHost
     # No fog call carried a user string, because none was involved: the reads
     # are the unfiltered Get-VMHost and Get-ClusterNode paths.
-    @fog.strings.each { |s| refute_includes s, '$(' }
+    @fog.strings.each { |s| assert_not_includes s, '$(' }
   end
 
   # --- the public cluster accessor ------------------------------------------
 
   def test_public_cluster_lookup_never_asks_the_host_about_the_name
-    cluster = OpenStruct.new(name: 'HVCLUSTER', id: 'cid')
+    cluster = stub('cluster', name: 'HVCLUSTER', id: 'cid')
     @cr.stubs(:clusters).returns([cluster])
 
     assert_equal cluster, @cr.cluster('HVCLUSTER')
@@ -198,7 +215,7 @@ class HypervRefusalsTest < Minitest::Test
   def test_cluster_name_assignment_reads_the_listing_and_not_the_name
     service = FogSpy.new(@fog.calls)
     listing = FogSpy.new(@fog.calls)
-    member = OpenStruct.new(name: 'HVCLUSTER', id: 'cid')
+    member = stub('cluster', name: 'HVCLUSTER', id: 'cid')
 
     fog_server = Fog::Hyperv::Compute::Server.new(service: service)
     service.stubs(:clusters).returns(listing)
@@ -210,7 +227,8 @@ class HypervRefusalsTest < Minitest::Test
     assert_raises(ForemanHyperv::OperationRefused) { fog_server.cluster_name = 'NOTACLUSTER' }
     assert_raises(ForemanHyperv::UnsafeIdentifier) { fog_server.cluster_name = "x';whoami;'" }
     # And the name never went to fog as a filter: no call carried it.
-    @fog.strings.each { |s| refute_includes s, 'whoami' }
-    refute @fog.calls.any? { |(name, _args)| name == :get }
+    @fog.strings.each { |s| assert_not_includes s, 'whoami' }
+    get_calls = @fog.calls.select { |(name, _args)| name == :get }
+    assert_empty get_calls
   end
 end

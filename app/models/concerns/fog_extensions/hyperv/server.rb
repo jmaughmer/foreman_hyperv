@@ -64,20 +64,20 @@ module FogExtensions
       # a name that is not a member, or a listing that will not read, refuses
       # the assignment rather than asking the host about the string.
       def cluster_name=(name)
-        @cluster =
-          if name.blank?
-            nil
-          else
-            wanted = name.to_s
-            ForemanHyperv::InputValidation.refuse_text!(:cluster_name, wanted)
-            found = service.clusters.all.detect do |candidate|
-              candidate.name.to_s.casecmp?(wanted) || candidate.id.to_s.casecmp?(wanted)
-            end
-            raise ForemanHyperv::OperationRefused,
-                  'Refusing to bind a machine to a cluster this compute resource has not read from its endpoint; nothing was asked of the host with that name' unless found
+        return @cluster = nil if name.blank?
 
-            found
-          end
+        wanted = name.to_s
+        ForemanHyperv::InputValidation.refuse_text!(:cluster_name, wanted)
+        found = service.clusters.all.detect do |candidate|
+          candidate.name.to_s.casecmp?(wanted) || candidate.id.to_s.casecmp?(wanted)
+        end
+        unless found
+          raise ForemanHyperv::OperationRefused,
+                'Refusing to bind a machine to a cluster this compute resource has not read from ' \
+                'its endpoint; nothing was asked of the host with that name'
+        end
+
+        @cluster = found
       end
 
       def boot_device

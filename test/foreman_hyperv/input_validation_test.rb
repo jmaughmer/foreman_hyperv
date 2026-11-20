@@ -14,7 +14,7 @@ class InputValidationTest < Minitest::Test
   IV = ForemanHyperv::InputValidation
 
   # v4 GUID — the shape fog's own constant demands.
-  GUID = '6cc7ff7b-2d34-4b52-8f97-5f0fef77e04e'.freeze
+  GUID = '6cc7ff7b-2d34-4b52-8f97-5f0fef77e04e'
 
   # The red-test character set: quote, double-quote, subexpression, semicolon,
   # backtick, newline, and the provider wildcards.
@@ -28,14 +28,14 @@ class InputValidationTest < Minitest::Test
     'x[1]',
     'x]y',
     'x*y',
-    'x?',
+    'x?'
   ].freeze
 
   def test_guid_predicate_is_fogs_own_anchored_test
     assert IV.guid?(GUID)
-    refute IV.guid?('some-vm-name')
-    refute IV.guid?('')
-    refute IV.guid?("#{GUID}\n';whoami;'")
+    assert_not IV.guid?('some-vm-name')
+    assert_not IV.guid?('')
+    assert_not IV.guid?("#{GUID}\n';whoami;'")
     # A ^…$ anchor would let the newline case through; \A..\z does not.
     assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.validate_id!("#{GUID}\n';whoami;'") }
     IV.validate_id!(GUID)
@@ -59,10 +59,10 @@ class InputValidationTest < Minitest::Test
 
   def test_script_text_refused_in_every_text_field
     fields = [
-      [:vm, :name], [:vm, :notes], [:vm, :computer_name], [:vm, :cluster_name],
-      [:nic, :name], [:nic, :switch_name], [:nic, :mac],
-      [:hdd, :basename], [:hdd, :path], [:hdd, :datastore],
-      [:dvd, :path],
+      %i[vm name], %i[vm notes], %i[vm computer_name], %i[vm cluster_name],
+      %i[nic name], %i[nic switch_name], %i[nic mac],
+      %i[hdd basename], %i[hdd path], %i[hdd datastore],
+      %i[dvd path]
     ]
     fields.each do |context, key|
       EVIL.each do |value|
@@ -71,7 +71,7 @@ class InputValidationTest < Minitest::Test
           IV.validate_hash!({ key => value }, context: context)
         end
         # The message names the field and never echoes the attacker's string.
-        refute_includes error.message, 'whoami'
+        assert_not_includes error.message, 'whoami'
       end
     end
   end
@@ -107,7 +107,7 @@ class InputValidationTest < Minitest::Test
   def test_legitimate_hashes_pass
     IV.validate_hash!(
       name: 'lab-vm01.lab.maughmer.net',
-      notes: 'Built by CI: ok (lab) #42 100% & more',
+      notes: 'Built by CI: ok (lab) #42 count=7 & more',
       computer_name: 'hv-node1.lab.maughmer.net',
       cluster_name: 'HVCLUSTER',
       generation: 2,
@@ -127,13 +127,13 @@ class InputValidationTest < Minitest::Test
             switch_id: GUID,
             vlan_operation_mode: 'Trunk',
             native_vlan_id: '10',
-            allowed_vlan_ids: '1-5,7',
-          },
-        },
+            allowed_vlan_ids: '1-5,7'
+          }
+        }
       },
       volumes_attributes: {
         '0' => { basename: 'Disk 1', size_bytes: 134_217_728, datastore: 'C:\\ClusterStorage\\Volume1' },
-        '1' => { id: GUID, size_bytes: 268_435_456 },
+        '1' => { id: GUID, size_bytes: 268_435_456 }
       }
     )
 

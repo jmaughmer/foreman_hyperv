@@ -101,11 +101,11 @@ module ForemanHyperv
     # firewall)", shared volumes are drive paths, VLAN fields are numbers,
     # ranges and comma lists.
     SAFE_NAME = /\A[\p{L}\p{N} .\-_()]+\z/
-    SAFE_HOST = /\A[\p{L}\p{N}.\-]+\z/
+    SAFE_HOST = /\A[\p{L}\p{N}.-]+\z/
     SAFE_PATH = /\A[\p{L}\p{N} .\-_\\:]+\z/
-    SAFE_MAC = /\A[0-9A-Fa-f:\-]+\z/
+    SAFE_MAC = /\A[0-9A-Fa-f:-]+\z/
     SAFE_NUMBERED = /\A[0-9,\- ]+\z/
-    SAFE_TEXT = /\A[\p{L}\p{N} .,\-_:()\/#&@!+=]+\z/
+    SAFE_TEXT = %r{\A[\p{L}\p{N} .,:_()/#&@!=+-]+\z}
 
     TEXT_BY_KEY = {
       name: SAFE_NAME,
@@ -130,7 +130,7 @@ module ForemanHyperv
       boot_device: SAFE_NAME,
       foreman_firmware: SAFE_NAME,
       firmware: SAFE_NAME,
-      firmware_type: SAFE_NAME,
+      firmware_type: SAFE_NAME
     }.freeze
 
     # An unknown key still gets a value check: the fog model guards its own key
@@ -157,7 +157,8 @@ module ForemanHyperv
         return if value.present? && guid?(value)
 
         raise ForemanHyperv::UnsafeIdentifier,
-              'A virtual machine must be addressed by the GUID Hyper-V gave it; nothing was asked of the host with this identifier'
+              'A virtual machine must be addressed by the GUID Hyper-V gave it; nothing was asked ' \
+              'of the host with this identifier'
       end
 
       # One value against its field's allowlist, for callers that validate a
@@ -168,8 +169,14 @@ module ForemanHyperv
       end
 
       # The deep walk. The hash is normalised into symbols on a copy: nothing
-      # here rewrites or forwards anything, it only decides.
-      def validate_hash!(attrs, context: :vm)
+      # here rewrites or forwards anything, it only decides. Attributes arrive
+      # either as one hash or as the keywords of the call itself — Ruby 3 does
+      # not fold lone keywords into a positional hash, so both forms are taken,
+      # never a mix.
+      def validate_hash!(attrs = nil, context: :vm, **keyword_attrs)
+        raise unsafe(:attributes) if attrs && keyword_attrs.any?
+
+        attrs = keyword_attrs if attrs.nil?
         attrs = attrs.to_hash if attrs.respond_to?(:to_hash)
         raise unsafe(:attributes) unless attrs.is_a?(Hash)
 
@@ -203,6 +210,13 @@ module ForemanHyperv
 
           return
         end
+
+        # A nested hash no model of ours describes — an unknown key under the
+        # machine, or an unknown hash under a device: the shape gate in walk has
+        # already refused keys that are not bare words, the value check owns the
+        # characters, and fog's own constructor stays the key guard one layer
+        # down (the same reasoning as the machine context above).
+        return if context == :generic
 
         # NIC/disk/DVD hashes are dispatched through send(), so the key list is
         # the fixpoint: not-on-the-list is refused whatever it would reach.
@@ -263,9 +277,16 @@ module ForemanHyperv
       end
 
       def unsafe(key)
-        ForemanHyperv::UnsafeIdentifier.new(
-          "Refusing to send this to the Hyper-V host: the value for '%{field}' is not text that field is allowed to carry" % { field: key }
-        )
+        # Hash keys arrive from user params too, so the field name is only
+        # quoted back when it is a bare word: anything else could smuggle a
+        # log line, or a stray percent sign into Foreman::Exception's later
+        # sprintf of this very message.
+        field = key.to_s
+        field = 'an unrecognised field' unless field.match?(/\A[A-Za-z0-9_]+\z/)
+        message = 'Refusing to send this to the Hyper-V host: the value for ' \
+                  '\'%<field>s\' is not text that field is allowed to carry'
+
+        ForemanHyperv::UnsafeIdentifier.new(format(message, field: field))
       end
     end
   end
