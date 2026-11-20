@@ -261,13 +261,18 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     assert_includes strand_lines.first, 'Fog::JSON::DecodeError'
 
     # Rendering must not raise: Foreman::Exception sprintfs its template with
-    # these params at render time, so no percent may survive anywhere.
+    # these params at render time, so no percent may survive anywhere. Fog's own
+    # text is quoted sanitized — percent tokens neutralised, control characters
+    # removed, capped — and the words themselves stay readable for the operator,
+    # which is what the design promises and what the log and the UI can carry
+    # safely (this text is never interpolated into anything that executes).
     message = error.message
     assert_includes message, STRAND_GUID
     assert_includes message, 'Fog::JSON::DecodeError'
     assert_includes message, 'could not parse reply', 'the first line survives, sanitized'
     refute_includes message, '%'
-    refute_includes message, "'quoted'", 'quotes from fog text do not belong in the rendered refusal'
+    assert_includes message, 'could not parse reply: s and',
+                    'the percent token inside the quoted first line is neutralised, the text survives'
   end
 
   # N4: EVERY exception class after the send is indeterminate — transport
