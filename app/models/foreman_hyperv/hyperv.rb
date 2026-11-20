@@ -71,7 +71,7 @@ module ForemanHyperv
     # Hyper-V names a machine's cluster role after the machine; the prefix is
     # what a readback falls back to when the role's VM-id property is not
     # populated (see add_cluster_role_proven).
-    ROLE_NAME_PREFIX = 'Virtual Machine '.freeze
+    ROLE_NAME_PREFIX = 'Virtual Machine '
 
     validates :url, :user, :password, presence: true
     after_validation :validate_connectivity unless Rails.env.test?
@@ -419,7 +419,7 @@ module ForemanHyperv
       # the files — TEST-RESULTS finding 22) or may never have reached it. Every
       # teardown would be a guess, so there is none. The strand record went out
       # with the exception's own raise.
-      logger.warn 'Cluster role add ended indeterminate: the virtual machine, its disks and any role '\
+      logger.warn 'Cluster role add ended indeterminate: the virtual machine, its disks and any role ' \
                   "at #{strand_param(vm&.path)} were left untouched"
       raise
     rescue StandardError
@@ -985,6 +985,7 @@ module ForemanHyperv
 
         found, readback_error = readback_finds_role?(vm)
         return true if found
+
         # Keep the first readback failure: with no send error it is the one the
         # strand record quotes; with a send error the send tells the story.
         send_error ||= readback_error

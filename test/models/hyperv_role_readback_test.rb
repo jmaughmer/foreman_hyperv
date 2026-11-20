@@ -13,25 +13,23 @@ require 'active_support/test_case'
 # file looks for the app around the plugin and says so out loud where none
 # exists, rather than pretending the tests ran.
 ENV['RAILS_ENV'] = 'test'
-FOREMAN_BOOT = [
-  File.expand_path('../../config/environment.rb', __dir__),
-  File.expand_path('../../../config/environment.rb', __dir__),
-  File.expand_path('../../../../config/environment.rb', __dir__)
-].find { |path| File.exist?(path) }
+# The refusals file defines the same constant when the suites run in one
+# process; only the first of them gets to.
+unless defined?(FOREMAN_BOOT)
+  FOREMAN_BOOT = [
+    File.expand_path('../../config/environment.rb', __dir__),
+    File.expand_path('../../../config/environment.rb', __dir__),
+    File.expand_path('../../../../config/environment.rb', __dir__)
+  ].find { |path| File.exist?(path) }
+end
 require FOREMAN_BOOT if FOREMAN_BOOT && !(defined?(Rails) && Rails.application)
 
-if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
-  require 'fog/hyperv'
-end
+require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 
-# ActiveSupport::TestCase (not bare Minitest) so the assert_not_* family the
-# Foreman style demands resolves; the two aliases below cover the names only
-# Foreman's own helper adds, so the file answers the same assertions booted in
-# Foreman or under bare ActiveSupport.
+# ActiveSupport::TestCase (not bare Minitest) because these cover model-level
+# semantics with Active Record compute resources. Assertions use the native
+# refute_* family: the assert_not_* spellings are Foreman-only aliases.
 class HypervRoleReadbackTest < ActiveSupport::TestCase
-  alias assert_not refute unless method_defined?(:assert_not)
-  alias assert_not_includes refute_includes unless method_defined?(:assert_not_includes)
-
   STRAND_GUID = '94f8b7b0-2a1d-4a1d-9f2e-6c0f1d2e3a4b'
   VM_NAME = 'plg21a-vm'
 
@@ -51,13 +49,9 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     end
 
     # The plugin asks client.respond_to?(:add_cluster_virtual_machine_role)
-    # before it sends; tests whose fog lacks the method simply never define it.
-    def respond_to?(name, include_all = false)
-      return @add_defined if name.to_sym == :add_cluster_virtual_machine_role
-
-      super
-    end
-
+    # before it sends; no respond_to? override is needed: define_add answers
+    # true through the real singleton method, and respond_to_missing? answers
+    # false for a fog that never got one.
     def define_add
       @add_defined = true
       fog = self
@@ -77,6 +71,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
       when :all
         role_calls << args.first
         raise role_error if role_error
+
         role_values
       else
         fog_calls << [name, args]
@@ -92,6 +87,25 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     # leave this empty; the deterministic rollback is expected to use it.
     def teardown_calls
       fog_calls.select { |(name, _args)| name.to_s.match?(/destroy|remove|delete|stop|shutdown/) }
+    end
+  end
+
+  # fog's servers collection: create_vm builds the machine through
+  # client.servers.new(attributes), which hands back the unsaved Server — the
+  # double answers with the VmDouble that records every lifecycle step after.
+  # The attributes are recorded so the create can be pinned on what it
+  # actually asked fog for.
+  class ServersDouble
+    attr_reader :new_calls
+
+    def initialize(vm)
+      @vm = vm
+      @new_calls = []
+    end
+
+    def new(attributes = nil)
+      @new_calls << attributes
+      @vm
     end
   end
 
@@ -183,7 +197,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
   # until the enablement PR flips that predicate — enablement is not what these
   # tests pin.
   def build_cr(fog: FogDouble.new, vm: VmDouble.new, log: LogRecorder.new, add_defined: true)
-    fog.servers_default = vm
+    fog.servers_default = ServersDouble.new(vm)
     fog.define_add if add_defined
 
     cr = ForemanHyperv::Hyperv.new(
@@ -233,8 +247,8 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     fog.role_calls.each { |filters| assert_equal STRAND_GUID, filters[:vm_id] }
 
     assert_includes vm.calls, :create
-    assert_not_includes vm.calls, :stop
-    assert_not_includes vm.calls, :start
+    refute_includes vm.calls, :stop
+    refute_includes vm.calls, :start
     refute(vm.calls.any? { |call| call.is_a?(Array) && call.first == :destroy },
            'an indeterminate create must never destroy the machine')
     refute(vm.calls.include?(:hard_drives), 'must not even enumerate drives in order to delete them')
@@ -261,8 +275,8 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
   def test_every_post_send_error_class_is_indeterminate
     [
       Fog::JSON::DecodeError.new('could not parse reply'),
-      Fog::Hyperv::Errors::ServiceError.new('WSManFault: the WS-Management service cannot complete the operation (0x8007274c)'),
-      Timeout::Error.new('WinRM receive timed out after 70s with partial stdout'),
+      Fog::Hyperv::Errors::ServiceError.new('WSManFault: the WS-Management service cannot complete the operation'),
+      Timeout::Error.new('WinRM receive timed out after 70s with partial stdout')
     ].each do |failure|
       fog = FogDouble.new
       fog.add_behavior = -> { raise failure }
@@ -272,7 +286,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
         cr.create_vm(create_attrs)
       end
       assert_includes strand.message, failure.class.name
-      assert_not_includes vm.calls, :stop
+      refute_includes vm.calls, :stop
       refute(vm.calls.any? { |call| call.is_a?(Array) && call.first == :destroy })
       assert_empty fog.teardown_calls
       assert_equal 3, fog.role_calls.size
@@ -305,6 +319,9 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     result = cr.create_vm(create_attrs)
 
     assert_same vm, result
+    assert_equal 1, fog.servers.new_calls.size,
+                 'the create must build its machine through fog\'s servers collection'
+    assert_equal VM_NAME, fog.servers.new_calls.first[:name]
     assert_includes vm.calls, :start, 'a proven role must not strand the create before its start'
     assert_equal 1, fog.role_calls.size, 'the first proof ends the retries'
     refute(log.warnings.any? { |line| line.include?('cluster role strand') })
@@ -344,7 +361,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     fog = FogDouble.new
     fog.role_values = [
       RoleDouble.new('11b62f52-3c60-4b8e-a5d1-8f2b7c9d0e41', 'Virtual Machine other-vm', 'hv-node1'),
-      RoleDouble.new(nil, 'Cluster Group', 'hv-node1'),
+      RoleDouble.new(nil, 'Cluster Group', 'hv-node1')
     ]
     cr, fog, vm, _log = build_cr(fog: fog)
 
