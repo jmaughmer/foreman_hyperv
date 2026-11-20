@@ -237,7 +237,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
   # finding the role the outcome is indeterminate — and nothing may be touched.
   def test_decode_error_with_empty_readback_leaves_everything_untouched
     fog = FogDouble.new
-    fog.add_behavior = -> { raise Fog::JSON::DecodeError, "could not parse reply: %s and 'quoted'" }
+    fog.add_behavior = -> { raise Fog::JSON::DecodeError, "could not parse reply: %s and 'quoted' \e[31m" }
     cr, fog, vm, log = build_cr(fog: fog)
 
     error = assert_raises(ForemanHyperv::StrandIndeterminate) { cr.create_vm(create_attrs) }
@@ -271,6 +271,7 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
     assert_includes message, 'Fog::JSON::DecodeError'
     assert_includes message, 'could not parse reply', 'the first line survives, sanitized'
     refute_includes message, '%'
+    refute_includes message, "\e", 'terminal escapes must not reach the log line or the UI'
     assert_includes message, 'could not parse reply: s and',
                     'the percent token inside the quoted first line is neutralised, the text survives'
   end
