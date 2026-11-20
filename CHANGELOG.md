@@ -1,3 +1,13 @@
+## Unreleased
+
+- Refuse virtual machine creates, destroys and disk removals on every Hyper-V
+  compute resource until the reviewed cluster-safe enablement has merged, and
+  check every identifier the forms and the URL carry before it reaches the
+  hypervisor: virtual machine ids are GUIDs only, names and paths are held to
+  the characters a real name has, placement is answered from listings the
+  endpoint itself reported, and nothing the operator types is ever asked of
+  the host as a filter
+
 ## v0.2.2 2026-11-16
 
 - Fix rendering Hyper-V compute resources over the API, the provider specific

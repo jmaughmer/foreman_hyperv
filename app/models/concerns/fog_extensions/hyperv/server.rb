@@ -55,8 +55,32 @@ module FogExtensions
         cluster&.name
       end
 
+      # Cluster placement: asked of the CACHED listing in Ruby, never by name.
+      # This setter ran service.clusters.get(name) during mass assignment, and
+      # fog's Clusters#get interpolated the name into a Get-Cluster filter
+      # remote PowerShell — a create-time hash naming a cluster executed script
+      # text on the host before any create had happened. Membership in what the
+      # endpoint itself reported is the only answer, checked character-first;
+      # a name that is not a member, or a listing that will not read, refuses
+      # the assignment rather than asking the host about the string.
       def cluster_name=(name)
-        @cluster = service.clusters.get(name)
+        if name.blank?
+          @cluster = nil
+          return
+        end
+
+        wanted = name.to_s
+        ForemanHyperv::InputValidation.refuse_text!(:cluster_name, wanted)
+        found = service.clusters.all.detect do |candidate|
+          candidate.name.to_s.casecmp?(wanted) || candidate.id.to_s.casecmp?(wanted)
+        end
+        unless found
+          raise ForemanHyperv::OperationRefused,
+                'Refusing to bind a machine to a cluster this compute resource has not read from ' \
+                'its endpoint; nothing was asked of the host with that name'
+        end
+
+        @cluster = found
       end
 
       def boot_device
