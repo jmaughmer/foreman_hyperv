@@ -64,7 +64,10 @@ module FogExtensions
       # a name that is not a member, or a listing that will not read, refuses
       # the assignment rather than asking the host about the string.
       def cluster_name=(name)
-        return @cluster = nil if name.blank?
+        if name.blank?
+          @cluster = nil
+          return
+        end
 
         wanted = name.to_s
         ForemanHyperv::InputValidation.refuse_text!(:cluster_name, wanted)
