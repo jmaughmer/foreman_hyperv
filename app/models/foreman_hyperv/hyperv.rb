@@ -35,6 +35,44 @@ module ForemanHyperv
                    'additionally requires a named method that proves node-set completeness; ' \
                    'enablement is a code PR, not a configuration.'
 
+    # PLG-21a: a fog write over WinRM is INDETERMINATE once the request has been
+    # sent — the measured behaviour at the pinned fog is a successful
+    # Add-ClusterVirtualMachineRole raising Fog::JSON::DecodeError on the empty
+    # reply — so the only proof of success is a post-write read of the role,
+    # keyed on the machine's id, taken as a cluster read on the compute
+    # resource's own endpoint (an answer from any node was measured: the cluster
+    # service replies for the whole cluster). Absent, empty or partial after
+    # these attempts is indeterminate, and indeterminate means touch nothing.
+    # The per-attempt cap is the WinRM operation timeout; this is the wait
+    # between attempts.
+    ROLE_READBACK_ATTEMPTS = 3
+    ROLE_READBACK_INTERVAL = 30
+
+    # Both templates take their values as Foreman::Exception params, which the
+    # class sprints exactly once when it renders: a value that carries a percent
+    # sign can never break the render, and every value passes through
+    # strand_param anyway. The class name is always bare words; the first line is
+    # fog's own text and is carried sanitized, with `readback-empty` for the
+    # case where the write itself did not raise.
+    ROLE_STRAND_FAILURE = 'Placing the virtual machine %<uuid>s in the cluster did not provably succeed ' \
+                          '(the request reached the cluster, its outcome is unknown): %<error_class>s — ' \
+                          '%<first_line>s. The machine at %<path>s named %<name>s has been left exactly as ' \
+                          'it is: nothing was stopped, deleted or un-clustered, because tearing down a ' \
+                          'machine the cluster may already own destroys the wrong thing. The strand is ' \
+                          'in the log for an operator to resolve by hand.'
+
+    ROLE_STRAND_EMPTY = 'Placing the virtual machine %<uuid>s in the cluster did not provably succeed ' \
+                        '(the request reached the cluster, its outcome is unknown): readback-empty. ' \
+                        'The machine at %<path>s named %<name>s has been left exactly as it is: nothing ' \
+                        'was stopped, deleted or un-clustered, because tearing down a machine the ' \
+                        'cluster may already own destroys the wrong thing. The strand is in the log ' \
+                        'for an operator to resolve by hand.'
+
+    # Hyper-V names a machine's cluster role after the machine; the prefix is
+    # what a readback falls back to when the role's VM-id property is not
+    # populated (see add_cluster_role_proven).
+    ROLE_NAME_PREFIX = 'Virtual Machine '
+
     validates :url, :user, :password, presence: true
     after_validation :validate_connectivity unless Rails.env.test?
 
@@ -365,16 +403,25 @@ module ForemanHyperv
       # the explicit choice (an HA checkbox per VM is the plan for the form; until
       # it exists, ha_enabled answers "no" and nothing else does).
       if cluster && clusterize?(attr)
-        unless client.respond_to?(:add_cluster_virtual_machine_role)
-          raise Foreman::Exception, 'Placing a virtual machine in a cluster needs a fog-hyperv that can add cluster roles'
-        end
-
-        client.add_cluster_virtual_machine_role(id: vm.id, computer_name: vm.computer_name)
-        role_added = true
+        # PLG-21a: the Add's own exception proves nothing once it has been sent,
+        # so success is proven here by reading the role back, and anything short
+        # of finding it raises StrandIndeterminate — which the rescue below
+        # answers by touching nothing. role_added stays false until the readback
+        # has actually found the role.
+        role_added = add_cluster_role_proven(vm)
       end
 
       vm.start if start
       vm
+    rescue StrandIndeterminate
+      # Neither success nor failure is established: the machine may already be a
+      # cluster-owned role (stop and disk deletes then fight the cluster over
+      # the files — TEST-RESULTS finding 22) or may never have reached it. Every
+      # teardown would be a guess, so there is none. The strand record went out
+      # with the exception's own raise.
+      logger.warn 'Cluster role add ended indeterminate: the virtual machine, its disks and any role ' \
+                  "at #{strand_param(vm&.path)} were left untouched"
+      raise
     rescue StandardError
       if vm&.persisted?
         # The role owns the machine's config and disks the way the node does not:
@@ -899,6 +946,136 @@ module ForemanHyperv
     # (API and hammer) says so.
     def clusterize?(attr)
       attr[:ha_enabled].to_s != '0'
+    end
+
+    # PLG-21a. Put the machine into the cluster and PROVE it: fog writes over
+    # WinRM are indeterminate once the request has been sent — measured at the
+    # pinned fog, a successful Add raises Fog::JSON::DecodeError on its empty
+    # reply — so the write's silence is not success and its exception is not
+    # failure. Only finding the role by the machine's id in a readback answers
+    # yes. The read is a cluster read on the compute resource's own endpoint
+    # (any node's cluster service answers for the whole cluster — measured), not
+    # a per-node call, so it needs no node targeting. Anything else — fog's
+    # exception, a raising readback, or absent/partial roles after
+    # ROLE_READBACK_ATTEMPTS tries — is indeterminate: the strand record goes to
+    # the log, and StrandIndeterminate stops the caller from tearing anything
+    # down. The fog call being absent (fog too old to add roles) still raises
+    # BEFORE anything is sent, which keeps its deterministic rollback.
+    def add_cluster_role_proven(vm)
+      unless client.respond_to?(:add_cluster_virtual_machine_role)
+        raise Foreman::Exception, 'Placing a virtual machine in a cluster needs a fog-hyperv that can add cluster roles'
+      end
+
+      send_error = nil
+      begin
+        # Everything from here on is post-send: after this line every exception
+        # class — including fog's decode error on a success — is indeterminate
+        # and belongs to the readback, not to a rollback.
+        client.add_cluster_virtual_machine_role(id: vm.id, computer_name: vm.computer_name)
+      rescue StandardError => e
+        send_error = e
+      end
+
+      ROLE_READBACK_ATTEMPTS.times do |attempt|
+        if attempt.positive?
+          # The per-attempt cap is the WinRM operation timeout; this is the gap
+          # between attempts, so a slow-but-committing Add is still caught.
+          sleep ROLE_READBACK_INTERVAL
+        end
+
+        found, readback_error = readback_finds_role?(vm)
+        return true if found
+
+        # Keep the first readback failure: with no send error it is the one the
+        # strand record quotes; with a send error the send tells the story.
+        send_error ||= readback_error
+      end
+
+      record_role_strand(vm, send_error)
+      # The params go to the constructor (Foreman::Exception#initialize takes
+      # message plus params); passing them as raise's third argument would make
+      # Ruby read them as a backtrace.
+      raise StrandIndeterminate.new(strand_message_template(send_error), strand_message_params(vm, send_error))
+    end
+
+    # One pass of the proof. A role counts as found when it carries the
+    # machine's id (case-insensitively: fog's own collection filters -VMId
+    # case-insensitively too), or when the id property is empty — the field is
+    # reported on ClusterGroup but not documented, so it may be missing on real
+    # hosts — and the role's documented name is this machine's. Anything that
+    # matches neither is not this machine's role: an absent answer here is a
+    # clean "no", which is still not a proof either way.
+    def readback_finds_role?(vm)
+      roles = Array(client.cluster_virtual_machine_roles.all(vm_id: vm.id)).flatten.compact
+      wanted_role_name = "#{ROLE_NAME_PREFIX}#{vm.name}"
+      found = roles.any? do |role|
+        role_id = role.respond_to?(:virtual_machine_id) ? role.virtual_machine_id : nil
+        if role_id.presence
+          role_id.to_s.casecmp(vm.id.to_s).zero?
+        else
+          role.name.to_s.casecmp(wanted_role_name).zero?
+        end
+      end
+      [found, nil]
+    rescue StandardError => e
+      # A readback that cannot answer is not an absent readback: the attempt
+      # counts, but the strand record quotes this as its reason.
+      [false, e]
+    end
+
+    # The strand record (B6): what was asked for, where it was left, and why the
+    # plugin will not guess. This is the operator's work item until the enablement
+    # PR lands; the persistent table arrives with PLG-22's migration.
+    def record_role_strand(vm, error)
+      logger.warn format(
+        'Hyper-V cluster role strand: virtual machine %<uuid>s (name %<name>s) at %<path>s was asked ' \
+        'to join the cluster and the outcome is unproven (%<reason>s). Left untouched: machine, disks, ' \
+        'role. An operator must reconcile it by hand.',
+        uuid: strand_param(vm&.id), name: strand_param(vm&.name), path: strand_param(vm&.path),
+        reason: strand_reason(error)
+      )
+    end
+
+    # Either the send's own first line, or the fact that no readback ever
+    # answered. Both go through the sanitizer, so neither can carry a percent
+    # sign or a control character into the log line.
+    def strand_reason(error)
+      return 'readback-empty' unless error
+
+      "#{strand_param(error.class.name)}: #{sanitize_text(error.message.to_s.lines.first)}"
+    end
+
+    # The template and params are handed to Foreman::Exception, which sprintfs
+    # them once at render time — the values never become part of the template,
+    # so a percent sign in one of them cannot break the render.
+    def strand_message_template(error)
+      error ? ROLE_STRAND_FAILURE : ROLE_STRAND_EMPTY
+    end
+
+    def strand_message_params(vm, error)
+      base = {
+        uuid: strand_param(vm&.id),
+        path: strand_param(vm&.path),
+        name: strand_param(vm&.name)
+      }
+      if error
+        base[:error_class] = strand_param(error.class.name)
+        base[:first_line] = sanitize_text(error.message.to_s.lines.first)
+      end
+      base
+    end
+
+    # Identifiers the plugin itself holds (a GUID from fog, a fog-reported path,
+    # a validated name) kept safe for a sprintf target: no percent sign, no
+    # control characters, bounded length.
+    def strand_param(value)
+      value.to_s.gsub(/[^[:print:]]/, '').delete('%').truncate(200)
+    end
+
+    # fog's own text, made safe the same way. Kept to one line and 200
+    # characters: this is a quotation for operators, not a transcript.
+    def sanitize_text(text)
+      text.to_s.gsub(/[^[:print:]]/, '').delete('%').truncate(200)
     end
 
     # Takes the clustered role off a machine, leaving the machine itself alone. A
