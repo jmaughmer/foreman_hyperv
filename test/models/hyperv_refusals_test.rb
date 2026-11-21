@@ -117,17 +117,19 @@ class HypervRefusalsTest < ActiveSupport::TestCase
     assert_empty @fog.calls
   end
 
-  # PLG-15c opened destroys for endpoints PROVEN stand-alone. A fog that
-  # answers nothing readable is not proven stand-alone: the refusal still
-  # lands, and it lands without a single run_wql or run_cmd going out. The
-  # lookup itself rides on — nothing about the machine can be trusted before
-  # the machine has been read.
-  def test_destroy_refuses_a_cr_that_cannot_be_proven_standalone
+  # PLG-15c opened destroys for machines on endpoints PROVEN stand-alone.
+  # Here the machine fog reports answers with a cluster role, which is the
+  # one gate reading that decides before a single membership, marker, or
+  # service-state command is asked — the refusal still raises (never a silent
+  # success that would drop the host record), it quotes the enablement
+  # contract, and the fog spy still never sees a command.
+  def test_destroy_refuses_a_machine_that_reports_a_cluster_role
+    vm = stub('vm', clustered?: true)
+    @cr.stubs(:find_vm_by_uuid).returns(vm)
+
     error = assert_raises(ForemanHyperv::OperationRefused) { @cr.destroy_vm(VALID_GUID) }
     assert_includes error.message, 'refused in code until FOG-10, PLG-15b and PLG-21b have merged'
-    names = @fog.calls.map(&:first).uniq
-    assert_empty names - %i[servers get clustered?], 'the refusal is decided by reads only: no wire command'
-    assert_includes names, :get, 'the gate decides on the machine fog reported, not on a guess'
+    assert_empty @fog.calls
   end
 
   # PLG-15b opened creates for stand-alone machines only. A fog that answers

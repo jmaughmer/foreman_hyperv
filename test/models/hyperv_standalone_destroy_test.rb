@@ -110,6 +110,10 @@ class HypervStandaloneDestroyTest < ActiveSupport::TestCase
       @get_calls = []
     end
 
+    def all(*_args)
+      [@vm].compact
+    end
+
     def new(attributes = nil)
       @new_calls << attributes
       @vm
@@ -189,15 +193,15 @@ class HypervStandaloneDestroyTest < ActiveSupport::TestCase
     end
   end
 
-  # The sticky leg is about the LEDGER; the suite's default CR is not sticky
-  # (the sticky behaviour itself is pinned by its own three tests below). The
-  # self rung reads the endpoint's own name case-insensitively, on purpose.
+  # The sticky leg is about the LEDGER, and it is read for real: this suite
+  # never writes a sighting for HOST except in the tests that mean to (the
+  # transaction rolls them back). The self rung reads the endpoint's own name
+  # case-insensitively, on purpose, so the hypervisor answers uppercase.
   def build_cr(fog: GateFog.new, vm: VmDouble.new, host_name: HOST.upcase, url: "http://#{HOST}:5985/wsman")
     fog.servers_default = ServersDouble.new(vm)
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: url, user: 'u', password: 'p')
     cr.stubs(:client).returns(fog)
     cr.stubs(:hypervisor).returns(stub('hypervisor', name: host_name))
-    cr.stubs(:sticky_cluster_sighting?).returns(false)
     [cr, fog, vm]
   end
 
@@ -274,7 +278,6 @@ class HypervStandaloneDestroyTest < ActiveSupport::TestCase
 
   def test_an_endpoint_that_does_not_parse_to_a_host_is_sticky
     cr, _fog, _vm = build_cr(url: 'not a uri at all')
-    cr.unstub(:sticky_cluster_sighting?)
 
     assert cr.send(:sticky_cluster_sighting?), 'an unnamed endpoint cannot be proven clean'
   end
