@@ -413,7 +413,7 @@ module ForemanHyperv
       # before anything else, so a hostile hash hears about the string, not
       # just about the refusal.
       ForemanHyperv::InputValidation.validate_hash!(attr, context: :vm)
-      attr = attr.respond_to?(:to_hash) ? attr.to_hash.deep_symbolize_keys : attr
+      attr = attr.to_hash.deep_symbolize_keys if attr.respond_to?(:to_hash)
 
       # PLG-15b: the create path answers stand-alone now. A create that asks
       # for a cluster is refused exactly as PLG-15 refused it — the cluster

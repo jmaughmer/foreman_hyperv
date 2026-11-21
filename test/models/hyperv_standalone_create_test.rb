@@ -27,6 +27,10 @@ end
 require FOREMAN_BOOT if FOREMAN_BOOT && !(defined?(Rails) && Rails.application)
 
 require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
+# fog does not require winrm until a real client connects, and fog's winrm
+# utilities are lazy too: the fault classes this suite scripts come from the
+# winrm gem itself, so name the dependency the suite actually uses.
+require 'winrm' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 
 # ActiveSupport::TestCase (not bare Minitest) because these cover model-level
 # semantics with Active Record compute resources. The Rails/RefuteMethods
@@ -63,8 +67,8 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
       @fog_calls = []
     end
 
-    def run_wql(query, _namespace: nil)
-      @wql_calls << [query, _namespace]
+    def run_wql(query, **kwargs)
+      @wql_calls << [query, kwargs.fetch(:_namespace)]
       raise @wql_error if @wql_error
 
       @wql_rows
@@ -356,8 +360,8 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
 
     # Two halves of the one contiguous wire string (a whole-line assert would
     # cross RuboCop's line length; together these pin it end to end).
-    assert_includes registry, %q{Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet}
-    assert_includes registry, %q{\Services\ClusSvc\Parameters' -ErrorAction Stop}
+    assert_includes registry, "Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet"
+    assert_includes registry, "\\Services\\ClusSvc\\Parameters' -ErrorAction Stop"
     assert_includes clusdb, "Get-Content -LiteralPath 'C:\\Windows\\Cluster\\CLUSDB' -TotalCount 1 -ErrorAction Stop"
     assert_not_includes registry, '-TotalCount', 'the registry read has no content count'
     [registry, clusdb].each do |script|
@@ -474,7 +478,7 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
     assert_equal 1, fog.servers.new_calls.size
     assert_equal VM_NAME, fog.servers.new_calls.first[:name]
     assert_includes vm.calls, :start
-    assert vm.calls.any? { |call| call.is_a?(Array) && call.first == :create }, 'the machine was created'
+    assert(vm.calls.any? { |call| call.is_a?(Array) && call.first == :create }, 'the machine was created')
     assert_equal 2, fog.cmd_calls.size, 'both markers were read'
     assert_empty fog.fog_calls_named(:remove_item, :remove_vm), 'nothing destructive went out'
   end
@@ -534,7 +538,7 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
     cr.stubs(:logger).returns(log)
 
     cr.send(:record_role_strand, vm, nil)
-    assert log.warnings.any? { |line| line.include?('cluster role strand') }
+    assert(log.warnings.any? { |line| line.include?('cluster role strand') })
 
     strand_rows = ForemanHyperv::ClusterSighting.where(kind: 'strand', vm_uuid: VM_GUID)
     if strand_rows.exists?
@@ -543,7 +547,7 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
     else
       # The table exists (the guard above) but the write failed: the contract
       # is that the raise still follows and the failed write is said out loud.
-      assert log.errors.any? { |line| line.include?('could not be written') }
+      assert(log.errors.any? { |line| line.include?('could not be written') })
     end
   end
 
