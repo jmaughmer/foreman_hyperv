@@ -1276,9 +1276,7 @@ module ForemanHyperv
       configs = names.select { |n| n.end_with?('.vmcx', '.vmrs') }
       attributed = [vm.id.to_s.downcase, vm.name.to_s.downcase]
       foreign = configs.reject { |n| attributed.include?(n.sub(/\.(vmcx|vmrs)\z/, '')) }
-      unless foreign.empty?
-        return keep_folder(folder, 'another machine’s config file lives in it')
-      end
+      return keep_folder(folder, 'another machine’s config file lives in it') unless foreign.empty?
 
       unless configs.any? { |n| n.end_with?('.vmcx') && attributed.include?(n.delete_suffix('.vmcx')) }
         return keep_folder(folder, 'this folder holds no config file of this machine')
