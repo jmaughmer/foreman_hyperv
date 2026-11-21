@@ -46,6 +46,17 @@ class HypervRefusalsTest < ActiveSupport::TestCase
       @calls = calls
     end
 
+    # PLG-22: the enablement's capability probe is an in-process exchange
+    # (respond_to?/predicate calls on the client object), not endpoint
+    # traffic, and this suite asserts that nothing was ASKED OF THE HOST. A
+    # pre-enablement fog answers false for every behaviour, so the spy stays
+    # faithful to that era by answering false here without logging a call.
+    def supports_clusters? = false
+    def supports_exact_host_connections? = false
+    def supports_literal_path_destructive? = false
+    def supports_stdout_json_hygiene? = false
+    def supports_input_hardening? = false
+
     def method_missing(name, *args)
       @calls << [name, args]
       FogSpy.new(@calls)
