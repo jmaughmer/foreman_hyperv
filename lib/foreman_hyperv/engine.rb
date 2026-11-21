@@ -3,7 +3,7 @@
 module ForemanHyperv
   class Engine < ::Rails::Engine
     engine_name 'foreman_hyperv'
-    #config.autoload_paths += Dir["#{config.root}/app/models/concerns"]
+    # config.autoload_paths += Dir["#{config.root}/app/models/concerns"]
 
     initializer 'foreman_hyperv.register_plugin', :before => :finisher_hook do |app|
       app.reloader.to_prepare do
