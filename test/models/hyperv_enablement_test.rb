@@ -57,8 +57,15 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 # not take a plugin-supplied guard; the five capability predicates plus
 # FOG-11's completion gate are what bind those to the named host.
 class HypervEnablementTest < ActiveSupport::TestCase
-  CR_URL = 'http://192.168.1.66:5985/wsman'.freeze
-  GUID = '6f1e9a12-3b4c-4d5e-8f60-112233445566'.freeze
+  # The fog answer shapes, spelled out: the suites assert on their fields and
+  # nothing else, so a plain struct is exactly the surface.
+  Reply = Struct.new(:stdout, :exit_code, :error, keyword_init: true)
+  StubHypervisor = Struct.new(:name, :virtual_machine_path, :virtual_hard_disk_path, keyword_init: true)
+  StubCluster = Struct.new(:name, :shared_volumes, keyword_init: true)
+  StubVolume = Struct.new(:volume_path, keyword_init: true)
+
+  CR_URL = 'http://192.168.1.66:5985/wsman'
+  GUID = '6f1e9a12-3b4c-4d5e-8f60-112233445566'
 
   def setup
     unless FOREMAN_BOOT || (defined?(Rails) && Rails.application)
@@ -92,9 +99,9 @@ class HypervEnablementTest < ActiveSupport::TestCase
       @calls << [:remove_cluster_virtual_machine_role, args]
     end
 
-    def run_cmdlist(cmds, skip_json:, target_computer:, separate_calls: false)
+    def run_cmdlist(cmds, skip_json:, target_computer:, _separate_calls: false)
       @calls << [:run_cmdlist, cmds, skip_json, target_computer]
-      OpenStruct.new(stdout: @stdout, exit_code: @exit_code, error: '')
+      Reply.new(stdout: @stdout, exit_code: @exit_code, error: '')
     end
   end
 
@@ -118,7 +125,6 @@ class HypervEnablementTest < ActiveSupport::TestCase
   # way: run_cmd answers the folder pre-flight, run_cmdlist carries the
   # guarded role removal.
   class FakeVm
-    attr_reader :calls
     attr_accessor :role_stdout
 
     def initialize(name:, path:, drives:, clustered: false, owner_node: nil, preflight: 'ABSENT')
@@ -133,15 +139,11 @@ class HypervEnablementTest < ActiveSupport::TestCase
       @service = FakeService.new(self)
     end
 
-    def id = GUID
-    def name = @name
-    def path = @path
-    def computer_name = 'hv-node1'
-    def owner_node = @owner_node
-    def clustered? = @clustered
-    def service = @service
+    attr_reader :calls, :name, :path, :owner_node, :service, :preflight
 
-    def preflight = @preflight
+    def id = GUID
+    def computer_name = 'hv-node1'
+    def clustered? = @clustered
 
     def set_preflight(answer)
       @preflight = answer
@@ -171,18 +173,18 @@ class HypervEnablementTest < ActiveSupport::TestCase
 
       def run_cmd(script, _skip_json: false)
         @vm.calls << [:run_cmd, script]
-        OpenStruct.new(stdout: @vm.preflight, exit_code: 0, error: '')
+        Reply.new(stdout: @vm.preflight, exit_code: 0, error: '')
       end
 
-      def run_cmdlist(cmds, skip_json:, target_computer:, separate_calls: false)
+      def run_cmdlist(cmds, skip_json:, target_computer:, _separate_calls: false)
         @vm.calls << [:run_cmdlist, cmds, skip_json, target_computer]
-        OpenStruct.new(stdout: @vm.role_stdout, exit_code: 0, error: '')
+        Reply.new(stdout: @vm.role_stdout, exit_code: 0, error: '')
       end
     end
   end
 
   class FakeHdd
-    attr_reader :calls, :id
+    attr_reader :calls, :id, :path
 
     def initialize(id, path, reservations: false)
       @id = id
@@ -191,7 +193,6 @@ class HypervEnablementTest < ActiveSupport::TestCase
       @calls = []
     end
 
-    def path = @path
     def support_persistent_reservations = @reservations
 
     def destroy(underlying:)
@@ -210,11 +211,11 @@ class HypervEnablementTest < ActiveSupport::TestCase
   # The roots the hypervisor itself reports: the two config/disk roots (the
   # lab measured them DIFFERENT) and one cluster shared volume.
   def stub_roots(cr, vm_root: 'C:\VMs', disk_root: 'C:\VMs\Disks')
-    cr.stubs(:hypervisor).returns(OpenStruct.new(name: 'hv-node1',
-                                                 virtual_machine_path: vm_root,
-                                                 virtual_hard_disk_path: disk_root))
-    cr.stubs(:clusters).returns([OpenStruct.new(name: 'lab-cluster',
-                                                shared_volumes: [OpenStruct.new(volume_path: 'C:\ClusterStorage\Volume1')])])
+    cr.stubs(:hypervisor).returns(StubHypervisor.new(name: 'hv-node1',
+                                                     virtual_machine_path: vm_root,
+                                                     virtual_hard_disk_path: disk_root))
+    volume = StubVolume.new(volume_path: 'C:\ClusterStorage\Volume1')
+    cr.stubs(:clusters).returns([StubCluster.new(name: 'lab-cluster', shared_volumes: [volume])])
   end
 
   def full_fog(**kwargs)
@@ -235,11 +236,12 @@ class HypervEnablementTest < ActiveSupport::TestCase
   end
 
   def test_a_fog_missing_any_behaviour_is_pre_enablement
-    %i[tri_state_cluster exact_host_connection literal_path_destructive stdout_json_hygiene input_hardening].each do |missing|
+    %i[tri_state_cluster exact_host_connection literal_path_destructive
+       stdout_json_hygiene input_hardening].each do |missing|
       cr, = build_cr(FogMissing.new(missing: missing))
-      refute cr.send(:enablement_supported?), "a fog missing #{missing} must not carry the enablement"
+      assert_not cr.send(:enablement_supported?), "a fog missing #{missing} must not carry the enablement"
       assert_equal [missing], cr.send(:missing_enablement_capabilities)
-      refute cr.send(:disk_removal_allowed?)
+      assert_not cr.send(:disk_removal_allowed?)
     end
   end
 
@@ -247,8 +249,8 @@ class HypervEnablementTest < ActiveSupport::TestCase
     fog = full_fog
     fog.define_singleton_method(:supports_input_hardening?) { raise 'unreadable' }
     cr, = build_cr(fog)
-    refute cr.send(:enablement_supported?)
-    refute cr.send(:disk_removal_allowed?)
+    assert_not cr.send(:enablement_supported?)
+    assert_not cr.send(:disk_removal_allowed?)
   end
 
   def test_the_capability_refusal_names_the_missing_behaviours
@@ -261,7 +263,8 @@ class HypervEnablementTest < ActiveSupport::TestCase
 
   # ---- the two-root folder rule: the string half ------------------------------
 
-  def attributed_vm(name: 'lab-vm2', path: 'C:\ClusterStorage\Volume1\lab-vm2', clustered: true, drives: [], owner_node: nil)
+  def attributed_vm(name: 'lab-vm2', path: 'C:\ClusterStorage\Volume1\lab-vm2',
+                    clustered: true, drives: [], owner_node: nil)
     FakeVm.new(name: name, path: path, clustered: clustered, drives: drives, owner_node: owner_node)
   end
 
@@ -300,12 +303,14 @@ class HypervEnablementTest < ActiveSupport::TestCase
   def test_the_name_shapes_the_wire_read_cannot_tie_back_keep_the_folder
     cr, = build_cr(full_fog)
     base = 'C:\\VMs\\'
-    ['lab\vm', 'lab/vm', 'lab:vm', 'lab..vm', 'lab.vm.', 'lab vm ', 'lab*vm', 'lab?vm', 'lab"vm', "lab\x01vm"].each do |name|
+    ['lab\vm', 'lab/vm', 'lab:vm', 'lab..vm', 'lab.vm.', 'lab vm ',
+     'lab*vm', 'lab?vm', 'lab"vm', "lab\x01vm"].each do |name|
       assert_nil folder_rule(cr, attributed_vm(name: name, path: base + name, clustered: false)),
                  "the name #{name.inspect} keeps its folder"
     end
     # A single dot inside the name is a legal VM name and still attributes.
-    assert_equal 'C:\VMs\lab.vm', folder_rule(cr, attributed_vm(name: 'lab.vm', path: 'C:\VMs\lab.vm', clustered: false))
+    folder = folder_rule(cr, attributed_vm(name: 'lab.vm', path: 'C:\VMs\lab.vm', clustered: false))
+    assert_equal 'C:\VMs\lab.vm', folder
   end
 
   def test_a_folder_not_named_for_the_machine_or_not_under_a_root_is_never_touched
@@ -338,20 +343,20 @@ class HypervEnablementTest < ActiveSupport::TestCase
 
   def test_every_preflight_answer_that_is_not_a_clean_owning_answer_keeps_the_folder
     cr, = build_cr(full_fog)
-    refute preflight_answer(cr, 'ABSENT')
-    refute preflight_answer(cr, 'KEEP:JUNCTION')
-    refute preflight_answer(cr, 'KEEP:HIDDEN')
-    refute preflight_answer(cr, 'NAMES:vm99.vmcx;lab-vm2.vmcx'), 'a second machine’s config collides'
-    refute preflight_answer(cr, 'NAMES:'), 'no .vmcx means this is not provably the config folder'
-    refute preflight_answer(cr, 'NAMES:lab-vm2.vhdx'), 'no .vmcx means this is not provably the config folder'
-    refute preflight_answer(cr, 'C:\VMs\lab-vm2'), 'an answer outside the shape licenses nothing'
+    assert_not preflight_answer(cr, 'ABSENT')
+    assert_not preflight_answer(cr, 'KEEP:JUNCTION')
+    assert_not preflight_answer(cr, 'KEEP:HIDDEN')
+    assert_not preflight_answer(cr, 'NAMES:vm99.vmcx;lab-vm2.vmcx'), 'a second machine’s config collides'
+    assert_not preflight_answer(cr, 'NAMES:'), 'no .vmcx means this is not provably the config folder'
+    assert_not preflight_answer(cr, 'NAMES:lab-vm2.vhdx'), 'no .vmcx means this is not provably the config folder'
+    assert_not preflight_answer(cr, 'C:\VMs\lab-vm2'), 'an answer outside the shape licenses nothing'
   end
 
   def test_a_preflight_that_does_not_answer_keeps_the_folder
     cr, = build_cr(full_fog)
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false)
     vm.service.stubs(:run_cmd).raises(Fog::Errors::Error.new('winrm died'))
-    refute cr.send(:destroy_folder?, vm)
+    assert_not cr.send(:destroy_folder?, vm)
   end
 
   def test_the_preflight_rides_one_script_with_the_path_literal_quoted
@@ -383,17 +388,17 @@ class HypervEnablementTest < ActiveSupport::TestCase
     # state reads false; true and unread both keep the file here too.
     cr, = build_cr(full_fog)
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false)
-    refute cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d1', 'C:\VMs\lab-vm2\disk1.vhdx', reservations: true))
-    refute cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d2', 'C:\VMs\lab-vm2\disk2.vhdx', reservations: nil))
+    assert_not cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d1', 'C:\VMs\lab-vm2\disk1.vhdx', reservations: true))
+    assert_not cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d2', 'C:\VMs\lab-vm2\disk2.vhdx', reservations: nil))
   end
 
   def test_an_unattributed_drive_path_never_has_its_file_deleted
     cr, = build_cr(full_fog)
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false)
-    refute cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d1', 'D:\pre-existing\disk.vhdx'))
-    refute cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d2', 'C:\VMs\other-name\disk.vhdx'))
-    refute cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d3', 'C:\VMs\lab-vm2\..\evil.vhdx'))
-    refute cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d4', 'C:\PROGRA~1\lab-vm2\disk.vhdx'))
+    assert_not cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d1', 'D:\pre-existing\disk.vhdx'))
+    assert_not cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d2', 'C:\VMs\other-name\disk.vhdx'))
+    assert_not cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d3', 'C:\VMs\lab-vm2\..\evil.vhdx'))
+    assert_not cr.send(:drive_deletion_allowed?, vm, FakeHdd.new('d4', 'C:\PROGRA~1\lab-vm2\disk.vhdx'))
   end
 
   # ---- destroy: the enabled era --------------------------------------------------
@@ -605,7 +610,8 @@ class HypervEnablementTest < ActiveSupport::TestCase
     d1 = FakeHdd.new('d1', 'C:\VMs\lab-vm2\disk1.vhdx')
     d2 = FakeHdd.new('d2', 'C:\VMs\Disks\disk2.vhdx')
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [d1, d2])
-    cr.send(:update_volumes, vm, volumes_attributes: { '0' => { id: 'd1', _delete: '1' }, '1' => { id: 'd2', _delete: '1' } })
+    both = { '0' => { id: 'd1', _delete: '1' }, '1' => { id: 'd2', _delete: '1' } }
+    cr.send(:update_volumes, vm, volumes_attributes: both)
     assert_equal [true], d1.calls
     assert_equal [true], d2.calls
   end
@@ -616,7 +622,8 @@ class HypervEnablementTest < ActiveSupport::TestCase
     d2 = FakeHdd.new('d2', 'D:\pre-existing\disk2.vhdx')
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [d1, d2])
     error = assert_raises(ForemanHyperv::OperationRefused) do
-      cr.send(:update_volumes, vm, volumes_attributes: { '0' => { id: 'd1', _delete: '1' }, '1' => { id: 'd2', _delete: '1' } })
+      both = { '0' => { id: 'd1', _delete: '1' }, '1' => { id: 'd2', _delete: '1' } }
+      cr.send(:update_volumes, vm, volumes_attributes: both)
     end
     assert_includes error.message, 'Nothing was detached and no file was deleted'
     assert_equal [], d1.calls, 'the whole edit refuses up front, not half of it completing'

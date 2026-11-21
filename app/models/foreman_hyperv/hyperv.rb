@@ -128,7 +128,7 @@ module ForemanHyperv
     # reads as special. A name outside it is refused before anything is sent:
     # the guard is a server-side check, not a string exercise, and a name that
     # cannot be quoted safely is not a name to dial.
-    NODE_NAME_SHAPE = /\A[A-Za-z0-9][A-Za-z0-9.\-]{0,252}\z/
+    NODE_NAME_SHAPE = /\A[A-Za-z0-9][A-Za-z0-9.-]{0,252}\z/
 
     # What $env:COMPUTERNAME answers with is the NETBIOS computer name: up to 15
     # characters, uppercase. Cluster node lists and operator overrides carry the
@@ -150,6 +150,22 @@ module ForemanHyperv
                                 'sharing state is not proven absent, and deleting a disk another ' \
                                 'machine may be reading destroys the wrong thing. Nothing was ' \
                                 'detached and no file was deleted; the disk stays exactly as it is.'
+
+    # The folder pre-flight, one round trip: the folder's existence, its
+    # reparse/hidden attributes, and its children's names. The tokens are
+    # fixed words, never remote text beyond the child NAMES (which this
+    # parses but never re-quotes); %<folder>s arrives from the string rule,
+    # already attributed and single-quoted.
+    FOLDER_PREFLIGHT_SCRIPT = <<~SCRIPT
+      $p = %<folder>s
+      if (-not (Test-Path -LiteralPath $p)) { 'ABSENT' }
+      else {
+        $i = Get-Item -LiteralPath $p -Force
+        if ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { 'KEEP:JUNCTION' }
+        elseif ($i.Attributes -band [System.IO.FileAttributes]::Hidden) { 'KEEP:HIDDEN' }
+        else { 'NAMES:' + ((Get-ChildItem -LiteralPath $p -Force | ForEach-Object { $_.Name }) -join ';') }
+      }
+    SCRIPT
 
     # PLG-21a: a fog write over WinRM is INDETERMINATE once the request has been
     # sent — the measured behaviour at the pinned fog is a successful
@@ -1078,7 +1094,7 @@ module ForemanHyperv
     def missing_enablement_capabilities
       list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
       ENABLEMENT_CAPABILITIES.select do |capability, predicate|
-        !list.include?(capability) || !client_answers?(capability, predicate)
+        list.exclude?(capability) || !client_answers?(capability, predicate)
       end.keys
     rescue StandardError
       ENABLEMENT_CAPABILITIES.keys
@@ -1198,7 +1214,7 @@ module ForemanHyperv
       # space (Windows trims them and the trimmed folder is not provably the
       # named one). A single dot inside the name is legal (vm.old is a VM
       # name); a component bound at Windows' own 255.
-      return nil unless name.match?(/\A[^\\\/:*?"<>|\x00-\x1f](?:[^\\\/:*?"<>|\x00-\x1f]| )*[^\\\/:*?"<>|\x00-\x1f]?\z/)
+      return nil unless name.match?(%r{\A[^\\/:*?"<>|\x00-\x1f](?:[^\\/:*?"<>|\x00-\x1f]| )*[^\\/:*?"<>|\x00-\x1f]?\z})
       return nil if name.include?('..') || name.match?(/[. ]\z/)
       return nil unless name.length <= 255
       return nil if path.split('\\').any? { |segment| segment == '..' }
@@ -1253,27 +1269,19 @@ module ForemanHyperv
     def folder_contents_ok?(vm, folder, names_blob)
       names = names_blob.split(';').map(&:strip).reject(&:empty?).map(&:downcase)
       configs = names.select { |n| n.end_with?('.vmcx', '.vmrs') }
-      owned = configs.all? { |n| n == "#{vm.name.to_s.downcase}.vmcx" || n == "#{vm.name.to_s.downcase}.vmrs" }
-      return keep_folder(folder, 'another machine’s config file lives in it') unless owned
-      return keep_folder(folder, 'no config file of this machine is in it') unless configs.any? { |n| n.end_with?('.vmcx') }
+      base = vm.name.to_s.downcase
+      own_names = ["#{base}.vmcx", "#{base}.vmrs"]
+      owned = configs.all? { |n| own_names.include?(n) }
+      unless owned
+        return keep_folder(folder, 'another machine’s config file lives in it')
+      end
+
+      unless configs.any? { |n| n.end_with?('.vmcx') }
+        return keep_folder(folder, 'this folder holds no config file of this machine')
+      end
 
       :ok
     end
-
-    # One round trip: the folder's existence, its reparse/hidden attributes,
-    # and its children's names. The tokens are fixed words, never remote text
-    # beyond the child NAMES (which this parses but never re-quotes); %<name>s
-    # rides only the Ruby-side comparison below.
-    FOLDER_PREFLIGHT_SCRIPT = <<~'SCRIPT'.freeze
-      $p = %<folder>s
-      if (-not (Test-Path -LiteralPath $p)) { 'ABSENT' }
-      else {
-        $i = Get-Item -LiteralPath $p -Force
-        if ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { 'KEEP:JUNCTION' }
-        elseif ($i.Attributes -band [System.IO.FileAttributes]::Hidden) { 'KEEP:HIDDEN' }
-        else { 'NAMES:' + ((Get-ChildItem -LiteralPath $p -Force | ForEach-Object { $_.Name }) -join ';') }
-      }
-    SCRIPT
 
     # A create rollback's folder verdict (see the rollback in create_vm): the
     # machine's own folder per the two-root rule and its pre-flight, kept if
@@ -2158,7 +2166,7 @@ module ForemanHyperv
     # An older fog without the script utility or the cmdlist API keeps the plain
     # request call, unguarded, exactly as before enablement.
     def remove_cluster_role(vm)
-      node = (vm.respond_to?(:owner_node) && vm.owner_node.presence || vm.computer_name).to_s.strip
+      node = ((vm.respond_to?(:owner_node) && vm.owner_node.presence) || vm.computer_name).to_s.strip
       service = vm.service || client
 
       # Validated before composing anything: an id that is not an id is the
@@ -2167,7 +2175,7 @@ module ForemanHyperv
       # Composed before any rescue can fold it: a name that cannot be quoted
       # into the guard is refused as itself, not as a cluster that "would not
       # release the role" — it never reached the cluster.
-      guard = guarded_role_guard(vm, node)
+      guard = guarded_role_guard(node)
 
       begin
         if guard
@@ -2178,7 +2186,8 @@ module ForemanHyperv
           # this plugin knows.
           unless out.stdout.to_s.strip.empty?
             logger.warn 'The clustered role removal answered with a result body; it emits none'
-            raise Foreman::Exception, 'Refusing to delete a clustered virtual machine while its role removal did not answer cleanly'
+            raise Foreman::Exception,
+                  'Refusing to delete a clustered virtual machine while its role removal did not answer cleanly'
           end
         elsif client.respond_to?(:remove_cluster_virtual_machine_role)
           client.remove_cluster_virtual_machine_role(id: vm.id, computer_name: node)
@@ -2188,7 +2197,8 @@ module ForemanHyperv
         # percent signs, and Foreman::Exception sprintfs its message again when
         # it renders: the class is quoted, the text is not.
         logger.warn "The Hyper-V cluster would not release the role: #{e.class}"
-        raise Foreman::Exception, 'Refusing to delete a clustered virtual machine while the cluster still holds its role'
+        raise Foreman::Exception,
+              'Refusing to delete a clustered virtual machine while the cluster still holds its role'
       end
     end
 
@@ -2201,7 +2211,7 @@ module ForemanHyperv
     # the >15-character red test: the guard must not false-refuse a long name
     # that is honestly the machine's own). PowerShell's -notin is
     # case-insensitive; no case folding rides the wire beyond these terms.
-    def guarded_role_guard(vm, node)
+    def guarded_role_guard(node)
       return nil unless enablement_supported?
       return nil unless client.respond_to?(:run_cmdlist) && cluster_role_script_available?
 
@@ -2554,9 +2564,7 @@ module ForemanHyperv
         next unless volume[:id].present? && volume[:_delete] == '1'
 
         hd = vm.hard_drives.get volume[:id]
-        unless drive_deletion_allowed?(vm, hd)
-          raise ForemanHyperv::OperationRefused, DISK_UNATTRIBUTED_REFUSAL
-        end
+        raise ForemanHyperv::OperationRefused, DISK_UNATTRIBUTED_REFUSAL unless drive_deletion_allowed?(vm, hd)
 
         hd
       end
