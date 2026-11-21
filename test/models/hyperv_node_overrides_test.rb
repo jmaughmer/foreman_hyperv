@@ -37,7 +37,7 @@ class HypervNodeOverridesTest < ActiveSupport::TestCase
   alias assert_not refute
 
   CR_HOST = 'hv-node1.lab.maughmer.net'
-  CR_URL = "http://#{CR_HOST}:5985/wsman"
+  CR_URL = "http://#{CR_HOST}:5985/wsman".freeze
   VM_GUID = '94f8b7b0-2a1d-4a1d-9f2e-6c0f1d2e3a4b'
   OWNER_NODE = 'HV-NODE2'
   OVERRIDE_HOST = '192.168.1.67'
@@ -237,16 +237,26 @@ class HypervNodeOverridesTest < ActiveSupport::TestCase
 
   def test_per_node_clients_are_cached_per_node_and_never_touch_the_cr_client
     cr, fog = build_cr(overrides: "hv-node2 = #{OVERRIDE_HOST}\nhv-node3 = 192.168.1.68")
-    built = []
-    Fog::Compute.expects(:new).times(2).with do |options|
-      built << options[:hyperv_endpoint]
-      !options.key?(:hyperv_host)
-    end.returns { Object.new }
+    first = Object.new
+    second = Object.new
+    # Exact-hash expectations, no block matchers: the complete options hash IS
+    # the claim (hyperv_host absent by construction), and mocha's count stays
+    # honest — a third Fog::Compute.new anywhere is an unexpected invocation.
+    Fog::Compute.expects(:new)
+                .with(provider: :HyperV, hyperv_endpoint: "http://#{OVERRIDE_HOST}:5985/wsman",
+                      hyperv_username: 'u', hyperv_password: 'p')
+                .returns(first)
+    Fog::Compute.expects(:new)
+                .with(provider: :HyperV, hyperv_endpoint: 'http://192.168.1.68:5985/wsman',
+                      hyperv_username: 'u', hyperv_password: 'p')
+                .returns(second)
     node2 = cr.send(:client_for_node, OWNER_NODE)
-    assert_same node2, cr.send(:client_for_node, 'hv-node2'), 'same node, same instance'
+    assert_same first, node2
+    assert_same first, cr.send(:client_for_node, 'hv-node2'),
+                'same node, same instance — a cache miss would surface as an unexpected third build'
     node3 = cr.send(:client_for_node, 'HV-NODE3')
-    assert_not_same node2, node3, 'different nodes are different instances'
-    assert_equal ["http://#{OVERRIDE_HOST}:5985/wsman", 'http://192.168.1.68:5985/wsman'], built
+    assert_same second, node3
+    assert_not_same first, second, 'different nodes are different instances'
     assert_equal CR_URL, cr.url, 'the compute resource endpoint itself is untouched'
     assert_empty fog.fog_calls, 'building clients must not make fog calls'
   end

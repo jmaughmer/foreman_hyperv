@@ -208,7 +208,7 @@ module ForemanHyperv
     # exactly one string becomes the endpoint, and a silently repaired value
     # hides which string that was. (Backticks refused, not stripped — the
     # PLG-15 discipline.)
-    NODE_OVERRIDE_HOST = /\A[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)*\z/
+    NODE_OVERRIDE_HOST = /\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\z/
     NODE_OVERRIDE_PORT = /\A[1-9][0-9]{0,4}\z/
     # R17's enforcement point for "fail-closed until PLG-5b": the check runs
     # on the COMPOSED endpoint, not the override string — the compute resource
