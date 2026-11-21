@@ -268,7 +268,7 @@ module ForemanHyperv
     #
     # @return [String, nil] the reason the connection can not be used
     def connection_error
-      client.hosts.first ? nil : _('%{url} did not return a Hyper-V host') % { url: url }
+      client.hosts.first ? nil : format(_('%<url>s did not return a Hyper-V host'), url: url)
     rescue StandardError => e
       e.message
     end
@@ -347,7 +347,7 @@ module ForemanHyperv
     end
 
     def associated_host(vm)
-      associate_by("mac", vm.network_adapters.map(&:mac))
+      associate_by('mac', vm.network_adapters.map(&:mac))
     end
 
     delegate :servers, to: :client
@@ -635,9 +635,7 @@ module ForemanHyperv
       if vm.generation == :UEFI && attr[:tpm_enabled].present?
         security = vm.security
         security.tpm_enabled = attr[:tpm_enabled] == '1'
-        if security.tpm_enabled && security.key_protector.nil?
-          security.change_key_protector :new
-        end
+        security.change_key_protector :new if security.tpm_enabled && security.key_protector.nil?
         security.save
       end
       if attr[:foreman_firmware].present?
@@ -748,7 +746,9 @@ module ForemanHyperv
             deep_update_required.call(k_path, old_v, new_v)
           elsif old_v.to_s != new_v.to_s
             Rails.logger.debug do
-              "Scheduling compute instance update because #{k_path.join('.')} changed it's value from '#{old_v}' (#{old_v.class}) to '#{new_v}' (#{new_v.class})"
+              "Scheduling compute instance update because #{k_path.join('.')} " \
+                "changed it's value from '#{old_v}' (#{old_v.class}) " \
+                "to '#{new_v}' (#{new_v.class})"
             end
             return true
           end
@@ -1815,12 +1815,14 @@ module ForemanHyperv
         iface.except(:identity, :ip, :ip6).each do |k, v|
           nic.send(:"#{k}=", v.presence)
         end
-        # nic.is_legacy = Foreman::Cast.to_bool(iface[:is_legacy]) if vm.generation == :BIOS && iface[:is_legacy].present?
+        # nic.is_legacy = Foreman::Cast.to_bool(iface[:is_legacy]) if
+        #   vm.generation == :BIOS && iface[:is_legacy].present?
         # logger.debug "Creating interface with #{iface.inspect} - #{nic.inspect}\n#{nic.vlan_setting.inspect}"
         nic.save
       end
 
-      unless vm.network_adapters.all(_return_fields: %i[dynamic_mac_address_enabled]).any?(&:dynamic_mac_address_enabled)
+      unless vm.network_adapters.all(_return_fields: %i[dynamic_mac_address_enabled])
+               .any?(&:dynamic_mac_address_enabled)
         return
       end
 

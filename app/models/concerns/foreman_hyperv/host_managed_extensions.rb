@@ -17,8 +17,8 @@ module ForemanHyperv
       begin
         hyperv_sync_interfaces
       rescue StandardError => e
-        failure _("Failed to update a compute %{compute_resource} instance %{name}: %{e}") %
-                { compute_resource: compute_resource, name: name, e: e }, e
+        failure format(_('Failed to update a compute %<compute_resource>s instance %<name>s: %<e>s'),
+                       compute_resource: compute_resource, name: name, e: e), e
       end
       true
     end
@@ -27,7 +27,7 @@ module ForemanHyperv
 
     # Reconcile the mapping between Hyper-V and Foreman interfaces
     def hyperv_sync_interfaces
-      unmapped_ifaces = interfaces.select { |iface| iface.physical? && !iface.compute_attributes['identity'].present? }
+      unmapped_ifaces = interfaces.select { |iface| iface.physical? && iface.compute_attributes['identity'].blank? }
       return true if unmapped_ifaces.empty?
 
       logger.info "Mapping #{unmapped_ifaces.count} unknown interfaces for #{name}"
@@ -41,8 +41,8 @@ module ForemanHyperv
         selected_nic = vm.select_nic(fog_nics, nic)
         if selected_nic.nil?
           logger.warn "Orchestration::Compute: Could not match network interface #{nic.inspect}"
-          raise ArgumentError, _("Could not find virtual machine network interface matching %s") %
-            [nic.identifier, nic.ip, nic.name, nic.type].find(&:present?)
+          raise ArgumentError, format(_('Could not find virtual machine network interface matching %s'),
+                                      [nic.identifier, nic.ip, nic.name, nic.type].find(&:present?))
         end
 
         logger.debug "Orchestration::Compute: nic #{nic.inspect} assigned to #{selected_nic.inspect}"
