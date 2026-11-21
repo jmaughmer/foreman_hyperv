@@ -574,6 +574,6 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
 
     unknown_kind = ForemanHyperv::ClusterSighting.new(endpoint_host: HOST, kind: 'guess')
     assert_not unknown_kind.valid?
-    assert_includes unknown_kind.errors.details[:kind].map { |detail| detail[:error] }, :inclusion
+    assert_includes unknown_kind.errors.details[:kind].pluck(:error), :inclusion
   end
 end
