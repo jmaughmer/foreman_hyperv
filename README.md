@@ -80,6 +80,35 @@ Note that Foreman 5.0 has no `compute_resources/:id/test` endpoint and
 `hammer compute-resource create --provider` does not list Hyper-V, so create and
 check Hyper-V resources over the API.
 
+### Cluster nodes and `hyperv_node_overrides`
+
+A clustered compute resource reaches the node it is pointed at and, from
+cluster reads, learns the *unqualified* names of the other nodes. Those names
+are not addresses: unless the Foreman host resolves them itself, fog takes
+them to its name-completion path, which can complete against the wrong
+endpoint. The `hyperv_node_overrides` attribute tells Foreman the address of
+a node its endpoint does not serve — one `NODE = host[:port]` line per node:
+
+```
+HV-NODE2 = 192.168.1.67
+HV-NODE3 = hv-node3.lab.maughmer.net:5985
+```
+
+The value is a bare host or `host:port` only — never a scheme, never a path
+(anything else is refused on save, not repaired). The compute resource's own
+URL supplies the scheme and port; the override supplies the identity spliced
+into it, and the per-node client is built from that composed endpoint. Prefer
+IP addresses unless the Foreman host really resolves the FQDNs.
+
+Until the hardened-transport matrix is validated (PLG-5b), only the measured
+http + negotiate pattern composes: a compute resource whose URL is https
+refuses per-node addressing with an explicit refusal rather than composing an
+unvalidated transport. A node with no override and no name the endpoint can
+serve itself is refused its per-node reads — no fog call carries its name —
+which is the fail-closed default, not a bug. Disk removals and VM destroys on
+cluster resources remain refused in code until the enablement gates named by
+those refusals have landed; enablement is a code PR, not a configuration.
+
 ## Contributing
 
 Bug reports and pull requests are welcome on GitHub at https://github.com/ananace/foreman_hyperv.

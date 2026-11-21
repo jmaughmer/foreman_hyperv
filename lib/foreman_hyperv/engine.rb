@@ -13,7 +13,9 @@ module ForemanHyperv
 
           compute_resource ForemanHyperv::Hyperv
 
-          parameter_filter ComputeResource, :url, :user, :password
+          # PLG-5a: hyperv_node_overrides joins the writable CR attributes so
+          # the API and UI can carry the node→endpoint override map.
+          parameter_filter ComputeResource, :url, :user, :password, :hyperv_node_overrides
         end
       end
     end

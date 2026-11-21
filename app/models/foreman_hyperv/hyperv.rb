@@ -201,6 +201,26 @@ module ForemanHyperv
                             'public static extern int GetNodeClusterState(' \
                             'string pszNodeName, out uint pdwClusterState);'
 
+    # PLG-5a: the shape of one `NODE = host[:port]` line of the operator's
+    # node→endpoint override. Both sides are bare host names — never a
+    # scheme, never a path, never whitespace. A value outside the shape is
+    # REFUSED at save, not sanitized: the whole point of the override is that
+    # exactly one string becomes the endpoint, and a silently repaired value
+    # hides which string that was. (Backticks refused, not stripped — the
+    # PLG-15 discipline.)
+    NODE_OVERRIDE_HOST = /\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\z/
+    NODE_OVERRIDE_PORT = /\A[1-9][0-9]{0,4}\z/
+    # R17's enforcement point for "fail-closed until PLG-5b": the check runs
+    # on the COMPOSED endpoint, not the override string — the compute resource
+    # supplies scheme and TLS, so an https resource would otherwise compose an
+    # https node endpoint and simply WORK, unvalidated. Only the measured
+    # http+negotiate pattern (the d20/d21 rows) is composed; the refusal names
+    # the composition it refused out loud.
+    NODE_ENDPOINT_REFUSAL = 'Refusing to reach a cluster node through %<endpoint>s: the composed ' \
+                            'per-node endpoint is not the measured http+negotiate transport, and ' \
+                            'hardened transports stay refused until PLG-5b has validated them. ' \
+                            'No node operation was attempted.'
+
     # The self rung's refusal (N6): a target that is not the endpoint's own
     # machine is per-node territory, and per-node addressing is PLG-5a's.
     # Failing closed here is the pre-registered shipping state, not a bug.
@@ -218,6 +238,7 @@ module ForemanHyperv
                              'was created.'
 
     validates :url, :user, :password, presence: true
+    validate :hyperv_node_overrides_shape
     after_validation :validate_connectivity unless Rails.env.test?
 
     def self.provider_friendly_name
@@ -1706,7 +1727,12 @@ module ForemanHyperv
 
     # The machine as the node that owns it right now sees it, or nil when no cluster
     # role claims it — the whole point being the case where the endpoint no longer
-    # answers for it.
+    # answers for it. Every action on a machine starts with this lookup, so the
+    # node this asks is addressed by an IDENTITY that resolves, never by the
+    # role's unqualified name (N5, §45.3): the override host when the operator
+    # supplied one (PLG-5a), the endpoint host when the owner is the endpoint's
+    # own node, and nothing at all otherwise — a node without usable identity
+    # is refused its reads, and no fog call carries its name.
     def vm_from_cluster_owner(uuid)
       # Checked before the StandardError rescue below can fold it into nil: a
       # hostile id must raise, not answer "no owner", and this read takes the
@@ -1719,14 +1745,138 @@ module ForemanHyperv
       role = [client.cluster_virtual_machine_roles.all(vm_id: uuid)].flatten.compact.first
       return nil unless role&.owner_node
 
-      logger.info "Virtual machine #{uuid} is owned by cluster node #{role.owner_node}, reading it from there"
-      drop_hypervisor_list_unless_named(role.owner_node)
-      client.servers.get(uuid, computer_name: role.owner_node)
+      owner = role.owner_node.to_s.strip
+      override = node_override(owner)
+      drop_hypervisor_list_unless_named(owner)
+      if override
+        identity_host = override.split(':', 2).first
+        logger.info "Virtual machine #{uuid} is owned by cluster node #{owner}, reading it from its override endpoint"
+        return client_for_node(owner).servers.get(uuid, computer_name: identity_host)
+      end
+
+      if endpoint_serves_node?(owner)
+        logger.info "Virtual machine #{uuid} is owned by this endpoint's own node, reading it here"
+        return client.servers.get(uuid, computer_name: endpoint_host_name)
+      end
+
+      # Fail closed (N6, pre-registered): fog would take this name to its
+      # completion sink — the prefix-cache path that can complete against the
+      # WRONG endpoint and fake a pass (R22) — so the name never leaves here.
+      logger.warn "Virtual machine #{uuid} is owned by cluster node #{owner}: this compute resource " \
+                  'has no node→endpoint override for it, so reads through that node are refused ' \
+                  'until hyperv_node_overrides carries it (or PLG-5b discovers the address)'
+      nil
     rescue StandardError => e
       raise if e.is_a?(ForemanHyperv::UnsafeIdentifier)
 
+      # A refusal to compose (R17) is a decision, not an unreadable wire: it
+      # travels up as itself instead of being folded into the nil that says
+      # "no owner answered" — the same rule cluster_membership_state applies
+      # to the ledger's own refusal.
+      raise if e.is_a?(ForemanHyperv::OperationRefused)
+
       logger.warn "Clustered lookup of virtual machine #{uuid} failed: #{e.message.lines.first}"
       nil
+    end
+
+    # --- PLG-5a: the operator node→endpoint override ---------------------------
+
+    # The attribute parsed: downcased node names (the role carries NETBIOS
+    # casing; the operator may type any), values exactly as written. A node
+    # named twice means the last line wins — both were seen by the same shape
+    # check, and refusing the save over which-of-two was meant would punish
+    # the trailing comment-out with an error.
+    def node_override_map
+      @node_override_map ||= hyperv_node_overrides.to_s.each_line.filter_map do |line|
+        next if line.strip.empty?
+
+        node, value = line.split('=', 2)
+        next if node.nil? || value.nil? || node.strip.empty? || value.strip.empty?
+
+        [node.strip.downcase, value.strip]
+      end.to_h
+    end
+
+    def node_override(node_name)
+      node_override_map[node_name.to_s.strip.downcase]
+    end
+
+    # The composed per-node endpoint (N4): scheme, TLS and port come from the
+    # compute resource; the override supplies ONLY the identity spliced in.
+    # The path is /wsman because WinRM always answers there. The R17 check is
+    # on this composition: an unparseable endpoint has no measured scheme
+    # either, so it refuses too.
+    def node_endpoint(node_name)
+      override = node_override(node_name)
+      return nil if override.nil?
+
+      identity_host, identity_port = override.split(':', 2)
+      base = begin
+        URI.parse(url.to_s)
+      rescue URI::Error
+        nil
+      end
+      composed = format('%<scheme>s://%<host>s:%<port>s/wsman',
+                        scheme: base&.scheme,
+                        host: identity_host,
+                        port: identity_port || base&.port)
+      unless base&.scheme == 'http'
+        raise ForemanHyperv::OperationRefused, format(NODE_ENDPOINT_REFUSAL, endpoint: composed)
+      end
+
+      composed
+    end
+
+    # A SEPARATE Fog::Compute per node (N4): hyperv_host is never passed, so
+    # fog cannot compose an endpoint from it behind our back; the endpoint
+    # arrives complete. One instance per node per resource, so one connection
+    # cache per node — R22's "exactly one connection" is about THIS instance.
+    def client_for_node(node_name)
+      @node_clients ||= {}
+      @node_clients[node_name.to_s.strip.downcase] ||= Fog::Compute.new(
+        provider: :HyperV,
+        hyperv_endpoint: node_endpoint(node_name),
+        hyperv_username: user,
+        hyperv_password: password
+      )
+    end
+
+    # Whether the role's owner is the node this endpoint itself serves: the
+    # endpoint host fully qualified, or as the bare first label the NETBIOS
+    # name carries (case-insensitive). A first-label collision across two
+    # domains reads from the endpoint, misses, and answers nil — a miss,
+    # never a wrong machine, because GUIDs are unique and a node that does
+    # not host the GUID answers NotFound.
+    def endpoint_serves_node?(node_name)
+      endpoint = endpoint_host_name
+      return false if endpoint.nil? || node_name.blank?
+
+      asked = node_name.to_s.strip.downcase
+      asked == endpoint || asked == endpoint.split('.').first
+    end
+
+    # Each non-blank line must read NODE = host[:port]. The error names the
+    # line's node verbatim, because the operator has to know WHICH line to
+    # fix; the offending value rides in the message too.
+    def hyperv_node_overrides_shape
+      hyperv_node_overrides.to_s.each_line do |line|
+        next if line.strip.empty?
+
+        node, value = line.split('=', 2)
+        if node.nil? || value.nil? || node.strip.empty? || value.strip.empty?
+          errors.add(:hyperv_node_overrides, "line #{line.inspect} is not NODE = host[:port]")
+          next
+        end
+
+        host, port = value.strip.split(':', 2)
+        next if NODE_OVERRIDE_HOST.match?(node.strip) &&
+                NODE_OVERRIDE_HOST.match?(host) &&
+                (port.nil? || (NODE_OVERRIDE_PORT.match?(port) && port.to_i <= 65_535))
+
+        errors.add(:hyperv_node_overrides,
+                   "for node #{node.strip}: #{value.strip.inspect} is not a bare host or host:port " \
+                   '(no scheme, no path, port 1-65535) — refused, not repaired')
+      end
     end
 
     def validate_vm(attr, new: false)
