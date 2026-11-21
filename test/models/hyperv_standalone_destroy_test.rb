@@ -522,9 +522,12 @@ class HypervStandaloneDestroyTest < ActiveSupport::TestCase
 
   def test_a_machine_fog_cannot_find_is_the_same_nothing_as_not_found
     fog = allow_standalone(GateFog.new)
+    cr, _fog, vm = build_cr(fog: fog)
+    # After build_cr, because build_cr wires its own machine in: the fog now
+    # answers no machine at all for any lookup.
     fog.servers_default = ServersDouble.new(nil)
-    cr, _fog, _vm = build_cr(fog: fog)
 
     assert_equal true, cr.destroy_vm(VM_GUID)
+    assert_empty vm.calls, 'nothing was touched: there was nothing to touch'
   end
 end

@@ -682,11 +682,6 @@ module ForemanHyperv
       when :standalone
         nil
       when :clustered
-        # B6's mirror on the destroy side (plan §2 item 9): an observation of
-        # a cluster goes on the insert-only ledger BEFORE the refusal returns,
-        # so a later run of clean reads can never unlock this endpoint — the
-        # sighting outlives whatever the machine and host read next.
-        persist_cluster_sighting(kind: 'sighting', reason: 'a destroy observed a cluster on this endpoint')
         raise ForemanHyperv::OperationRefused, DESTROY_REFUSAL
       when :not_self
         raise ForemanHyperv::OperationRefused, DESTROY_SELF_RUNG_REFUSAL
@@ -1103,12 +1098,22 @@ module ForemanHyperv
 
       # The machine's own reported role, before any gate read: a role is a
       # claim on config and disks no stand-alone proof can talk anyone out of.
-      return :clustered if vm.respond_to?(:clustered?) && vm.clustered?
+      # B6's mirror on the destroy side (plan §2 item 9): every clustered
+      # observation the gate makes lands on the insert-only ledger before the
+      # refusal returns — the membership read already records its own row, so
+      # the readings this gate adds append theirs here, and a later run of
+      # clean reads can never unlock this endpoint.
+      if vm.respond_to?(:clustered?) && vm.clustered?
+        persist_cluster_sighting(kind: 'sighting', reason: 'the machine fog reported a cluster role')
+        return :clustered
+      end
 
       case cluster_membership_state
       when :not_clustered
         nil
       when :clustered
+        # The sighting went out with the read itself (cluster_membership_state
+        # appends it); this branch only decides and refuses.
         logger.warn 'Refusing to destroy a virtual machine: the endpoint answered a cluster membership row'
         return :clustered
       else
@@ -1125,6 +1130,7 @@ module ForemanHyperv
           # Both stores present under a not-clustered membership read is the
           # measured maintenance shape (d22): "not proven stand-alone" is
           # exactly what the definition of a cluster compute resource turns on.
+          persist_cluster_sighting(kind: 'sighting', reason: "the #{marker} cluster marker read answered present")
           logger.warn "Refusing to destroy a virtual machine: the #{marker} marker read answered present"
           return :clustered
         else
@@ -1137,6 +1143,7 @@ module ForemanHyperv
       when :standalone
         nil
       when :clustered
+        persist_cluster_sighting(kind: 'sighting', reason: 'the cluster-service state read answered joined')
         logger.warn 'Refusing to destroy a virtual machine: the cluster-service state read answered joined'
         return :clustered
       else
