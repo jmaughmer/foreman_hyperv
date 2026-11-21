@@ -193,6 +193,13 @@ module ForemanHyperv
       cmdlet: 'Get-Item',
       path: 'C:\Windows\Cluster'
     }.freeze
+    # The reviewed P/Invoke definition, carried as a constant so the script
+    # built further below never breaks the length rule. Nothing else reaches
+    # it; it sits with the two reads it belongs to, not in the private
+    # section (Lint/UselessConstantScoping).
+    CLUSTER_API_SIGNATURE = '[DllImport("clusapi.dll", CharSet=CharSet.Unicode, SetLastError=true)] ' \
+                            'public static extern int GetNodeClusterState(' \
+                            'string pszNodeName, out uint pdwClusterState);'
 
     # The self rung's refusal (N6): a target that is not the endpoint's own
     # machine is per-node territory, and per-node addressing is PLG-5a's.
@@ -1173,7 +1180,7 @@ module ForemanHyperv
         return true
       end
 
-      ForemanHyperv::ClusterSighting.where(endpoint_host: host, kind: 'sighting').exists?
+      ForemanHyperv::ClusterSighting.exists?(endpoint_host: host, kind: 'sighting')
     rescue ActiveRecord::ActiveRecordError => e
       logger.warn "The destroy gate could not read the sightings ledger: #{e.class}"
       true
@@ -1247,12 +1254,6 @@ module ForemanHyperv
     # directory opened with Get-Item. Only the two path constants and the
     # reviewed P/Invoke definition are interpolated — no user input is anywhere
     # near it, and the whole read is one command.
-    # The reviewed P/Invoke definition, carried as a constant so the script
-    # below never breaks the length rule. Nothing else reaches it.
-    CLUSTER_API_SIGNATURE = '[DllImport("clusapi.dll", CharSet=CharSet.Unicode, SetLastError=true)] ' \
-                            'public static extern int GetNodeClusterState(' \
-                            'string pszNodeName, out uint pdwClusterState);'
-
     def cluster_service_read_script
       svc = SERVICE_RECORD_READ
       cdir = CLUSTER_DIRECTORY_READ
