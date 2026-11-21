@@ -37,7 +37,8 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 #    characters, a `..` segment, a trailing `.` or space), AND the wire
 #    pre-flight — fog's literal-path Test-Path/Get-Item/Get-ChildItem in ONE
 #    script — answers present, not a reparse point, not hidden, and its
-#    *.vmcx/*.vmrs are all this machine's with at least one .vmcx present;
+#    every *.vmcx/*.vmrs (GUID-named, one level down in the real layout)
+#    is attributed to this machine's id or name, with at least one .vmcx present;
 #  * a disk file is deleted only when its parent is the machine's attributed
 #    folder or a hypervisor-named root (call-site check) AND its
 #    support_persistent_reservations reads false — fog's own model refuses
@@ -337,8 +338,10 @@ class HypervEnablementTest < ActiveSupport::TestCase
 
   def test_the_preflight_answers_the_delete_needs
     cr, = build_cr(full_fog)
-    assert preflight_answer(cr, 'NAMES:lab-vm2.vmcx;lab-vm2.vmrs;lab-vm2.avhdx')
-    assert preflight_answer(cr, 'NAMES:lab-vm2.vmcx;Snapshot;lab-vm2.avhdx')
+    assert preflight_answer(cr, "NAMES:Virtual Machines;Snapshots;#{GUID}.vmcx;#{GUID}.vmrs;lab-vm2.vhdx;lab-vm2.avhdx"),
+           'the layout the hypervisor actually writes: GUID-named config inside Virtual Machines'
+    assert preflight_answer(cr, "NAMES:VIRTUAL MACHINES;#{GUID.upcase}.VMCX"), 'matching ignores case as the filesystem does'
+    assert preflight_answer(cr, 'NAMES:lab-vm2.vmcx;Snapshot;lab-vm2.avhdx'), 'a name-named config still attributes'
   end
 
   def test_every_preflight_answer_that_is_not_a_clean_owning_answer_keeps_the_folder
@@ -347,6 +350,10 @@ class HypervEnablementTest < ActiveSupport::TestCase
     assert_not preflight_answer(cr, 'KEEP:JUNCTION')
     assert_not preflight_answer(cr, 'KEEP:HIDDEN')
     assert_not preflight_answer(cr, 'NAMES:vm99.vmcx;lab-vm2.vmcx'), 'a second machine’s config collides'
+    assert_not preflight_answer(cr, "NAMES:Virtual Machines;#{GUID}.vmcx;deadbeef-1111-2222-3333-444444444444.vmcx"),
+               'a second machine’s GUID config collides'
+    assert_not preflight_answer(cr, "NAMES:Virtual Machines;deadbeef-1111-2222-3333-444444444444.vmcx"),
+               'a folder whose only config belongs to another machine is not this machine’s'
     assert_not preflight_answer(cr, 'NAMES:'), 'no .vmcx means this is not provably the config folder'
     assert_not preflight_answer(cr, 'NAMES:lab-vm2.vhdx'), 'no .vmcx means this is not provably the config folder'
     assert_not preflight_answer(cr, 'C:\VMs\lab-vm2'), 'an answer outside the shape licenses nothing'
@@ -371,6 +378,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     assert_includes scripts.first, '-LiteralPath'
     assert_includes scripts.first, 'ReparsePoint'
     assert_includes scripts.first, 'Hidden'
+    assert_includes scripts.first, '-Recurse', 'the config lives one level down; the read must reach it'
   end
 
   # ---- the drive rule -----------------------------------------------------------
@@ -417,7 +425,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     cr, = build_cr(full_fog)
     d1 = FakeHdd.new('d1', 'C:\VMs\lab-vm2\disk1.vhdx')
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [d1])
-    vm.set_preflight('NAMES:lab-vm2.vmcx')
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
     assert enabled_destroy(cr, vm)
     assert_equal [true], d1.calls, 'the attributed, unshared drive file goes'
     assert_equal [[:destroy, true]], destroy_calls(vm)
@@ -429,7 +437,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     cr, = build_cr(full_fog)
     kept = FakeHdd.new('d1', 'C:\VMs\lab-vm2\shared.vhdx', reservations: true)
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [kept])
-    vm.set_preflight('NAMES:lab-vm2.vmcx')
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
     assert enabled_destroy(cr, vm)
     assert_equal [false], kept.calls
     assert_equal [[:destroy, false]], destroy_calls(vm)
@@ -439,7 +447,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     cr, = build_cr(full_fog)
     elsewhere = FakeHdd.new('d1', 'D:\pre-existing\disk.vhdx')
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [elsewhere])
-    vm.set_preflight('NAMES:lab-vm2.vmcx')
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
     assert enabled_destroy(cr, vm)
     assert_equal [false], elsewhere.calls
     assert_equal [[:destroy, true]], destroy_calls(vm)
@@ -468,7 +476,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     cr, = build_cr(full_fog)
     d1 = FakeHdd.new('d1', 'C:\ClusterStorage\Volume1\lab-vm2\disk1.vhdx')
     vm = attributed_vm(drives: [d1], owner_node: 'hv-node2')
-    vm.set_preflight('NAMES:lab-vm2.vmcx')
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
     assert enabled_destroy(cr, vm, state: :clustered)
 
     cmdlists = vm.calls.select { |c| c.is_a?(Array) && c.first == :run_cmdlist }
@@ -546,7 +554,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     cr, = build_cr(FogMissing.new(missing: :input_hardening))
     d1 = FakeHdd.new('d1', 'C:\VMs\lab-vm2\disk1.vhdx')
     vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [d1])
-    vm.set_preflight('NAMES:lab-vm2.vmcx')
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
     assert enabled_destroy(cr, vm, state: :standalone)
     assert_equal [[:destroy, false]], destroy_calls(vm)
     d1.calls.each { |c| assert_equal false, c }

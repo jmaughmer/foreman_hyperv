@@ -152,10 +152,11 @@ module ForemanHyperv
                                 'detached and no file was deleted; the disk stays exactly as it is.'
 
     # The folder pre-flight, one round trip: the folder's existence, its
-    # reparse/hidden attributes, and its children's names. The tokens are
-    # fixed words, never remote text beyond the child NAMES (which this
-    # parses but never re-quotes); %<folder>s arrives from the string rule,
-    # already attributed and single-quoted.
+    # reparse/hidden attributes, and its descendants' names (recursive — the
+    # config lives one level down). The tokens are fixed words, never remote
+    # text beyond the child NAMES (which this parses but never re-quotes);
+    # %<folder>s arrives from the string rule, already attributed and
+    # single-quoted.
     FOLDER_PREFLIGHT_SCRIPT = <<~SCRIPT
       $p = %<folder>s
       if (-not (Test-Path -LiteralPath $p)) { 'ABSENT' }
@@ -163,7 +164,7 @@ module ForemanHyperv
         $i = Get-Item -LiteralPath $p -Force
         if ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { 'KEEP:JUNCTION' }
         elseif ($i.Attributes -band [System.IO.FileAttributes]::Hidden) { 'KEEP:HIDDEN' }
-        else { 'NAMES:' + ((Get-ChildItem -LiteralPath $p -Force | ForEach-Object { $_.Name }) -join ';') }
+        else { 'NAMES:' + ((Get-ChildItem -LiteralPath $p -Force -Recurse | ForEach-Object { $_.Name }) -join ';') }
       }
     SCRIPT
 
@@ -1262,21 +1263,24 @@ module ForemanHyperv
       :keep
     end
 
-    # The content attribution: this machine's folder holds its config, and a
-    # second machine's config in the same folder is the collision the rule
-    # exists for — recursing would delete both. Snapshots, avhdx files and the
-    # snapshot directory are this machine's own and pass with it.
+    # The content attribution, measured against the layout the hypervisor
+    # actually writes: the config lives ONE LEVEL DOWN in `Virtual Machines\`
+    # and is named for the machine's GUID (`{id}.vmcx`, `{id}.vmrs`), not for
+    # its name — so attribution runs on the id (the machine name second, for
+    # any layout that spells it), and the read is recursive. A second
+    # machine's config in this folder is the collision the rule exists for —
+    # recursing would delete both. Snapshots, avhdx files and the snapshot
+    # directories carry no config signature and pass with the folder.
     def folder_contents_ok?(vm, folder, names_blob)
       names = names_blob.split(';').map(&:strip).reject(&:empty?).map(&:downcase)
       configs = names.select { |n| n.end_with?('.vmcx', '.vmrs') }
-      base = vm.name.to_s.downcase
-      own_names = ["#{base}.vmcx", "#{base}.vmrs"]
-      owned = configs.all? { |n| own_names.include?(n) }
-      unless owned
+      attributed = [vm.id.to_s.downcase, vm.name.to_s.downcase]
+      foreign = configs.reject { |n| attributed.include?(n.sub(/\.(vmcx|vmrs)\z/, '')) }
+      unless foreign.empty?
         return keep_folder(folder, 'another machine’s config file lives in it')
       end
 
-      unless configs.any? { |n| n.end_with?('.vmcx') }
+      unless configs.any? { |n| n.end_with?('.vmcx') && attributed.include?(n.delete_suffix('.vmcx')) }
         return keep_folder(folder, 'this folder holds no config file of this machine')
       end
 
