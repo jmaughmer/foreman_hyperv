@@ -18,6 +18,17 @@ module ForemanHyperv
       end
     end
 
+    # Add any db migrations. Without this the app's own maintenance check sees
+    # the plugin's pending migrations through the plugin registry, while
+    # foreman-rake db:migrate — which walks app.config.paths — never finds
+    # them, and the install is stuck: the pattern is verbatim from
+    # foreman_remote_execution's engine on the same Foreman.
+    initializer 'foreman_hyperv.load_app_instance_data' do |app|
+      ForemanHyperv::Engine.paths['db/migrate'].existent.each do |path|
+        app.config.paths['db/migrate'] << path
+      end
+    end
+
     assets_to_precompile =
       Dir.chdir(root) do
         Dir['app/assets/{javascripts,stylesheets}/**/*'].map do |f|

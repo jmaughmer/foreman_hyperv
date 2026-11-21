@@ -123,9 +123,28 @@ class HypervRefusalsTest < ActiveSupport::TestCase
     assert_empty @fog.calls
   end
 
-  def test_create_is_refused_everywhere
+  # PLG-15b opened creates for stand-alone machines only. A fog that answers
+  # the membership query with anything but a row is unreadable, and
+  # unreadable is refused before a single marker is asked, before any fog
+  # command goes out, and with none of the user's strings on the wire.
+  def test_create_is_refused_when_the_endpoint_does_not_read_as_standalone
     error = assert_raises(ForemanHyperv::OperationRefused) { @cr.create_vm(name: 'lab-vm01') }
-    assert_includes error.message, 'Creating virtual machines is refused'
+    assert_includes error.message, 'did not read as a stand-alone Hyper-V host'
+    assert_not_includes @fog.strings, 'lab-vm01'
+    assert_empty @fog.calls.select { |(name, _args)| name == :run_cmd },
+                 'the markers are only asked when the classifier already answered not-clustered'
+    assert_empty @fog.calls.select { |(name, _args)| %i[servers run_cmdlist].include?(name) },
+                 'a refused create sends nothing: no servers collection, no fog command'
+  end
+
+  # The cluster path stayed locked exactly where PLG-15 left it: refused as
+  # the very first act, before the membership read, quoting the canonical
+  # enablement sentence.
+  def test_cluster_create_is_refused_before_anything_is_asked
+    error = assert_raises(ForemanHyperv::OperationRefused) do
+      @cr.create_vm(name: 'lab-vm01', cluster_name: 'hv-cluster')
+    end
+    assert_includes error.message, 'refused in code until FOG-10, PLG-15b and PLG-21b have merged'
     assert_empty @fog.calls
   end
 

@@ -163,13 +163,17 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
   # One fog role row, shaped like Fog's ClusterVirtualMachineRole model.
   RoleDouble = Struct.new(:virtual_machine_id, :name, :owner_node)
 
-  # Captures the log lines the strand record is asserted on.
+  # Captures the log lines the strand record is asserted on. The error sink
+  # exists because PLG-21b's strand record also writes the sightings ledger,
+  # and a database without that migration answered must surface as a logged
+  # error, not as a crash of the touch-nothing contract.
   class LogRecorder
-    attr_reader :warnings, :infos
+    attr_reader :warnings, :infos, :errors
 
     def initialize
       @warnings = []
       @infos = []
+      @errors = []
     end
 
     def warn(message)
@@ -178,6 +182,10 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
 
     def info(message)
       @infos << message.to_s
+    end
+
+    def error(message)
+      @errors << message.to_s
     end
 
     def debug(message); end
@@ -197,9 +205,11 @@ class HypervRoleReadbackTest < ActiveSupport::TestCase
   # A compute resource whose whole fog world is the double, with the create
   # path's non-role steps stubbed out: NIC, volume and placement behaviour is
   # pinned by the PLG-15 suite, and this file is about the role write and its
-  # readback. create_allowed? is stubbed true because PLG-15 refuses creates
-  # until the enablement PR flips that predicate — enablement is not what these
-  # tests pin.
+  # readback. create_allowed? is stubbed true because PLG-15b keeps the gate
+  # closed on the stand-alone reads this double cannot answer — and the
+  # cluster create path stays refused until PLG-15c anyway — so only the
+  # stub keeps these tests on the role-write contract itself; enablement is
+  # not what they pin.
   def build_cr(fog: FogDouble.new, vm: VmDouble.new, log: LogRecorder.new, add_defined: true)
     fog.servers_default = ServersDouble.new(vm)
     fog.define_add if add_defined
