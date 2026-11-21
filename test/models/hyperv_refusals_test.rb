@@ -117,7 +117,16 @@ class HypervRefusalsTest < ActiveSupport::TestCase
     assert_empty @fog.calls
   end
 
-  def test_destroy_is_refused_everywhere
+  # PLG-15c opened destroys for machines on endpoints PROVEN stand-alone.
+  # Here the machine fog reports answers with a cluster role, which is the
+  # one gate reading that decides before a single membership, marker, or
+  # service-state command is asked — the refusal still raises (never a silent
+  # success that would drop the host record), it quotes the enablement
+  # contract, and the fog spy still never sees a command.
+  def test_destroy_refuses_a_machine_that_reports_a_cluster_role
+    vm = stub('vm', clustered?: true)
+    @cr.stubs(:find_vm_by_uuid).returns(vm)
+
     error = assert_raises(ForemanHyperv::OperationRefused) { @cr.destroy_vm(VALID_GUID) }
     assert_includes error.message, 'refused in code until FOG-10, PLG-15b and PLG-21b have merged'
     assert_empty @fog.calls

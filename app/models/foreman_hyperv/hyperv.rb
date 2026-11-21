@@ -38,12 +38,43 @@ module ForemanHyperv
                                 'A host that reads as clustered, or that cannot be read at all, stays ' \
                                 'refused; this lifts by a merged PR, never by configuration.'
 
-    DESTROY_REFUSAL = 'Destroying virtual machines is refused in every Hyper-V compute resource in this ' \
-                      'plugin version. All disk removals and VM destroys on cluster compute resources ' \
-                      'are refused in code until FOG-10, PLG-15b and PLG-21b have merged and (m) and ' \
-                      'its (k″) rows have landed; removal based solely on an absent role additionally ' \
-                      'requires a named method that proves node-set completeness; enablement is a code ' \
-                      'PR, not a configuration.'
+    # PLG-15c opened the destroy path for machines on endpoints PROVEN
+    # stand-alone (standalone_destroy_state below). Everything the definition
+    # calls a cluster compute resource stays refused — a clustered reading, a
+    # sticky sighting, a configured marker that answered present, a machine
+    # reporting a cluster role — and it hears the enablement contract as
+    # written. The until-clause has landed; §4(22) says it is necessary, not
+    # sufficient, and the remaining lifting is the enablement PR's, never a
+    # setting's.
+    DESTROY_REFUSAL = 'Destroying a virtual machine on this Hyper-V compute resource is refused: the ' \
+                      'endpoint was not proven a stand-alone Hyper-V host — a cluster membership ' \
+                      'reading, a stored cluster sighting, a configured-cluster marker, or the ' \
+                      'machine’s own cluster role answered instead. All disk removals and VM destroys ' \
+                      'on cluster compute resources are refused in code until FOG-10, PLG-15b and ' \
+                      'PLG-21b have merged and (m) and its (k″) rows have landed; removal based solely ' \
+                      'on an absent role additionally requires a named method that proves node-set ' \
+                      'completeness; enablement is a code PR, not a configuration. Nothing was stopped ' \
+                      'and nothing was deleted.'
+
+    # The destroy gate refuses on every unknown, as its sister create gate
+    # does, and the message says what the gate asks and what an unknown costs.
+    STANDALONE_DESTROY_REFUSAL = 'Destroying a virtual machine on this Hyper-V compute resource is ' \
+                                 'refused: the endpoint did not read as a stand-alone Hyper-V host on ' \
+                                 'this attempt — the cluster membership read, the cluster-service ' \
+                                 'state read, the cluster-service registry marker, or the cluster ' \
+                                 'database file marker did not answer as expected. Nothing was ' \
+                                 'stopped and nothing was deleted. A host that reads as clustered, or ' \
+                                 'that cannot be read at all, stays refused; this lifts by a merged ' \
+                                 'PR, never by configuration.'
+
+    # The destroy-side self rung: the same N6 refusal the create path answers
+    # with, worded for a machine that already exists. Per-node addressing is
+    # PLG-5a's; until it lands, a VM on another node stays refused — the
+    # pre-registered shipping state.
+    DESTROY_SELF_RUNG_REFUSAL = 'Destroying a virtual machine on a computer other than this compute ' \
+                                'resource’s own endpoint is refused until per-node addressing lands: ' \
+                                'the name the endpoint gives itself did not match the machine’s ' \
+                                'computer name. Nothing was stopped and nothing was deleted.'
 
     DISK_REFUSAL = 'Removing disks from a virtual machine is refused in every Hyper-V compute resource ' \
                    'in this plugin version. All disk removals and VM destroys on cluster compute ' \
@@ -127,6 +158,48 @@ module ForemanHyperv
         path: 'C:\Windows\Cluster\CLUSDB'
       }.freeze
     }.freeze
+
+    # PLG-15c's belt-and-braces cluster-service state read. GetNodeClusterState
+    # (clusapi.dll) — the enum is MS Learn fetched 2026-11-19 and every value
+    # this gate acts on is a measured lab cell (hyperv-e-results §45.2, §46.4):
+    # a healthy member reads 19, a stopped-joined one 3, and joined-and-Disabled
+    # 1 — BYTE-IDENTICAL to never-joined, which is why the dual markers, not
+    # this read, carry the maintenance refusal (plan §2 item 9's honest role
+    # statement). 0 means "no cluster service or config", not "feature absent":
+    # feature-absent (d19) and registration-destroyed (d23g) read it alike, and
+    # the mid-removal cell answered rc=2 — which is why rc≠0 and a raising
+    # P/Invoke are ALWAYS indeterminate (N2), never a feature-absent reading.
+    # Hosts that block Add-Type (R11: Constrained Language Mode, WDAC, AppLocker)
+    # read indeterminate PERMANENTLY, so standalone destroy never unlocks on
+    # them — the accepted availability trade, with a manual runbook in the docs.
+    CLUSAPI_NO_CLUSTER_SERVICE = 0
+    CLUSAPI_NOT_CONFIGURED = 1
+    CLUSAPI_NOT_RUNNING = 3
+    CLUSAPI_RUNNING = 19
+
+    # The two stores the state-0 branch additionally asks about, read with the
+    # same named-primitive discipline as the markers (N3): the service record is
+    # what the lab measured it as — the ClusSvc service key itself, opened with
+    # the primitive whose not-found answer row (v) measured — and the cluster
+    # directory is read the same way but is NOT a configured-marker: an evicted
+    # node keeps it as an empty husk and a feature install recreates it empty
+    # (twice measured, §45.2/§46.5), so the gate consults it only where the
+    # plan's B9/N2 rule names it, beside a missing service record.
+    SERVICE_RECORD_READ = {
+      cmdlet: 'Get-ItemProperty',
+      path: 'HKLM:\SYSTEM\CurrentControlSet\Services\ClusSvc'
+    }.freeze
+    CLUSTER_DIRECTORY_READ = {
+      cmdlet: 'Get-Item',
+      path: 'C:\Windows\Cluster'
+    }.freeze
+    # The reviewed P/Invoke definition, carried as a constant so the script
+    # built further below never breaks the length rule. Nothing else reaches
+    # it; it sits with the two reads it belongs to, not in the private
+    # section (Lint/UselessConstantScoping).
+    CLUSTER_API_SIGNATURE = '[DllImport("clusapi.dll", CharSet=CharSet.Unicode, SetLastError=true)] ' \
+                            'public static extern int GetNodeClusterState(' \
+                            'string pszNodeName, out uint pdwClusterState);'
 
     # The self rung's refusal (N6): a target that is not the endpoint's own
     # machine is per-node territory, and per-node addressing is PLG-5a's.
@@ -601,25 +674,41 @@ module ForemanHyperv
     end
 
     def destroy_vm(uuid)
-      # Refused outright (PLG-15) — and the id is checked first so a hostile id
-      # raises rather than arriving below, where the rescue turns NotFound into
-      # a successful delete: reporting a refused destroy as success would drop
-      # the host record and orphan the machine. UnsafeIdentifier and
-      # OperationRefused are outside that rescue by class.
+      # PLG-15c: the destroy path answers stand-alone machines only, and the
+      # gate below decides on the machine fog reported — its role flag and its
+      # computer name are two of its inputs — so the lookup comes first. The
+      # id is still validated before anything else, UnsafeIdentifier and
+      # OperationRefused still travel outside the NotFound rescue by class,
+      # and a fog that answers no machine at all is the same nothing the
+      # rescue already answers "done" for.
       ForemanHyperv::InputValidation.validate_id!(uuid)
-      raise ForemanHyperv::OperationRefused, DESTROY_REFUSAL unless destroy_allowed?
-
       vm = find_vm_by_uuid(uuid)
-      # A role keeps its claim on the machine's config and disks after the node
-      # itself has stopped caring: take it out first, or the cluster is left holding
-      # a role for a machine that is gone. (Whether Remove alone takes a running role
-      # offline, or the role wants a Stop first, is the lab's to confirm — vm.stop
-      # below covers the power state either way.)
-      remove_cluster_role(vm) if vm.respond_to?(:clustered?) && vm.clustered?
+      return true if vm.nil?
+
+      case standalone_destroy_state(vm)
+      when :standalone
+        nil
+      when :clustered
+        raise ForemanHyperv::OperationRefused, DESTROY_REFUSAL
+      when :not_self
+        raise ForemanHyperv::OperationRefused, DESTROY_SELF_RUNG_REFUSAL
+      else
+        raise ForemanHyperv::OperationRefused, STANDALONE_DESTROY_REFUSAL
+      end
+      # A machine the gate let through has no cluster role to take out: it
+      # refused every role the machine reported, arm (a) refused every
+      # membership the endpoint answered, and a host proven stand-alone has no
+      # cluster to ask. remove_cluster_role stays for the day the cluster
+      # destroy path lands with the enablement PR.
       vm.stop turn_off: true
-      vm.hard_drives.each { |hdd| hdd.destroy(underlying: true) }
-      # TODO: Remove the empty VM folder
-      vm.destroy(vm.path.end_with?(vm.name))
+      # PLG-15c's scope, identical to PLG-15b's rollback: Remove-VM and drive
+      # DETACH only. The VHDX files and the config folder stay — file and
+      # folder deletes are the enablement PR's decisions, never a destroy's
+      # side effect.
+      vm.hard_drives.each { |hdd| hdd.destroy(underlying: false) }
+      # TODO: Remove the empty VM folder (PLG-22's decision, with its collision
+      # preflight — not this PR's).
+      vm.destroy(false)
     rescue ActiveRecord::RecordNotFound, Fog::Errors::NotFound
       # if the VM does not exists, we don't really care.
       true
@@ -759,10 +848,11 @@ module ForemanHyperv
     private
 
     # PLG-15's refusal switchboard, opened one path at a time by reviewed PRs.
-    # PLG-15b opens creates for stand-alone machines only (below); destroys
-    # and disk removals stay refused everywhere — the stand-alone destroy is
-    # PLG-15c's and the cluster paths stay locked behind the canonical
-    # enablement sentence the refusal messages quote. Lifting a guard is a
+    # PLG-15b opens creates for stand-alone machines only; PLG-15c opens
+    # destroys for stand-alone machines only (standalone_destroy_state below);
+    # disk removals stay refused everywhere and every cluster path stays
+    # locked behind the canonical enablement sentence the refusal messages
+    # quote — those lifts belong to the enablement PR. Lifting a guard is a
     # merged PR whose gate those messages name, never a setting. They read as
     # predicates rather than bare raises so the code below each guard stays
     # live for the reader: it is the path that runs the day a guard flips,
@@ -794,10 +884,6 @@ module ForemanHyperv
         return false
       end
       true
-    end
-
-    def destroy_allowed?
-      false
     end
 
     def disk_removal_allowed?
@@ -999,6 +1085,229 @@ module ForemanHyperv
       MARKER_READ
     end
 
+    # --- PLG-15c: the stand-alone destroy gate ---------------------------------------
+
+    # The rule as plan §2 item 9 writes it, in the plan's own order, and every
+    # reading is made again on this attempt — there is nothing to configure and
+    # nothing is cached. The answers it gives: :standalone (every condition
+    # provably met), :clustered (any reading that makes this a cluster compute
+    # resource by the definition — a stored sighting, a reported role, a
+    # membership row, a present marker, a joined or maintenance service state),
+    # :indeterminate (anything that says nothing: denied reads, unparsable
+    # tokens, rc≠0, a raising P/Invoke, an unreadable ledger), and :not_self
+    # (the machine's computer name re-read at destroy time is not the name the
+    # endpoint gives itself — per-node addressing is PLG-5a's). Destroy-side
+    # safety on the accepted-on-argument broken-node shape (§47.4, d23g) rides
+    # on the ledger alone, with its pre-15b blind spot — stated plainly in the
+    # plan and nowhere hidden here.
+    def standalone_destroy_state(vm)
+      return :clustered if sticky_cluster_sighting?
+
+      # The machine's own reported role, before any gate read: a role is a
+      # claim on config and disks no stand-alone proof can talk anyone out of.
+      # B6's mirror on the destroy side (plan §2 item 9): every clustered
+      # observation the gate makes lands on the insert-only ledger before the
+      # refusal returns — the membership read already records its own row, so
+      # the readings this gate adds append theirs here, and a later run of
+      # clean reads can never unlock this endpoint.
+      if vm.respond_to?(:clustered?) && vm.clustered?
+        persist_cluster_sighting(kind: 'sighting', reason: 'the machine fog reported a cluster role')
+        return :clustered
+      end
+
+      case cluster_membership_state
+      when :not_clustered
+        nil
+      when :clustered
+        # The sighting went out with the read itself (cluster_membership_state
+        # appends it); this branch only decides and refuses.
+        logger.warn 'Refusing to destroy a virtual machine: the endpoint answered a cluster membership row'
+        return :clustered
+      else
+        logger.warn 'Refusing to destroy a virtual machine: the cluster membership read did not answer'
+        return :indeterminate
+      end
+
+      MARKER_READS.each_key do |marker|
+        state = marker_state(marker)
+        case state
+        when :absent
+          next
+        when :present
+          # Both stores present under a not-clustered membership read is the
+          # measured maintenance shape (d22): "not proven stand-alone" is
+          # exactly what the definition of a cluster compute resource turns on.
+          persist_cluster_sighting(kind: 'sighting', reason: "the #{marker} cluster marker read answered present")
+          logger.warn "Refusing to destroy a virtual machine: the #{marker} marker read answered present"
+          return :clustered
+        else
+          logger.warn "Refusing to destroy a virtual machine: the #{marker} marker read answered #{state}"
+          return :indeterminate
+        end
+      end
+
+      case cluster_service_state
+      when :standalone
+        nil
+      when :clustered
+        persist_cluster_sighting(kind: 'sighting', reason: 'the cluster-service state read answered joined')
+        logger.warn 'Refusing to destroy a virtual machine: the cluster-service state read answered joined'
+        return :clustered
+      else
+        logger.warn 'Refusing to destroy a virtual machine: the cluster-service state read did not answer'
+        return :indeterminate
+      end
+
+      # The destroy-time re-read (plan §2 item 9): the machine is where the
+      # endpoint says it is, or the destroy is per-node addressing wearing a
+      # UUID.
+      return :not_self unless self_rung?(vm)
+
+      :standalone
+    end
+
+    # B6's ledger read, on the destroy side: a sticky sighting is the endpoint's
+    # own past, and the definition is a SIGHTING row — a strand record is one
+    # machine with an unresolved role write, not an endpoint that ever answered
+    # as a cluster, and it does not make a host sticky. An endpoint that does
+    # not parse to a host, or a ledger that cannot be read, answers sticky: the
+    # gate's "no sticky sighting" is not provable there, and B6's rule is that
+    # an unreadable ledger is a refusal, not an absence.
+    def sticky_cluster_sighting?
+      host = endpoint_host_name
+      unless host
+        logger.warn 'The destroy gate could not ask the ledger: the configured endpoint does not name a host'
+        return true
+      end
+
+      ForemanHyperv::ClusterSighting.exists?(endpoint_host: host, kind: 'sighting')
+    rescue ActiveRecord::ActiveRecordError => e
+      logger.warn "The destroy gate could not read the sightings ledger: #{e.class}"
+      true
+    end
+
+    # The clusapi leg, read entirely server-side as one command answering one
+    # JSON token: the P/Invoke's rc and state, the service record's answer and
+    # the cluster directory's answer — each through typed catches, so absent is
+    # only ever the measured not-found exception (N3, the same discipline and
+    # the same catch table as the marker read). The acceptance set is measured
+    # shapes only: state 1 with the service record present (never-joined,
+    # §45.2), and state 0 with the service record AND the cluster directory
+    # also answering not-found — the B9/N2 branch, where the marker loop has
+    # already read PARAMS and CLUSDB not-found, so all three stores are gone
+    # (d19, d23g). State 1 beside a missing record, and state 0 under a present
+    # record, are shapes no measurement produced — they read indeterminate, and
+    # so does every rc≠0 and every raising call (N2).
+    def cluster_service_state
+      out = client.run_cmd(cluster_service_read_script, _skip_json: true)
+      reply = out.stdout.to_s.strip
+      return :indeterminate if reply.empty? || reply.length > 2_048
+
+      token = Fog::JSON.decode(reply)
+      return :indeterminate unless token.is_a?(Hash)
+      return :indeterminate unless %w[clusapi svc cdir].all? { |leg| token[leg].is_a?(Hash) }
+
+      clusapi = token['clusapi']
+      unless clusapi['result'].to_s == 'ok' && clusapi['rc'].is_a?(Integer) && clusapi['state'].is_a?(Integer)
+        logger.warn "The cluster-service state read did not answer: #{sanitize_text(clusapi['type'].to_s)}"
+        return :indeterminate
+      end
+      return :indeterminate unless clusapi['rc'].zero?
+
+      service_record = token['svc']['result'].to_s
+      case clusapi['state']
+      when CLUSAPI_RUNNING, CLUSAPI_NOT_RUNNING
+        :clustered
+      when CLUSAPI_NOT_CONFIGURED
+        # clusapi=1 beside a service record that is not present is not a cell
+        # the battery ever produced, and the plan names it indeterminate.
+        return :standalone if service_record == 'present'
+
+        logger.warn "Refusing to trust clusapi=1 with the service record answered #{service_record}"
+        :indeterminate
+      when CLUSAPI_NO_CLUSTER_SERVICE
+        # The 0 means "no cluster service or config" (d23g): accepted, as the
+        # plan argues, exactly when every store says gone — the markers above,
+        # the service record here, and the cluster directory here. Anything
+        # else under a 0, including the never-measured record-present shape,
+        # says nothing.
+        cluster_directory = token['cdir']['result'].to_s
+        return :standalone if service_record == 'absent' && cluster_directory == 'absent'
+
+        logger.warn "Refusing to trust clusapi=0 with the service record #{service_record} " \
+                    "and the cluster directory #{cluster_directory}"
+        :indeterminate
+      else
+        :indeterminate
+      end
+    rescue StandardError => e
+      # fog raising at all — transport, auth, parse — says nothing (N3).
+      logger.warn "The cluster-service state read did not answer: #{e.class}"
+      :indeterminate
+    end
+
+    # The script the service-state read runs. Three named primitives, typed
+    # catches carrying the full exception class on every token, one JSON line:
+    # the P/Invoke under its own type guard (a warm runspace already knows the
+    # type), the service registry key opened with the same primitive whose
+    # not-found answer row (v) measured for the PARAMS marker, and the cluster
+    # directory opened with Get-Item. Only the two path constants and the
+    # reviewed P/Invoke definition are interpolated — no user input is anywhere
+    # near it, and the whole read is one command.
+    def cluster_service_read_script
+      svc = SERVICE_RECORD_READ
+      cdir = CLUSTER_DIRECTORY_READ
+      <<~CLUSTER_SERVICE_READ
+        $ForemanHypervServiceRead = [pscustomobject]@{ clusapi = $null; svc = $null; cdir = $null }
+        $ForemanHypervCluster = [pscustomobject]@{ result = 'error'; rc = $null; state = $null; type = $null }
+        try {
+          if (-not ('ForemanHyperv.ClusterApi' -as [type])) {
+            Add-Type -Namespace ForemanHyperv -Name ClusterApi -ErrorAction Stop `
+              -MemberDefinition '#{CLUSTER_API_SIGNATURE}'
+          }
+          $ForemanHypervState = [uint32]0
+          $ForemanHypervRc = [ForemanHyperv.ClusterApi]::GetNodeClusterState($null, [ref]$ForemanHypervState)
+          $ForemanHypervCluster.result = 'ok'
+          $ForemanHypervCluster.rc = $ForemanHypervRc
+          $ForemanHypervCluster.state = $ForemanHypervState
+        } catch {
+          $ForemanHypervCluster.type = $_.Exception.GetType().FullName
+        }
+        $ForemanHypervServiceRead.clusapi = $ForemanHypervCluster
+        $ForemanHypervSvc = try {
+          $null = #{svc[:cmdlet]} -LiteralPath '#{svc[:path]}' -ErrorAction Stop
+          [pscustomobject]@{ result = 'present'; type = $null }
+        } catch [System.Management.Automation.ItemNotFoundException] {
+          [pscustomobject]@{ result = 'absent'; type = $_.Exception.GetType().FullName }
+        } catch [System.Security.SecurityException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch [System.UnauthorizedAccessException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch [System.IO.IOException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch {
+          [pscustomobject]@{ result = 'unreadable'; type = $_.Exception.GetType().FullName }
+        }
+        $ForemanHypervServiceRead.svc = $ForemanHypervSvc
+        $ForemanHypervCdir = try {
+          $null = #{cdir[:cmdlet]} -LiteralPath '#{cdir[:path]}' -ErrorAction Stop
+          [pscustomobject]@{ result = 'present'; type = $null }
+        } catch [System.Management.Automation.ItemNotFoundException] {
+          [pscustomobject]@{ result = 'absent'; type = $_.Exception.GetType().FullName }
+        } catch [System.Security.SecurityException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch [System.UnauthorizedAccessException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch [System.IO.IOException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch {
+          [pscustomobject]@{ result = 'unreadable'; type = $_.Exception.GetType().FullName }
+        }
+        $ForemanHypervServiceRead.cdir = $ForemanHypervCdir
+        $ForemanHypervServiceRead | ConvertTo-Json -Compress
+      CLUSTER_SERVICE_READ
+    end
+
     # N6's self rung: the endpoint's own Get-VMHost name against the machine's
     # computer name, case-insensitively. A name that does not match — or an
     # endpoint that cannot name itself — is refused: per-node addressing is
@@ -1013,7 +1322,7 @@ module ForemanHyperv
 
       asked.casecmp(host_name).zero?
     rescue StandardError => e
-      logger.warn "The endpoint could not name itself for the create self-check: #{e.class}"
+      logger.warn "The endpoint could not name itself for the self-check: #{e.class}"
       false
     end
 
