@@ -83,6 +83,74 @@ module ForemanHyperv
                    'additionally requires a named method that proves node-set completeness; ' \
                    'enablement is a code PR, not a configuration.'
 
+    # PLG-22: the enablement set. Everything this PR unlocks stands on five
+    # behaviours of the fog it is built against — the tri-state cluster reads,
+    # the exact-host connection gate (FOG-11), the literal-path destructive
+    # calls (FOG-14), the stdout hygiene contract (FOG-15) and the input
+    # hardening (FOG-9) — and the runtime check asks the installed fog for ALL
+    # of them: the constant list AND the per-behaviour predicate every client
+    # of that build answers. A fog missing any one is the pre-enablement era
+    # again, and every operation this PR unlocks refuses exactly as it refused
+    # before. The constant is FOG-9's, and the plugin gate trusts it for the
+    # rule behind it (R13): the builder validator and the connection gate are
+    # ONE pure function there, so there is nothing here for a second list to
+    # re-prove.
+    ENABLEMENT_CAPABILITIES = {
+      tri_state_cluster: :supports_clusters?,
+      exact_host_connection: :supports_exact_host_connections?,
+      literal_path_destructive: :supports_literal_path_destructive?,
+      stdout_json_hygiene: :supports_stdout_json_hygiene?,
+      input_hardening: :supports_input_hardening?
+    }.freeze
+
+    # The capability-era refusal: the plugin build is enabled, the installed
+    # fog is not. Names the missing behaviours so the operator knows what to
+    # upgrade, and quotes no remote text.
+    FOG_CAPABILITY_REFUSAL = 'This operation is refused: the fog-hyperv this plugin runs against does ' \
+                             'not answer every behaviour the enablement depends on (missing: ' \
+                             '%<missing>s). Nothing was stopped, deleted or created. Upgrade ' \
+                             'fog-hyperv to the build the plugin declares, or use a plugin version ' \
+                             'whose refusals match the fog you have.'
+
+    # The enablement era still refuses a destroy whose classification reads did
+    # not answer: indeterminate is not a decision enablement can spend. The
+    # machine stays exactly as it is, with the reads made again on the next
+    # attempt — the same cost the pre-enablement unknown carried, worded for
+    # the era where clustered machines ARE destroyable.
+    DESTROY_INDETERMINATE_REFUSAL = 'Destroying a virtual machine on this Hyper-V compute resource is ' \
+                                    'refused: the cluster classification reads did not answer on this ' \
+                                    'attempt, and an unreadable endpoint is not a license to delete. ' \
+                                    'Nothing was stopped and nothing was deleted; the reads are made ' \
+                                    'again on the next attempt.'
+
+    # F2's guard: a node-identity name is quoted into the remote guard script
+    # only in this shape — a host or node name, nothing a shell or PowerShell
+    # reads as special. A name outside it is refused before anything is sent:
+    # the guard is a server-side check, not a string exercise, and a name that
+    # cannot be quoted safely is not a name to dial.
+    NODE_NAME_SHAPE = /\A[A-Za-z0-9][A-Za-z0-9.\-]{0,252}\z/
+
+    # What $env:COMPUTERNAME answers with is the NETBIOS computer name: up to 15
+    # characters, uppercase. Cluster node lists and operator overrides carry the
+    # full (possibly DNS, possibly longer) name, so the guard accepts the full
+    # name AND its 15-character truncation, for the node's own name and for the
+    # first label of the identity host. PowerShell's -in comparison is
+    # case-insensitive, so no Ruby-side case folding rides the wire.
+    NETBIOS_MAX_LENGTH = 15
+
+    # The enabled era's disk-removal refusal: the fog is the enablement's
+    # partner, but THIS disk's file cannot be proven safe to delete — its
+    # path is not attributable to the machine, or its sharing state is not
+    # proven absent (fog's own contract refuses a drive whose persistent
+    # reservations are true or unread, because deleting a disk another running
+    # machine reads destroys that machine's data). The whole edit refuses; no
+    # part of it half-completes.
+    DISK_UNATTRIBUTED_REFUSAL = 'Removing that disk is refused: its file is not attributable to this ' \
+                                'machine’s folder or a storage root the hypervisor named, or its ' \
+                                'sharing state is not proven absent, and deleting a disk another ' \
+                                'machine may be reading destroys the wrong thing. Nothing was ' \
+                                'detached and no file was deleted; the disk stays exactly as it is.'
+
     # PLG-21a: a fog write over WinRM is INDETERMINATE once the request has been
     # sent — the measured behaviour at the pinned fog is a successful
     # Add-ClusterVirtualMachineRole raising Fog::JSON::DecodeError on the empty
@@ -509,13 +577,16 @@ module ForemanHyperv
       ForemanHyperv::InputValidation.validate_hash!(attr, context: :vm)
       attr = attr.to_hash.deep_symbolize_keys if attr.respond_to?(:to_hash)
 
-      # PLG-15b: the create path answers stand-alone now. A create that asks
-      # for a cluster is refused exactly as PLG-15 refused it — the cluster
-      # create path lifts with PLG-15c — and the refusal lands before any read
-      # of the endpoint. A create that asks for no cluster still has to pass
-      # the stand-alone gate below, which refuses on every unknown.
-      raise ForemanHyperv::OperationRefused, CLUSTER_CREATE_REFUSAL if attr[:cluster_name].present?
-      raise ForemanHyperv::OperationRefused, STANDALONE_CREATE_REFUSAL unless create_allowed?
+      # PLG-15b opened creates for stand-alone machines; PLG-22 enables the
+      # cluster create path — with the era rule the destroy path uses too:
+      # a fog that does not answer the five behaviours gets the pre-enablement
+      # refusals verbatim (the cluster ask refused before any read of the
+      # endpoint, the stand-alone gate refusing on every unknown), and only
+      # the enablement's partner fog runs the unlocked path below.
+      unless enablement_supported?
+        raise ForemanHyperv::OperationRefused, CLUSTER_CREATE_REFUSAL if attr[:cluster_name].present?
+        raise ForemanHyperv::OperationRefused, STANDALONE_CREATE_REFUSAL unless create_allowed?
+      end
 
       attr = vm_instance_defaults.merge(attr)
       attr.delete :computer_name if attr[:computer_name].blank?
@@ -527,13 +598,45 @@ module ForemanHyperv
       validate_interfaces(attr)
       validate_volumes(attr)
 
+      # The enabled era's membership rule: every placement string the form
+      # carries (computer_name, cluster_name, per-volume datastore) must be a
+      # member of what the hypervisor itself reports — the character allowlist
+      # ran first (validate_hash! above), the membership reads are unfiltered,
+      # and a read that does not answer refuses the create. The pre-enablement
+      # era needs none of this on the create path: its gate already refused
+      # anything the endpoint read as clustered, and the self-rung check below
+      # decides its one allowed target.
+      validate_placement!(attr) if enablement_supported?
+
       # logger.debug "Creating VM with arguments; #{attr}"
       cluster = cluster_named(attr[:cluster_name])
       storage = placement_storage(cluster, attr)
 
-      vm = client.servers.new(
+      # The identity ladder (N6), decided before the model is built so the
+      # model rides the RIGHT client: the self rung serves through this
+      # resource's own client; a named node reaches its SEPARATE per-node
+      # client only through the operator override (PLG-5a — the only source
+      # of FQDN identity), with the override's identity spliced into the
+      # model's computer name (N4); a named node with no override is
+      # per-node addressing with nothing to dial, and stays refused — the
+      # same fail-closed the reads use. In the pre-enablement era the named
+      # target had nowhere to go anyway, and the self-rung check below
+      # answers exactly as it did before.
+      build_client = client
+      computer = attr[:computer_name].presence
+      routed_via_override = false
+      if enablement_supported? && computer && !self_rung_name?(computer)
+        override = node_override(computer)
+        raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL if override.nil?
+
+        build_client = client_for_node(computer)
+        computer = override.split(':', 2).first
+        routed_via_override = true
+      end
+
+      vm = build_client.servers.new(
         name: attr[:name],
-        computer_name: attr[:computer_name].presence || hypervisor.name,
+        computer_name: computer || hypervisor.name,
         generation: attr[:generation],
         dynamic_memory_enabled: Foreman::Cast.to_bool(attr[:dynamic_memory_enabled]),
         memory_startup: attr[:memory_startup].to_i,
@@ -542,14 +645,13 @@ module ForemanHyperv
         processor_count: attr[:processor_count].to_i,
         notes: attr[:notes]
       )
-      # N6 self rung: this machine is being built through this resource's own
-      # client — the one configured with this endpoint — so its computer name
-      # has to be the name the endpoint gives itself (Get-VMHost), compared
-      # case-insensitively. A name that is not that name is per-node
-      # addressing, which is PLG-5a's, and until that lands the target stays
-      # refused. servers.new has built a model and sent nothing, so this
-      # raise tears nothing down.
-      raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL unless self_rung?(vm)
+      # N6 self rung: a machine built through this resource's own client has
+      # to carry the name the endpoint gives itself (Get-VMHost), compared
+      # case-insensitively — an override-routed machine is the one exception
+      # the ladder allows, its identity being the operator's own assertion
+      # (validated at save) dialled through its own client. servers.new has
+      # built a model and sent nothing, so this raise tears nothing down.
+      raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL unless routed_via_override || self_rung?(vm)
 
       vm.create(
         # TODO: should be :VHD if image build - when image build support exists
@@ -605,20 +707,22 @@ module ForemanHyperv
       raise
     rescue StandardError
       if vm&.persisted?
-        # PLG-15b rollback, scoped to what this transaction created: the drives
-        # are DETACHED, not deleted (the VHDX files stay — a delete would be
-        # fog's Remove-Item path, which stays refused here), and the machine is
-        # removed with Remove-VM only, not with its underlying store (the
-        # config folder stays too). The folder and file deletes belong to the
-        # enablement PR's decisions, never to a rollback guess. remove_cluster_role
-        # stays for the day the cluster create path lands (PLG-15c): with the
-        # cluster create refused and the indeterminate class handed to the
-        # StrandIndeterminate rescue above, role_added is false on every path
-        # that reaches this rescue today.
+        # The rollback stays what PLG-15b made it for the drives: DETACHED,
+        # not deleted — a strand's disk files may include a pre-existing disk
+        # the form attached, and no rollback may destroy a file it did not
+        # prove this strand created. The machine's own folder is the one piece
+        # a post-enablement rollback CAN decide (the two-root rule plus its
+        # pre-flight below), and it decides it only with the survivor rule:
+        # any disk file still living inside the folder keeps the folder,
+        # because the folder delete recurses and a silent attach-disk loss is
+        # exactly what the rule exists to stop. The pre-enablement era keeps
+        # the literal false it shipped with. remove_cluster_role is live now:
+        # the enabled cluster create path reaches this rollback with a role
+        # the strand provably added.
         remove_cluster_role(vm) if role_added
         vm.stop
         vm.hard_drives.each { |hdd| hdd.destroy(underlying: false) }
-        vm.destroy(false)
+        vm.destroy(enablement_supported? && rollback_folder_delete?(vm))
       end
 
       raise
@@ -693,41 +797,80 @@ module ForemanHyperv
     end
 
     def destroy_vm(uuid)
-      # PLG-15c: the destroy path answers stand-alone machines only, and the
-      # gate below decides on the machine fog reported — its role flag and its
-      # computer name are two of its inputs — so the lookup comes first. The
-      # id is still validated before anything else, UnsafeIdentifier and
-      # OperationRefused still travel outside the NotFound rescue by class,
-      # and a fog that answers no machine at all is the same nothing the
-      # rescue already answers "done" for.
+      # PLG-15c opened destroy for proven-stand-alone machines; PLG-22
+      # enables it. The lookup still comes first (the gate and the teardown
+      # decide on the machine fog reported), the id is still validated before
+      # anything else, and a fog that answers no machine at all is still the
+      # same nothing the rescue answers "done" for.
       ForemanHyperv::InputValidation.validate_id!(uuid)
       vm = find_vm_by_uuid(uuid)
       return true if vm.nil?
 
-      case standalone_destroy_state(vm)
-      when :standalone
-        nil
-      when :clustered
-        raise ForemanHyperv::OperationRefused, DESTROY_REFUSAL
-      when :not_self
-        raise ForemanHyperv::OperationRefused, DESTROY_SELF_RUNG_REFUSAL
-      else
-        raise ForemanHyperv::OperationRefused, STANDALONE_DESTROY_REFUSAL
+      unless enablement_supported?
+        # The pre-enablement gate, verbatim: a fog that does not answer the
+        # five behaviours gets the refusals this plugin shipped with, word for
+        # word — enablement is a property of the fog+plugin pair, and the
+        # plugin does not run a decision its partner cannot keep.
+        case standalone_destroy_state(vm)
+        when :standalone
+          nil
+        when :clustered
+          raise ForemanHyperv::OperationRefused, DESTROY_REFUSAL
+        when :not_self
+          raise ForemanHyperv::OperationRefused, DESTROY_SELF_RUNG_REFUSAL
+        else
+          raise ForemanHyperv::OperationRefused, STANDALONE_DESTROY_REFUSAL
+        end
+        vm.stop turn_off: true
+        vm.hard_drives.each { |hdd| hdd.destroy(underlying: false) }
+        vm.destroy(false)
+        return true
       end
-      # A machine the gate let through has no cluster role to take out: it
-      # refused every role the machine reported, arm (a) refused every
-      # membership the endpoint answered, and a host proven stand-alone has no
-      # cluster to ask. remove_cluster_role stays for the day the cluster
-      # destroy path lands with the enablement PR.
+
+      # The enabled era. The classification reads are still made — they record
+      # sightings and they still refuse an unknown — but a clustered answer is
+      # now a shape, not a refusal: the machine is un-clustered first, then
+      # deleted. Everything decidable is decided BEFORE anything is mutated:
+      # the folder verdict (one pre-flight script, fog's literal-path guard on
+      # fog's side) and each drive's file verdict (call-site attribution plus
+      # the model's own sharing read), so a destroy whose decisions could not
+      # be read keeps exactly the pieces it could not decide, not a
+      # half-torn-down machine guessing the rest.
+      state = standalone_destroy_state(vm)
+      raise ForemanHyperv::OperationRefused, DESTROY_INDETERMINATE_REFUSAL if state == :indeterminate
+      # The enablement unlocks CLUSTERED machines; a stand-alone-proven
+      # endpoint wearing someone else's machine name is still per-node
+      # addressing, and that stays PLG-5b's, refusing with the same sentence
+      # as before: an enabled plugin does not stretch further than its own
+      # reviewed unlocks.
+      raise ForemanHyperv::OperationRefused, DESTROY_SELF_RUNG_REFUSAL if state == :not_self
+
+      machine_folder = folder_deletion_path(vm)
+      folder_delete = !machine_folder.nil? && folder_preflight(vm, machine_folder) == :ok
+      drive_deletes = []
+      vm.hard_drives.each do |hdd|
+        delete_file = drive_deletion_allowed?(vm, hdd)
+        if !delete_file && file_lives_in?(hdd, machine_folder)
+          # The folder delete recurses. A file this destroy refused to delete
+          # must not be taken by the recursion it inherits — that is the same
+          # silent wrong-thing in a new costume — so a kept file inside the
+          # machine's folder keeps the folder too.
+          logger.warn "The disk file #{hdd.path} of #{vm.name} stays, and its folder with it: " \
+                      'a folder delete that recurses over a file this destroy refused is not a verdict'
+          folder_delete = false
+        end
+        drive_deletes << [hdd, delete_file]
+      end
+
       vm.stop turn_off: true
-      # PLG-15c's scope, identical to PLG-15b's rollback: Remove-VM and drive
-      # DETACH only. The VHDX files and the config folder stay — file and
-      # folder deletes are the enablement PR's decisions, never a destroy's
-      # side effect.
-      vm.hard_drives.each { |hdd| hdd.destroy(underlying: false) }
-      # TODO: Remove the empty VM folder (PLG-22's decision, with its collision
-      # preflight — not this PR's).
-      vm.destroy(false)
+      # The role only when the machine reports one: fog's removal asserts a
+      # matching role before it deletes anything, and a machine the cluster
+      # does not hold has nothing to release. A cluster that will not give the
+      # role up stops the destroy here — before the machine or a file goes.
+      remove_cluster_role(vm) if vm.respond_to?(:clustered?) && vm.clustered?
+      drive_deletes.each { |hdd, delete_file| hdd.destroy(underlying: delete_file) }
+      vm.destroy(folder_delete)
+      true
     rescue ActiveRecord::RecordNotFound, Fog::Errors::NotFound
       # if the VM does not exists, we don't really care.
       true
@@ -908,7 +1051,289 @@ module ForemanHyperv
     end
 
     def disk_removal_allowed?
+      enablement_supported?
+    end
+
+    # --- PLG-22: the enablement and its runtime check ---------------------------
+
+    # Every behaviour the enablement stands on, asked of the fog actually
+    # installed: the CAPABILITIES constant AND the predicate every client of
+    # that build answers (a fog that has the list but not the behaviour, or
+    # the behaviour but not the list, is not this build's partner). A fog too
+    # old to even define CAPABILITIES answers "everything missing" — the
+    # pre-enablement era, refusing exactly what it refused before enablement.
+    # The whole check is a local constant read and five respond_to?/predicate
+    # calls on the client object: no wire traffic, and it is safe to ask on
+    # every operation.
+    # @return [Boolean] does the installed fog answer all five?
+    def enablement_supported?
+      missing_enablement_capabilities.empty?
+    end
+
+    # The capabilities the installed fog does NOT answer, in the order of the
+    # frozen list — empty means enablement stands. A predicate that raises is
+    # an unanswered predicate, same as a missing one: the check asks the fog,
+    # and an fog that cannot answer has not answered.
+    # @return [Array<Symbol>] the missing behaviour names, for the refusal
+    def missing_enablement_capabilities
+      list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
+      ENABLEMENT_CAPABILITIES.select do |capability, predicate|
+        !list.include?(capability) || !client_answers?(capability, predicate)
+      end.keys
+    rescue StandardError
+      ENABLEMENT_CAPABILITIES.keys
+    end
+
+    def client_answers?(capability, predicate)
+      client.respond_to?(predicate) && client.public_send(predicate) == true
+    rescue StandardError => e
+      logger.warn "The fog capability check for #{capability} did not answer: #{e.class}"
       false
+    end
+
+    # The refusal every unlocked operation answers with when the fog is not
+    # the enablement's partner — one message, naming what is missing, quoting
+    # no remote text (the names are this file's constants).
+    def refuse_without_enablement!
+      missing = missing_enablement_capabilities
+      return if missing.empty?
+
+      raise ForemanHyperv::OperationRefused, format(FOG_CAPABILITY_REFUSAL, missing: missing.join(', '))
+    end
+
+    # --- PLG-22: the two-root folder rule ---------------------------------------
+
+    # The roots a machine's files may provably live under, from the endpoint's
+    # own reports: the config root (virtual_machine_path), the disk root
+    # (virtual_hard_disk_path — the two roots the folder rule must know both
+    # of, measured ≠ on the lab host), and every shared volume of the cluster
+    # the endpoint belongs to (a clustered machine's config folder lives on a
+    # cluster shared volume, not on either node-local root). Nothing the user
+    # typed is in this list; it is what the hypervisor itself named.
+    #
+    # A root that cannot be read is simply not a root: attribution against a
+    # missing root fails closed (no delete), exactly as a missing shared-volume
+    # listing leaves a clustered machine's folder unattributed.
+    # @return [Array<String>] the normalized roots
+    def storage_roots
+      roots = []
+      begin
+        host = hypervisor
+        roots << host.virtual_machine_path if host.respond_to?(:virtual_machine_path)
+        roots << host.virtual_hard_disk_path if host.respond_to?(:virtual_hard_disk_path)
+      rescue StandardError => e
+        logger.warn "The endpoint could not name its storage roots for the delete decision: #{e.class}"
+      end
+      begin
+        clusters.each do |cluster|
+          next unless cluster.respond_to?(:shared_volumes)
+
+          cluster.shared_volumes.each do |volume|
+            roots << volume.volume_path if volume.respond_to?(:volume_path)
+          end
+        end
+      rescue StandardError => e
+        logger.warn "The cluster shared volumes could not be read for the delete decision: #{e.class}"
+      end
+      roots.map { |root| normalize_windows_path(root) }.reject(&:empty?).uniq
+    end
+
+    # Windows paths, made comparable: forward slashes to backslashes, repeated
+    # separators collapsed, trailing separators trimmed (a root reported as
+    # `C:\VMs\` and a path built as `C:\VMs\vm1` are the same folder). Case is
+    # NOT folded here — the comparisons that consume this fold as they compare,
+    # so the value stays quotable back to an operator read.
+    def normalize_windows_path(path)
+      path.to_s.tr('/', '\\').gsub(/\\{2,}/, '\\').sub(/\\\z/, '')
+    end
+
+    # The folder a machine's config lives in, deleted with the machine, only
+    # when BOTH answers say so — and any answer that cannot be had says keep:
+    #
+    # 1. the string rule: the folder's own name is the machine's name (exact,
+    #    case-insensitively) and it sits directly under one of the roots the
+    #    hypervisor itself named (the two roots and the shared volumes), with
+    #    that root spelled out in full — no 8.3 short-name root (a `PROGRA~1`
+    #    segment could alias any long name, and attribution against an alias
+    #    is not attribution) and no name shape a filesystem read could not
+    #    tie back (`\ / : * ? " < > |`, a `..` segment, a trailing `.` or
+    #    space, control or non-printing characters — all keep the folder);
+    # 2. the wire preflight (measured exists shape, §45.4; folder-level
+    #    collision itself NOT separately measured — stated): the folder is
+    #    there, is not a reparse point (a junction's contents live wherever
+    #    the junction points, and recursing through one deletes someone
+    #    else's tree), is not hidden (a hidden folder wearing the machine's
+    #    name is not provably the machine's), and its contents carry this
+    #    machine's config — every `*.vmcx`/`*.vmrs` in it named for this
+    #    machine, and at least one `.vmcx` present.
+    #
+    # @return [Boolean] delete the folder with the machine (fog's destroy(true))
+    def destroy_folder?(vm)
+      folder = folder_deletion_path(vm)
+      return false unless folder
+
+      case folder_preflight(vm, folder)
+      when :ok
+        true
+      when :absent
+        logger.info "The config folder #{folder} of #{vm.name} is already gone; nothing to delete with it"
+        false
+      else
+        false
+      end
+    end
+
+    # The string rule alone, without the wire read: the folder path if the
+    # name and root attribution hold, nil if not. Kept apart from destroy_folder?
+    # so the create-rollback decision and the pre-flight gate read the same rule,
+    # and so a path the rule refuses never reaches the pre-flight script at all.
+    def folder_deletion_path(vm)
+      name = vm.name.to_s
+      path = normalize_windows_path(vm.path)
+      return nil if name.empty? || path.empty?
+
+      # The name shape a filesystem read could tie back: no path or wildcard
+      # characters, no control or non-printing characters, no traversal
+      # segment (`..` anywhere — the plan's red list), no trailing `.` or
+      # space (Windows trims them and the trimmed folder is not provably the
+      # named one). A single dot inside the name is legal (vm.old is a VM
+      # name); a component bound at Windows' own 255.
+      return nil unless name.match?(/\A[^\\\/:*?"<>|\x00-\x1f](?:[^\\\/:*?"<>|\x00-\x1f]| )*[^\\\/:*?"<>|\x00-\x1f]?\z/)
+      return nil if name.include?('..') || name.match?(/[. ]\z/)
+      return nil unless name.length <= 255
+      return nil if path.split('\\').any? { |segment| segment == '..' }
+      return nil if path.split('\\').any? { |segment| segment.match?(/~\d+\z/) }
+
+      folder_name = path.split('\\').last.to_s
+      return nil unless folder_name.casecmp(name).zero?
+
+      parent = normalize_windows_path(path.split('\\')[0..-2]&.join('\\'))
+      return nil if parent.empty?
+
+      roots = storage_roots
+      return nil if roots.empty?
+
+      roots.any? { |root| parent.casecmp(root).zero? } ? path : nil
+    end
+
+    # The wire half, one script, one round trip: exists, attributes, contents
+    # in a single answer. The path riding the script is one the string rule
+    # already attributed (its components matched a hypervisor-named root and a
+    # clean machine name) — the escaping is belt, the string rule is braces.
+    # Any read that cannot be had (fog error, unparsable answer) keeps the
+    # folder: the pre-flight licenses the delete, and no answer licenses nothing.
+    # @return [Symbol] :ok, :absent, or :keep (with the reason logged)
+    def folder_preflight(vm, folder)
+      quoted = "'#{folder.gsub("'", "''")}'"
+      script = format(FOLDER_PREFLIGHT_SCRIPT, folder: quoted)
+      out = vm.service.run_cmd(script, _skip_json: true)
+      answer = out.stdout.to_s.strip
+      case answer
+      when 'ABSENT' then :absent
+      when 'KEEP:JUNCTION' then keep_folder(folder, 'it is a reparse point (junction or symlink)')
+      when 'KEEP:HIDDEN' then keep_folder(folder, 'it is hidden')
+      when /\AFORBIDDEN:/ then keep_folder(folder, 'the remote refused the path itself')
+      when /\ANAMES:/ then folder_contents_ok?(vm, folder, answer.delete_prefix('NAMES:'))
+      else keep_folder(folder, 'the pre-flight answer was not the shape this rule understands')
+      end
+    rescue StandardError => e
+      logger.warn "The config-folder pre-flight for #{folder} did not answer (#{e.class}); the folder stays"
+      :keep
+    end
+
+    def keep_folder(folder, reason)
+      logger.info "The config folder #{folder} stays: #{reason}"
+      :keep
+    end
+
+    # The content attribution: this machine's folder holds its config, and a
+    # second machine's config in the same folder is the collision the rule
+    # exists for — recursing would delete both. Snapshots, avhdx files and the
+    # snapshot directory are this machine's own and pass with it.
+    def folder_contents_ok?(vm, folder, names_blob)
+      names = names_blob.split(';').map(&:strip).reject(&:empty?).map(&:downcase)
+      configs = names.select { |n| n.end_with?('.vmcx', '.vmrs') }
+      owned = configs.all? { |n| n == "#{vm.name.to_s.downcase}.vmcx" || n == "#{vm.name.to_s.downcase}.vmrs" }
+      return keep_folder(folder, 'another machine’s config file lives in it') unless owned
+      return keep_folder(folder, 'no config file of this machine is in it') unless configs.any? { |n| n.end_with?('.vmcx') }
+
+      :ok
+    end
+
+    # One round trip: the folder's existence, its reparse/hidden attributes,
+    # and its children's names. The tokens are fixed words, never remote text
+    # beyond the child NAMES (which this parses but never re-quotes); %<name>s
+    # rides only the Ruby-side comparison below.
+    FOLDER_PREFLIGHT_SCRIPT = <<~'SCRIPT'.freeze
+      $p = %<folder>s
+      if (-not (Test-Path -LiteralPath $p)) { 'ABSENT' }
+      else {
+        $i = Get-Item -LiteralPath $p -Force
+        if ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { 'KEEP:JUNCTION' }
+        elseif ($i.Attributes -band [System.IO.FileAttributes]::Hidden) { 'KEEP:HIDDEN' }
+        else { 'NAMES:' + ((Get-ChildItem -LiteralPath $p -Force | ForEach-Object { $_.Name }) -join ';') }
+      }
+    SCRIPT
+
+    # A create rollback's folder verdict (see the rollback in create_vm): the
+    # machine's own folder per the two-root rule and its pre-flight, kept if
+    # any disk file still lives inside it — the rollback detached every drive
+    # without deciding any file, so an attached pre-existing disk inside the
+    # folder is a survivor by definition, and the recursing folder delete
+    # would take it without being asked to.
+    def rollback_folder_delete?(vm)
+      machine_folder = folder_deletion_path(vm)
+      return false unless machine_folder
+      return false unless folder_preflight(vm, machine_folder) == :ok
+
+      survivor = vm.hard_drives.any? { |hdd| file_lives_in?(hdd, machine_folder) }
+      if survivor
+        logger.warn "The config folder of #{vm.name} keeps itself: a disk file still lives in it, " \
+                    'and the rollback detached rather than decided it'
+        false
+      else
+        true
+      end
+    end
+
+    def file_lives_in?(hdd, folder)
+      parent = normalize_windows_path(hdd.path.to_s.split('\\')[0..-2]&.join('\\'))
+      !parent.empty? && parent.casecmp(folder.to_s).zero?
+    end
+
+    # --- PLG-22: the drive rule (call-site path check) ----------------------------
+
+    # A disk file is deleted (not just detached) only when its path is
+    # attributable to this machine the same way the folder is: its parent
+    # folder is this machine's folder or one of the roots the hypervisor
+    # named, no traversal or short-name segment, and no fog error along the
+    # way. The fog model's own sharing check rides the delete itself
+    # (destroy(underlying: true) refuses a drive whose persistent-reservations
+    # state is not proven absent — SharedDiskDeleteRefused), and this plugin
+    # reads that same property before the wire so a destroy whose disk cannot
+    # be proven unshared detaches and leaves the file rather than failing
+    # half-torn-down: an orphaned file is recoverable, a wrongly deleted one
+    # is not.
+    # @return [Boolean] delete the file with the detach
+    def drive_deletion_allowed?(vm, hdd)
+      path = normalize_windows_path(hdd.path)
+      return false if path.empty?
+      return false if path.split('\\').any? { |segment| segment == '..' || segment.match?(/~\d+\z/) }
+
+      parent = normalize_windows_path(path.split('\\')[0..-2]&.join('\\'))
+      machine_folder = folder_deletion_path(vm)
+      roots = storage_roots
+      return false if roots.empty?
+
+      attributable = parent.casecmp(machine_folder.to_s).zero? || roots.any? { |root| parent.casecmp(root).zero? }
+      return false unless attributable
+
+      if hdd.respond_to?(:support_persistent_reservations) && hdd.support_persistent_reservations != false
+        logger.warn "The disk #{path} of #{vm.name} keeps its file: its sharing state reads " \
+                    "#{hdd.support_persistent_reservations.inspect}, and only a proven-absent one licenses the delete"
+        return false
+      end
+      true
     end
 
     # Where a machine (or a disk of one) is asked to go, checked against what
@@ -1335,7 +1760,15 @@ module ForemanHyperv
     # PLG-5a's, and "fail-closed until PLG-5a" lives here until that PR lands
     # (the pre-registered shipping state, not an oversight).
     def self_rung?(vm)
-      asked = vm&.computer_name.to_s.strip
+      self_rung_name?(vm&.computer_name)
+    end
+
+    # The same rung for a name before any model exists (the create path
+    # decides which client to build on): case-insensitive equality with the
+    # name the endpoint gives itself over Get-VMHost. An endpoint that cannot
+    # name itself matches nothing.
+    def self_rung_name?(asked)
+      asked = asked.to_s.strip
       return false if asked.empty?
 
       host_name = hypervisor.name.to_s.strip
@@ -1712,17 +2145,88 @@ module ForemanHyperv
     # under it: deleting a machine whose role still points at its files leaves the
     # cluster holding a claim on storage that no longer describes anything, which is
     # worse to clean up than a machine that refused to delete.
+    #
+    # F2 (due before this PR, and landed here): when the enablement stands, the
+    # removal rides a two-element cmdlist whose FIRST element is the node-identity
+    # guard — every connection shell is its own shell (measured), so a guard in a
+    # separate read could answer for one machine and the mutation run on another.
+    # The guard throws server-side when the machine dialled is not the node named,
+    # and fog's own error detection carries that out as a refusal; the second
+    # element is fog's own removal script, whose readback (the measured
+    # ClusterObjectNotFound miss) is the proof the removal happened — the plugin
+    # duplicates nothing of that contract, it only composes the guard in front.
+    # An older fog without the script utility or the cmdlist API keeps the plain
+    # request call, unguarded, exactly as before enablement.
     def remove_cluster_role(vm)
-      return unless client.respond_to?(:remove_cluster_virtual_machine_role)
+      node = (vm.respond_to?(:owner_node) && vm.owner_node.presence || vm.computer_name).to_s.strip
+      service = vm.service || client
 
-      node = vm.respond_to?(:owner_node) ? vm.owner_node : vm.computer_name
-      client.remove_cluster_virtual_machine_role(id: vm.id, computer_name: node)
-    rescue StandardError => e
-      # A fog failure's own text can carry the remote command line, including
-      # percent signs, and Foreman::Exception sprintfs its message again when
-      # it renders: the class is quoted, the text is not.
-      logger.warn "The Hyper-V cluster would not release the role: #{e.class}"
-      raise Foreman::Exception, 'Refusing to delete a clustered virtual machine while the cluster still holds its role'
+      # Validated before composing anything: an id that is not an id is the
+      # user's bad input, not a cluster that refused.
+      ForemanHyperv::InputValidation.validate_id!(vm.id)
+      # Composed before any rescue can fold it: a name that cannot be quoted
+      # into the guard is refused as itself, not as a cluster that "would not
+      # release the role" — it never reached the cluster.
+      guard = guarded_role_guard(vm, node)
+
+      begin
+        if guard
+          script = Fog::Hyperv::Utils::ClusterRole.build_removal_script(vm.id)
+          out = service.run_cmdlist([[guard, {}], [script, {}]], target_computer: node, skip_json: true)
+          # fog's own removal contract, kept at the call site that composes it:
+          # the script prints nothing on any path, so a body is not an answer
+          # this plugin knows.
+          unless out.stdout.to_s.strip.empty?
+            logger.warn 'The clustered role removal answered with a result body; it emits none'
+            raise Foreman::Exception, 'Refusing to delete a clustered virtual machine while its role removal did not answer cleanly'
+          end
+        elsif client.respond_to?(:remove_cluster_virtual_machine_role)
+          client.remove_cluster_virtual_machine_role(id: vm.id, computer_name: node)
+        end
+      rescue StandardError => e
+        # A fog failure's own text can carry the remote command line, including
+        # percent signs, and Foreman::Exception sprintfs its message again when
+        # it renders: the class is quoted, the text is not.
+        logger.warn "The Hyper-V cluster would not release the role: #{e.class}"
+        raise Foreman::Exception, 'Refusing to delete a clustered virtual machine while the cluster still holds its role'
+      end
+    end
+
+    # The guard script, or nil when this build/era does not compose one (the
+    # pre-enablement fog paths). The candidates are the node's own name and the
+    # first label of the identity that reaches it — each with its 15-character
+    # truncation, because $env:COMPUTERNAME answers the NETBIOS name, which is
+    # uppercase and capped at 15 while cluster reads and operator overrides
+    # carry the full DNS-flavoured name (memory of the lab, pre-registered as
+    # the >15-character red test: the guard must not false-refuse a long name
+    # that is honestly the machine's own). PowerShell's -notin is
+    # case-insensitive; no case folding rides the wire beyond these terms.
+    def guarded_role_guard(vm, node)
+      return nil unless enablement_supported?
+      return nil unless client.respond_to?(:run_cmdlist) && cluster_role_script_available?
+
+      identity = node_override(node).to_s.split(':', 2).first.to_s
+      candidates = [node, identity.split('.').first].reject { |c| c.to_s.empty? }
+      candidates.each do |candidate|
+        unless candidate.match?(NODE_NAME_SHAPE)
+          raise ForemanHyperv::OperationRefused,
+                'Refusing to remove a cluster role while the target node name is not a name this ' \
+                'plugin can put through its identity guard; nothing was asked of the host with that name'
+        end
+      end
+      terms = candidates.flat_map { |c| [c, c[0, NETBIOS_MAX_LENGTH]] }.map(&:downcase).uniq
+      quoted = terms.map { |term| "'#{term.gsub("'", "''")}'" }.join(', ')
+      %(if ($env:COMPUTERNAME -notin @(#{quoted})) { throw "foreman_hyperv node identity mismatch: $env:COMPUTERNAME" })
+    end
+
+    # The utility ships with the fog the enablement names; an older fog raises
+    # LoadError or simply lacks the builder, and both answer "no guard for you"
+    # — the legacy request path runs instead, unguarded, as it did before.
+    def cluster_role_script_available?
+      require 'fog/hyperv/utils/cluster_role'
+      Fog::Hyperv::Utils::ClusterRole.respond_to?(:build_removal_script)
+    rescue LoadError, NameError
+      false
     end
 
     # The machine as the node that owns it right now sees it, or nil when no cluster
@@ -2040,16 +2544,32 @@ module ForemanHyperv
     def update_volumes(vm, attr)
       volumes = nested_attributes_for :volumes, attr[:volumes_attributes]
       logger.debug "Updating volumes with: #{volumes}"
+      # PLG-22: every requested disk removal is DECIDED before any of them is
+      # executed — an explicit removal that cannot prove its file safe refuses
+      # the whole edit up front, rather than deleting two disks and refusing
+      # on the third. A _delete reaching here already passed the capability
+      # gate (refuse_disk_removal! runs on the submitted hash before anything
+      # is fetched); the call-site rule below is the attribution half.
+      deletions = volumes.filter_map do |volume|
+        next unless volume[:id].present? && volume[:_delete] == '1'
+
+        hd = vm.hard_drives.get volume[:id]
+        unless drive_deletion_allowed?(vm, hd)
+          raise ForemanHyperv::OperationRefused, DISK_UNATTRIBUTED_REFUSAL
+        end
+
+        hd
+      end
+      deletions.each { |hd| hd.destroy(underlying: true) }
+
       volumes.each do |volume|
         if volume[:id].present?
+          next if volume[:_delete] == '1'
+
           hd = vm.hard_drives.get volume[:id]
-          if volume[:_delete] == '1'
-            hd.destroy(underlying: true)
-          else
-            vhd = hd.vhd
-            vhd.size = volume[:size_bytes].to_i
-            vhd.save if vhd.dirty?
-          end
+          vhd = hd.vhd
+          vhd.size = volume[:size_bytes].to_i
+          vhd.save if vhd.dirty?
         elsif volume[:_delete] != '1'
           vhd = vm.vhds.create basename: volume[:basename], size: volume[:size_bytes].to_i
           vm.hard_drives.create path: vhd.path
