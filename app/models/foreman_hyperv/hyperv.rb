@@ -14,12 +14,29 @@ module ForemanHyperv
     # (measured on Ruby 3.0.7), and a refusal whose sentence arrives truncated
     # quotes the reviewed plan wrongly. No shared REFUSAL_SENTENCE either, so
     # no literal-plus-constant concatenation anywhere here.
-    CREATE_REFUSAL = 'Creating virtual machines is refused in every Hyper-V compute resource in this ' \
-                     'plugin version. All disk removals and VM destroys on cluster compute resources ' \
-                     'are refused in code until FOG-10, PLG-15b and PLG-21b have merged and (m) and ' \
-                     'its (k″) rows have landed; removal based solely on an absent role additionally ' \
-                     'requires a named method that proves node-set completeness; enablement is a code ' \
-                     'PR, not a configuration.'
+    # PLG-15b opened the create path for stand-alone machines only; a create
+    # that asks for a cluster is still refused exactly as PLG-15 refused it,
+    # and the cluster path lifts with PLG-15c — by a merged PR, with the same
+    # enablement contract quoted, never by configuration.
+    CLUSTER_CREATE_REFUSAL = 'Creating a virtual machine in a cluster is refused in every Hyper-V ' \
+                             'compute resource in this plugin version; the cluster create path lifts ' \
+                             'with PLG-15c by a merged PR, never by configuration. All disk removals ' \
+                             'and VM destroys on cluster compute resources are refused in code until ' \
+                             'FOG-10, PLG-15b and PLG-21b have merged and (m) and its (k″) rows have ' \
+                             'landed; removal based solely on an absent role additionally requires a ' \
+                             'named method that proves node-set completeness; enablement is a code ' \
+                             'PR, not a configuration.'
+
+    # PLG-15b's stand-alone gate refuses on every unknown, so the message says
+    # what the gate asks and what an unknown costs; it is not a lock to be
+    # configured away — the reads are made again on every create.
+    STANDALONE_CREATE_REFUSAL = 'Creating a virtual machine on this Hyper-V compute resource is ' \
+                                'refused: the endpoint did not read as a stand-alone Hyper-V host on ' \
+                                'this attempt — the cluster membership read, the cluster-service ' \
+                                'registry marker, or the cluster database file marker did not answer ' \
+                                'as not found. Nothing was asked of the host and nothing was created. ' \
+                                'A host that reads as clustered, or that cannot be read at all, stays ' \
+                                'refused; this lifts by a merged PR, never by configuration.'
 
     DESTROY_REFUSAL = 'Destroying virtual machines is refused in every Hyper-V compute resource in this ' \
                       'plugin version. All disk removals and VM destroys on cluster compute resources ' \
@@ -72,6 +89,60 @@ module ForemanHyperv
     # what a readback falls back to when the role's VM-id property is not
     # populated (see add_cluster_role_proven).
     ROLE_NAME_PREFIX = 'Virtual Machine '
+
+    # PLG-15b arm (a): the cluster membership read is one minimal-property WQL
+    # query against the cluster's own namespace — the same fog run_wql path
+    # supports_clusters? uses (which appends the `/*` grammar itself), pinned
+    # by red test to this exact query string and namespace.
+    CLUSTER_MEMBERSHIP_QUERY = 'SELECT Name FROM MSCluster_Cluster'
+    CLUSTER_MEMBERSHIP_NAMESPACE = 'root/mscluster'
+
+    # The two wire answers that read, through this exact query path, as
+    # "not clustered", both measured on the lab node through the fog wire:
+    # WSMAN 1359 (the cluster WMI provider has nothing to answer with on a
+    # machine not joined to a cluster — nested ProviderFault, WsmWmiPl.dll)
+    # and WMI 2150858778 (the MSCluster_* classes themselves are absent —
+    # the failover-cluster feature is not installed). Anything else — the
+    # auth and transport failures that say nothing about membership
+    # included — is indeterminate (N3).
+    WIRE_CODE_CLUSTER_UNAVAILABLE = 1359
+    WIRE_CODE_FEATURE_ABSENT = 2_150_858_778
+
+    # B2's dual configured-marker, with the primitive each is read with
+    # (measured paths, hyperv-e-results §52 and the d16b rows). The primitive
+    # is NAMED = OPEN/READ, never a metadata or existence check: the registry
+    # key is opened and its values enumerated (Get-ItemProperty, whose
+    # measured missing-key answer is ItemNotFoundException), and the file is
+    # opened and its first line read (Get-Content — Get-Item would answer
+    # from the directory entry and never open a file an ACL denies to us,
+    # which is exactly what row (v) has to be able to see fail).
+    MARKER_READS = {
+      params_registry: {
+        cmdlet: 'Get-ItemProperty',
+        path: 'HKLM:\SYSTEM\CurrentControlSet\Services\ClusSvc\Parameters'
+      }.freeze,
+      clusdb_file: {
+        cmdlet: 'Get-Content',
+        args: '-TotalCount 1',
+        path: 'C:\Windows\Cluster\CLUSDB'
+      }.freeze
+    }.freeze
+
+    # The self rung's refusal (N6): a target that is not the endpoint's own
+    # machine is per-node territory, and per-node addressing is PLG-5a's.
+    # Failing closed here is the pre-registered shipping state, not a bug.
+    SELF_RUNG_REFUSAL = 'Creating a virtual machine on a computer other than this compute ' \
+                        'resource’s own endpoint is refused until per-node addressing lands: the ' \
+                        'name the endpoint gives itself did not match the machine’s computer name. ' \
+                        'Nothing was asked of the host and nothing was created.'
+
+    # B6: a cluster reading the ledger could not hold is a reading no future
+    # decision may lean on, so the write failing is itself a refusal.
+    SIGHTING_WRITE_REFUSAL = 'Refusing to act on this cluster reading because the sightings record ' \
+                             'could not be written: the ledger is what keeps a later destroy from ' \
+                             'trusting a host that once answered as a cluster, and an unreadable ' \
+                             'ledger is not a safe one. Nothing was asked of the host and nothing ' \
+                             'was created.'
 
     validates :url, :user, :password, presence: true
     after_validation :validate_connectivity unless Rails.env.test?
@@ -338,14 +409,21 @@ module ForemanHyperv
     end
 
     def create_vm(attr = {})
-      # PLG-15: machine creates are refused on every Hyper-V compute resource,
-      # as the very first act — before defaults, before validation, before any
-      # fog call. Input is still validated first so a hostile hash hears about
-      # the string, not just about the refusal.
+      # PLG-15's first act survives PLG-15b's unlock: input validation runs
+      # before anything else, so a hostile hash hears about the string, not
+      # just about the refusal.
       ForemanHyperv::InputValidation.validate_hash!(attr, context: :vm)
-      raise ForemanHyperv::OperationRefused, CREATE_REFUSAL unless create_allowed?
+      attr = attr.respond_to?(:to_hash) ? attr.to_hash.deep_symbolize_keys : attr
 
-      attr = vm_instance_defaults.merge(attr.to_hash.deep_symbolize_keys)
+      # PLG-15b: the create path answers stand-alone now. A create that asks
+      # for a cluster is refused exactly as PLG-15 refused it — the cluster
+      # create path lifts with PLG-15c — and the refusal lands before any read
+      # of the endpoint. A create that asks for no cluster still has to pass
+      # the stand-alone gate below, which refuses on every unknown.
+      raise ForemanHyperv::OperationRefused, CLUSTER_CREATE_REFUSAL if attr[:cluster_name].present?
+      raise ForemanHyperv::OperationRefused, STANDALONE_CREATE_REFUSAL unless create_allowed?
+
+      attr = vm_instance_defaults.merge(attr)
       attr.delete :computer_name if attr[:computer_name].blank?
       start = Foreman::Cast.to_bool(attr.delete(:start))
 
@@ -370,6 +448,15 @@ module ForemanHyperv
         processor_count: attr[:processor_count].to_i,
         notes: attr[:notes]
       )
+      # N6 self rung: this machine is being built through this resource's own
+      # client — the one configured with this endpoint — so its computer name
+      # has to be the name the endpoint gives itself (Get-VMHost), compared
+      # case-insensitively. A name that is not that name is per-node
+      # addressing, which is PLG-5a's, and until that lands the target stays
+      # refused. servers.new has built a model and sent nothing, so this
+      # raise tears nothing down.
+      raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL unless self_rung?(vm)
+
       vm.create(
         # TODO: should be :VHD if image build - when image build support exists
         boot_device: attr[:boot_device].present? ? attr[:boot_device].to_sym : :NetworkAdapter,
@@ -424,14 +511,20 @@ module ForemanHyperv
       raise
     rescue StandardError
       if vm&.persisted?
-        # The role owns the machine's config and disks the way the node does not:
-        # taking the machine apart without taking the role apart first leaves the
-        # cluster trying to start a machine that is gone (and fog's own disk teardown
-        # ends up fighting the cluster over the files — TEST-RESULTS finding 22).
+        # PLG-15b rollback, scoped to what this transaction created: the drives
+        # are DETACHED, not deleted (the VHDX files stay — a delete would be
+        # fog's Remove-Item path, which stays refused here), and the machine is
+        # removed with Remove-VM only, not with its underlying store (the
+        # config folder stays too). The folder and file deletes belong to the
+        # enablement PR's decisions, never to a rollback guess. remove_cluster_role
+        # stays for the day the cluster create path lands (PLG-15c): with the
+        # cluster create refused and the indeterminate class handed to the
+        # StrandIndeterminate rescue above, role_added is false on every path
+        # that reaches this rescue today.
         remove_cluster_role(vm) if role_added
         vm.stop
-        vm.hard_drives.each { |hdd| hdd.destroy(underlying: true) }
-        vm.destroy(vm.path.end_with?(vm.name))
+        vm.hard_drives.each { |hdd| hdd.destroy(underlying: false) }
+        vm.destroy(false)
       end
 
       raise
@@ -665,15 +758,42 @@ module ForemanHyperv
 
     private
 
-    # PLG-15's refusal switchboard. Every answer here is the current code state
-    # of this plugin version — creates, destroys and disk removals are refused
-    # everywhere, clusters and stand-alone hosts alike — and lifting one is a
-    # reviewed PR whose gate the refusal messages quote, never a setting. They
-    # read as predicates rather than bare raises so the code below each guard
-    # stays live for the reader: it is the path that runs the day a guard
-    # flips, not dead text.
+    # PLG-15's refusal switchboard, opened one path at a time by reviewed PRs.
+    # PLG-15b opens creates for stand-alone machines only (below); destroys
+    # and disk removals stay refused everywhere — the stand-alone destroy is
+    # PLG-15c's and the cluster paths stay locked behind the canonical
+    # enablement sentence the refusal messages quote. Lifting a guard is a
+    # merged PR whose gate those messages name, never a setting. They read as
+    # predicates rather than bare raises so the code below each guard stays
+    # live for the reader: it is the path that runs the day a guard flips,
+    # not dead text.
+    #
+    # The stand-alone create gate (PLG-15b): arm (a) must answer not-clustered
+    # on the endpoint, and BOTH configured markers must answer the not-found
+    # exception — not-found-only, B2, concordant or not. Every unknown refuses:
+    # a clustered reading, an unreadable classifier, a present marker, a
+    # denied read, an unparsable token. The gate makes its reads again on
+    # every create; there is nothing to configure.
     def create_allowed?
-      false
+      case cluster_membership_state
+      when :not_clustered
+        nil
+      when :clustered
+        logger.warn 'Refusing to create a virtual machine: the endpoint answered a cluster membership row'
+        return false
+      else
+        logger.warn 'Refusing to create a virtual machine: the cluster membership read did not answer'
+        return false
+      end
+
+      MARKER_READS.each_key do |marker|
+        state = marker_state(marker)
+        next if state == :absent
+
+        logger.warn "Refusing to create a virtual machine: the #{marker} marker read answered #{state}"
+        return false
+      end
+      true
     end
 
     def destroy_allowed?
@@ -763,6 +883,176 @@ module ForemanHyperv
       return if volumes.none? { |vol| vol[:_delete].to_s == '1' }
 
       raise ForemanHyperv::OperationRefused, DISK_REFUSAL
+    end
+
+    # --- PLG-15b: the stand-alone create gate -----------------------------------
+
+    # arm (a): one minimal-property WQL read of the cluster itself, on the
+    # compute resource's own endpoint, through fog's run_wql (which appends
+    # the namespace's `/*` grammar itself — passing the wildcard in here would
+    # double it, a shape measured to raise "invalid namespace" instead of
+    # answering). A row means membership; the two measured wire faults mean
+    # the opposite; everything else — auth failures, transport errors, a
+    # provider that answers with no row at all — says nothing, and N3 makes
+    # everything that says nothing indeterminate. A positive reading is a
+    # cluster sighting (B6): it goes into the insert-only ledger before this
+    # method answers, and a ledger that cannot take the row is a refusal.
+    def cluster_membership_state
+      unless client.respond_to?(:run_wql)
+        logger.warn 'The cluster membership read could not run: this fog exposes no WQL query path'
+        return :indeterminate
+      end
+
+      rows = client.run_wql(CLUSTER_MEMBERSHIP_QUERY, _namespace: CLUSTER_MEMBERSHIP_NAMESPACE)
+      if rows.is_a?(Hash) && rows[:name].to_s.strip.present?
+        record_cluster_sighting(cluster_name: rows[:name].to_s.strip)
+        :clustered
+      else
+        # The measured not-joined machine raises 1359 rather than answering an
+        # empty row set; a provider that answers with nothing, or with a row
+        # that carries no name, is a shape that has not been measured.
+        :indeterminate
+      end
+    rescue ForemanHyperv::OperationRefused
+      # The ledger's own refusal (write-fail, B6) is a decision, not an
+      # unreadable wire: it travels up as itself instead of being folded into
+      # the indeterminate class that says "the read did not answer".
+      raise
+    rescue StandardError => e
+      arm_a_consistent_wire_error?(e) ? :not_clustered : :indeterminate
+    end
+
+    # The two faults that read as not-clustered through this exact query path,
+    # as exceptions (WinRMWSManFault 1359, WinRMWMIError 2150858778) or as the
+    # same reading one layer up — a fog PSError whose captured streams quote
+    # one of the two wire codes is the machine's answer arriving as a command
+    # failure rather than a transport exception, and it is the same answer.
+    # Any other error, PSError included, is not an answer about membership.
+    def arm_a_consistent_wire_error?(error)
+      if defined?(::WinRM) && error.is_a?(::WinRM::WinRMWSManFault) &&
+         error.fault_code.to_i == WIRE_CODE_CLUSTER_UNAVAILABLE
+        return true
+      end
+
+      if defined?(::WinRM) && error.is_a?(::WinRM::WinRMWMIError) &&
+         error.error_code.to_i == WIRE_CODE_FEATURE_ABSENT
+        return true
+      end
+
+      return false unless error.is_a?(Fog::Hyperv::Errors::PSError)
+
+      streams = "#{error.message}\n#{error.stderr}"
+      streams.include?("WSMAN ERROR CODE: #{WIRE_CODE_CLUSTER_UNAVAILABLE}") ||
+        streams.include?("WMI ERROR CODE: #{WIRE_CODE_FEATURE_ABSENT}")
+    end
+
+    # B2's dual-marker read, executed entirely server-side as one fog command.
+    # The ONLY branch that may answer absent is the not-found exception the
+    # named primitive raises for a missing path (N3: fog's single PSError and
+    # its nil-on-empty-stdout replies make plugin-side discrimination from an
+    # exit code impossible, so the machine's answer arrives as one JSON token
+    # written by typed catches). The full exception class name rides the token
+    # so the row-(v) arms can assert the exact per-marker shape the F3 table
+    # names. present and absent are the only answers the gate acts on; denied
+    # — a read the machine refused, of any class the F3 table expects under a
+    # deny — and unreadable (every other exception) read as indeterminate, and
+    # so does anything short of a well-formed token, empty stdout included.
+    def marker_state(marker)
+      out = client.run_cmd(marker_read_script(marker), _skip_json: true)
+      reply = out.stdout.to_s.strip
+      return :indeterminate if reply.empty? || reply.length > 1_024
+
+      token = Fog::JSON.decode(reply)
+      return :indeterminate unless token.is_a?(Hash)
+
+      result = token['result'].to_s
+      logger.debug "The #{marker} marker read answered #{result} (#{sanitize_text(token['type'].to_s)})"
+      %w[present absent].include?(result) ? result.to_sym : :indeterminate
+    rescue StandardError => e
+      # fog raising at all — transport, auth, parse — says nothing (N3).
+      logger.warn "The #{marker} marker read did not answer: #{e.class}"
+      :indeterminate
+    end
+
+    # The script the marker read runs. Only the two constants in MARKER_READS
+    # are interpolated — no user input is anywhere near it, and the whole read
+    # is one command: open/read, five typed catches, one JSON line.
+    def marker_read_script(marker)
+      read = MARKER_READS.fetch(marker)
+      probe = [read[:cmdlet], "-LiteralPath '#{read[:path]}'", read[:args], '-ErrorAction Stop'].compact.join(' ')
+      <<~MARKER_READ
+        $ForemanHypervMarkerRead = try {
+          $null = #{probe}
+          [pscustomobject]@{ result = 'present'; type = $null }
+        } catch [System.Management.Automation.ItemNotFoundException] {
+          [pscustomobject]@{ result = 'absent'; type = $_.Exception.GetType().FullName }
+        } catch [System.Security.SecurityException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch [System.UnauthorizedAccessException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch [System.IO.IOException] {
+          [pscustomobject]@{ result = 'denied'; type = $_.Exception.GetType().FullName }
+        } catch {
+          [pscustomobject]@{ result = 'unreadable'; type = $_.Exception.GetType().FullName }
+        }
+        $ForemanHypervMarkerRead | ConvertTo-Json -Compress
+      MARKER_READ
+    end
+
+    # N6's self rung: the endpoint's own Get-VMHost name against the machine's
+    # computer name, case-insensitively. A name that does not match — or an
+    # endpoint that cannot name itself — is refused: per-node addressing is
+    # PLG-5a's, and "fail-closed until PLG-5a" lives here until that PR lands
+    # (the pre-registered shipping state, not an oversight).
+    def self_rung?(vm)
+      asked = vm&.computer_name.to_s.strip
+      return false if asked.empty?
+
+      host_name = hypervisor.name.to_s.strip
+      return false if host_name.empty?
+
+      asked.casecmp(host_name).zero?
+    rescue StandardError => e
+      logger.warn "The endpoint could not name itself for the create self-check: #{e.class}"
+      false
+    end
+
+    # --- B6: the insert-only sightings ledger -------------------------------------
+
+    # The endpoint host in the shape the ledger stores: the configured
+    # endpoint's host, trimmed and downcased — the identity a later destroy
+    # gate reads by. An endpoint that does not parse to a host is not a
+    # host the ledger can hold a row for.
+    def endpoint_host_name
+      URI.parse(url.to_s).host.to_s.strip.downcase.presence
+    rescue URI::Error
+      nil
+    end
+
+    def record_cluster_sighting(cluster_name:)
+      persist_cluster_sighting(kind: 'sighting', cluster_name: cluster_name)
+    end
+
+    # The write-fail rule (B6): every cluster-row sighting appends, and a
+    # ledger that will not take the row means the reading cannot be recorded —
+    # so the reading is refused, not trusted and not silently dropped. Values
+    # go through the same sanitizers the strand log record uses: cluster and
+    # machine names are machine-sourced text.
+    def persist_cluster_sighting(kind:, vm_uuid: nil, vm_name: nil, cluster_name: nil, reason: nil)
+      host = endpoint_host_name
+      raise ForemanHyperv::OperationRefused, SIGHTING_WRITE_REFUSAL if host.nil?
+
+      ForemanHyperv::ClusterSighting.create!(
+        endpoint_host: host,
+        kind: kind,
+        vm_uuid: strand_param(vm_uuid).presence,
+        vm_name: strand_param(vm_name).presence,
+        cluster_name: sanitize_text(cluster_name.to_s).presence,
+        reason: sanitize_text(reason.to_s).presence
+      )
+    rescue ActiveRecord::ActiveRecordError => e
+      logger.error "The sightings ledger refused a #{kind} record and the reading goes with it: #{e.class}"
+      raise ForemanHyperv::OperationRefused, SIGHTING_WRITE_REFUSAL
     end
 
     def _clusters
@@ -1024,8 +1314,14 @@ module ForemanHyperv
     end
 
     # The strand record (B6): what was asked for, where it was left, and why the
-    # plugin will not guess. This is the operator's work item until the enablement
-    # PR lands; the persistent table arrives with PLG-22's migration.
+    # plugin will not guess — in the log for the operator in front of the console,
+    # and in the sightings ledger (kind strand, PLG-21b's migration) for every
+    # later decision that must not forget this machine. The ledger write is
+    # best-effort in one specific sense: if it fails, the touch-nothing contract
+    # still holds, because the StrandIndeterminate raise that follows is the
+    # refusal with or without the row — but the failed write is said out loud,
+    # because an operator who later trusts the ledger needs to know this strand
+    # only made it to the log.
     def record_role_strand(vm, error)
       logger.warn format(
         'Hyper-V cluster role strand: virtual machine %<uuid>s (name %<name>s) at %<path>s was asked ' \
@@ -1034,6 +1330,9 @@ module ForemanHyperv
         uuid: strand_param(vm&.id), name: strand_param(vm&.name), path: strand_param(vm&.path),
         reason: strand_reason(error)
       )
+      persist_cluster_sighting(kind: 'strand', vm_uuid: vm&.id, vm_name: vm&.name, reason: strand_reason(error))
+    rescue StandardError => e
+      logger.error "The strand ledger record could not be written (the log record above is all there is): #{e.class}"
     end
 
     # Either the send's own first line, or the fact that no readback ever
