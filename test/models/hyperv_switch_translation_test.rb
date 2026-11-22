@@ -86,10 +86,13 @@ class HypervSwitchTranslationTest < ActiveSupport::TestCase
     cr = build_cr
     nic = FakeNic.new
     vm = build_vm(nic)
+    attrs = {
+      interfaces_attributes: {
+        '0' => { switch_id: ENDPOINT_SWITCH_GUID, vlan_operation_mode: 'Untagged' }
+      }
+    }
 
-    cr.send(:create_interfaces, vm, interfaces_attributes: {
-      '0' => { switch_id: ENDPOINT_SWITCH_GUID, vlan_operation_mode: 'Untagged' },
-    })
+    cr.send(:create_interfaces, vm, attrs)
 
     assert_equal 'External', nic.switch_name
     assert_nil nic.switch_id
@@ -100,10 +103,13 @@ class HypervSwitchTranslationTest < ActiveSupport::TestCase
     cr = build_cr
     nic = FakeNic.new
     vm = build_vm(nic)
+    attrs = {
+      interfaces_attributes: {
+        '0' => { switch_id: FOREIGN_SWITCH_GUID, vlan_operation_mode: 'Untagged' }
+      }
+    }
 
-    cr.send(:create_interfaces, vm, interfaces_attributes: {
-      '0' => { switch_id: FOREIGN_SWITCH_GUID, vlan_operation_mode: 'Untagged' },
-    })
+    cr.send(:create_interfaces, vm, attrs)
 
     assert_equal FOREIGN_SWITCH_GUID, nic.switch_id
     assert_nil nic.switch_name
@@ -113,10 +119,13 @@ class HypervSwitchTranslationTest < ActiveSupport::TestCase
     cr = build_cr
     nic = FakeNic.new
     vm = build_vm(nic)
+    attrs = {
+      interfaces_attributes: {
+        '0' => { compute_attributes: { switch_id: ENDPOINT_SWITCH_GUID, vlan_operation_mode: 'Untagged' } }
+      }
+    }
 
-    cr.send(:update_interfaces, vm, interfaces_attributes: {
-      '0' => { compute_attributes: { switch_id: ENDPOINT_SWITCH_GUID, vlan_operation_mode: 'Untagged' } },
-    })
+    cr.send(:update_interfaces, vm, attrs)
 
     assert_equal 'External', nic.switch_name
     assert_nil nic.switch_id

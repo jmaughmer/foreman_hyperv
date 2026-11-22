@@ -2896,6 +2896,29 @@ module ForemanHyperv
       end
     end
 
+    # PLG-26: a switch named by GUID is named for ONE node — the endpoint whose
+    # list produced the id — while a virtual switch exists per node, the same
+    # name being a different switch with a different GUID on every one of them
+    # (measured twice, 28 and 33.3's E12b: a foreign GUID does not answer
+    # empty, it RAISES "No Ethernet switch could be found matching the
+    # specified criteria" on the node that lacks it). The name is what the
+    # nodes share: this resource's network list offers only switches every
+    # node answers by name, so the endpoint's GUID is translated back to that
+    # name and the id dropped — fog then dials Get-VMSwitch -Name on the node
+    # the machine actually lives on, which answers for that node's own switch
+    # of that name. A GUID the endpoint's own list does not carry names a
+    # switch missing even there: it rides on untouched, and the loud error it
+    # earns is the honest answer, not a silent name miss.
+    def resolve_nic_switch(iface)
+      guid = iface[:switch_id].presence
+      return iface unless guid
+
+      shared = switches(nil).detect { |sw| sw.id.to_s.casecmp?(guid.to_s) }
+      return iface unless shared
+
+      iface.merge(switch_name: shared.name).except(:switch_id)
+    end
+
     def create_interfaces(vm, attr)
       interfaces = nested_attributes_for :interfaces, attr[:interfaces_attributes]
       logger.debug "Creating interfaces with: #{interfaces}"
@@ -2907,7 +2930,7 @@ module ForemanHyperv
         first_provisioned = true
 
         nic ||= vm.network_adapters.new
-        iface.except(:identity, :ip, :ip6).each do |k, v|
+        resolve_nic_switch(iface.except(:identity, :ip, :ip6)).each do |k, v|
           nic.send(:"#{k}=", v.presence)
         end
         # nic.is_legacy = Foreman::Cast.to_bool(iface[:is_legacy]) if
@@ -2936,7 +2959,7 @@ module ForemanHyperv
       logger.debug "Updating interfaces with: #{interfaces}"
 
       interfaces.each do |interface|
-        compute = interface[:compute_attributes]
+        compute = resolve_nic_switch(interface[:compute_attributes])
         if compute[:identity].present?
           nic = vm.network_adapters.get compute[:identity]
           if interface[:_destroy] == '1'
