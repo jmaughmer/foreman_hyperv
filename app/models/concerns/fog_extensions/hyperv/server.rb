@@ -134,6 +134,18 @@ module FogExtensions
                ram: number_to_human_size(memory_startup)
       end
 
+      # PLG-28: the endpoint's switch-name translation, handed to the machine by
+      # the compute resource that built it (create_vm). A virtual switch is a
+      # per-node resource: a NIC record carries the endpoint's GUID for the
+      # switch the form offered, and a machine built on another node answers the
+      # node's own GUID for the switch of the same name. Only the endpoint's own
+      # listing knows one GUID IS the other's name, and the machine core reads
+      # back for MAC assignment must answer with it — so the resource gives it
+      # the listing's translation, and the matcher below uses it. A machine that
+      # carries no resolver (the endpoint rung) matches on GUIDs alone, exactly
+      # as before.
+      attr_accessor :switch_name_resolver
+
       def select_nic(fog_nics, nic)
         nic_attrs = nic.compute_attributes
 
@@ -143,9 +155,15 @@ module FogExtensions
         # match ||= fog_nics.detect { |fn| fn.name == nic_attrs['name'].presence }
 
         unless match
-          # Match on networking, limit potentials down to identical configuration and then pick the first
+          # Match on networking, limit potentials down to identical configuration and then pick the first.
+          # PLG-28: the endpoint GUID the NIC record carries names a switch every node shares by NAME,
+          # so when the compute resource's translation resolves that GUID, the shared name joins the
+          # identities a cross-node adapter may answer to — bridged only where the endpoint proves it.
+          endpoint_name = switch_name_resolver&.call(nic_attrs['switch_id'].presence)
           potential = fog_nics.select do |fn|
-            fn.switch_id == nic_attrs['switch_id'].presence || fn.switch_name == nic_attrs['switch_name'].presence
+            fn.switch_id == nic_attrs['switch_id'].presence ||
+              fn.switch_name == nic_attrs['switch_name'].presence ||
+              (endpoint_name.present? && fn.switch_name == endpoint_name)
           end
           potential.select! { |fn| fn.vlan_operation_mode.to_s == nic_attrs['vlan_operation_mode'] }
           case nic_attrs['vlan_operation_mode']

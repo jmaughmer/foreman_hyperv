@@ -50,6 +50,9 @@ class HypervRoleAddRoutingTest < ActiveSupport::TestCase
   # model the moment the machine exists. That overwrite is the whole trap this
   # suite pins.
   class RoutingVm
+    # PLG-28: the plugin's fog extension gives every fog server this accessor;
+    # a double of that class answers to it too.
+    attr_accessor :switch_name_resolver
     attr_reader :new_attributes, :id, :name, :computer_name
 
     def initialize(attributes, answer_name)

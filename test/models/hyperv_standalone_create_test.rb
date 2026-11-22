@@ -132,6 +132,9 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
   # argument the rollback must never set true.
   class VmDouble
     attr_accessor :id, :name, :computer_name, :path, :generation
+    # PLG-28: the plugin's fog extension gives every fog server this accessor;
+    # a double of that class answers to it too.
+    attr_accessor :switch_name_resolver
     attr_reader :calls
 
     def initialize
