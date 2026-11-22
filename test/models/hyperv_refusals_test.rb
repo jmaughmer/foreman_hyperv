@@ -56,6 +56,7 @@ class HypervRefusalsTest < ActiveSupport::TestCase
     def supports_literal_path_destructive? = false
     def supports_stdout_json_hygiene? = false
     def supports_input_hardening? = false
+    def supports_cluster_capacity_projection? = false
 
     def method_missing(name, *args)
       @calls << [name, args]

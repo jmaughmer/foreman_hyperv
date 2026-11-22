@@ -83,24 +83,27 @@ module ForemanHyperv
                    'additionally requires a named method that proves node-set completeness; ' \
                    'enablement is a code PR, not a configuration.'
 
-    # PLG-22: the enablement set. Everything this PR unlocks stands on five
+    # PLG-22: the enablement set. Everything this PR unlocks stands on six
     # behaviours of the fog it is built against — the tri-state cluster reads,
     # the exact-host connection gate (FOG-11), the literal-path destructive
-    # calls (FOG-14), the stdout hygiene contract (FOG-15) and the input
-    # hardening (FOG-9) — and the runtime check asks the installed fog for ALL
-    # of them: the constant list AND the per-behaviour predicate every client
-    # of that build answers. A fog missing any one is the pre-enablement era
-    # again, and every operation this PR unlocks refuses exactly as it refused
-    # before. The constant is FOG-9's, and the plugin gate trusts it for the
-    # rule behind it (R13): the builder validator and the connection gate are
-    # ONE pure function there, so there is nothing here for a second list to
-    # re-prove.
+    # calls (FOG-14), the stdout hygiene contract (FOG-15), the input
+    # hardening (FOG-9) and the cluster capacity projection (FOG-8) — and the
+    # runtime check asks the installed fog for ALL of them: the constant list
+    # AND the per-behaviour predicate every client of that build answers. A
+    # fog missing any one is the pre-enablement era again, and every
+    # operation this PR unlocks refuses exactly as it refused before. The
+    # constant is FOG-9's, and the plugin gate trusts it for the rule behind
+    # it (R13): the builder validator and the connection gate are ONE pure
+    # function there, so there is nothing here for a second list to re-prove.
+    # (PLG-5b grew the set with FOG-8's sixth: the capacity read PLG-14 puts
+    # in front of placement stands or falls on that projection.)
     ENABLEMENT_CAPABILITIES = {
       tri_state_cluster: :supports_clusters?,
       exact_host_connection: :supports_exact_host_connections?,
       literal_path_destructive: :supports_literal_path_destructive?,
       stdout_json_hygiene: :supports_stdout_json_hygiene?,
-      input_hardening: :supports_input_hardening?
+      input_hardening: :supports_input_hardening?,
+      cluster_capacity_projection: :supports_cluster_capacity_projection?
     }.freeze
 
     # The capability-era refusal: the plugin build is enabled, the installed
@@ -295,24 +298,74 @@ module ForemanHyperv
     # PLG-15 discipline.)
     NODE_OVERRIDE_HOST = /\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\z/
     NODE_OVERRIDE_PORT = /\A[1-9][0-9]{0,4}\z/
-    # R17's enforcement point for "fail-closed until PLG-5b": the check runs
-    # on the COMPOSED endpoint, not the override string — the compute resource
+    # R17's enforcement point, rewritten by PLG-5b: the check runs on the
+    # COMPOSED endpoint, not the identity source — the compute resource
     # supplies scheme and TLS, so an https resource would otherwise compose an
-    # https node endpoint and simply WORK, unvalidated. Only the measured
-    # http+negotiate pattern (the d20/d21 rows) is composed; the refusal names
-    # the composition it refused out loud.
+    # https node endpoint and simply WORK, unvalidated. The (w) matrix
+    # validated exactly two families: http+negotiate for any identity (rows
+    # HTTP-NEG-IP and HTTP-NEG-FQDN, OK on all three nodes), and https with
+    # hostname verification against an explicit CA trust (row HTTPS-NEG-FQDN,
+    # OK on all three nodes once the CA file was wired). Every other
+    # composition stays refused, and the refusal names it out loud.
     NODE_ENDPOINT_REFUSAL = 'Refusing to reach a cluster node through %<endpoint>s: the composed ' \
-                            'per-node endpoint is not the measured http+negotiate transport, and ' \
-                            'hardened transports stay refused until PLG-5b has validated them. ' \
-                            'No node operation was attempted.'
+                            'per-node endpoint uses a transport the (w) matrix did not validate. Only ' \
+                            'http, and https with a certificate-verifiable name and a ' \
+                            'hyperv_ca_trust_path, are composed. No node operation was attempted.'
+
+    # PLG-5b, row (w): HTTPS-NEG-IP was the measured dead end — an IPv4
+    # identity gives the node certificate no hostname to verify against, and
+    # the fix (ssl_verify false) is exactly what this plugin refuses to force
+    # on an operator. The refusal says so.
+    NODE_TLS_IP_REFUSAL = 'Refusing to reach %<endpoint>s over https: an IPv4 identity gives the ' \
+                          'certificate no hostname to verify against (the (w) transport matrix found ' \
+                          'no hostname-verified path to an IP endpoint, and forcing certificate ' \
+                          'verification off is not this plugin’s choice). A hyperv_node_overrides ' \
+                          'entry naming the node carries the composition. No node operation was ' \
+                          'attempted.'
+
+    # The other half of row HTTPS-NEG-FQDN: the chain verified ONLY against
+    # the explicit CA file; fog's default store does not see the system
+    # anchors on this platform (measured, (w) final rows).
+    NODE_TLS_TRUST_REFUSAL = 'Refusing to reach %<endpoint>s over https: hyperv_ca_trust_path is ' \
+                             'not set on this compute resource, so the node certificate has nothing ' \
+                             'to verify against — the (w) matrix validated https only with an ' \
+                             'explicit CA trust. No node operation was attempted.'
+
+    # PLG-5b: the address the cluster gives its own nodes is a fact with a
+    # shape; anything outside the shape is REFUSED naming the node and the
+    # reason (the capacity-read discipline), never guessed.
+    NODE_ADDRESS_REFUSAL = 'Refusing to address cluster node %<node>s: %<reason>s ' \
+                           'No node operation was attempted.'
+    NODE_ADDRESS_CLIENT_REFUSAL = 'the cluster’s own network interfaces could not be read through ' \
+                                  'this compute resource’s client, so the node has no address to dial.'
+    NODE_ADDRESS_NO_ROWS = 'the cluster’s network-interface read names no interface for it, so it ' \
+                           'has no client-reachable address to dial.'
+    NODE_ADDRESS_NO_CLIENT_ROLE = 'its cluster network interfaces sit on no client-role (Role 3) ' \
+                                  'cluster network, so it has no address reachable from outside the ' \
+                                  'cluster — a hyperv_node_overrides entry naming the node carries ' \
+                                  'placement traffic there.'
+    NODE_ADDRESS_AMBIGUOUS = 'more than one client-role address answered for it (%<candidates>s) — ' \
+                             'refusing to pick between them; a hyperv_node_overrides entry states ' \
+                             'the operator’s choice.'
+    NODE_ADDRESS_NOT_IPV4 = 'its client-role address %<address>s is not a plain IPv4 address, and ' \
+                            'this plugin dials discovered nodes by IPv4 only.'
+    NODE_IPV4 = /\A\d{1,3}(?:\.\d{1,3}){3}\z/
+
+    # PLG-5b: the CA file the hardened per-node composition verifies against,
+    # read on the FOREMAN host (fog builds the trust store there), so it is an
+    # absolute POSIX path and nothing shell- or normalization-flavoured. The
+    # PLG-15 discipline again: refused at save, not repaired.
+    CA_TRUST_PATH_SHAPE = %r{\A/[A-Za-z0-9._\-/]+\z}
 
     # The self rung's refusal (N6): a target that is not the endpoint's own
-    # machine is per-node territory, and per-node addressing is PLG-5a's.
-    # Failing closed here is the pre-registered shipping state, not a bug.
+    # machine is per-node territory, and per-node addressing needs an
+    # identity. Failing closed here is the pre-registered shipping state,
+    # not a bug.
     SELF_RUNG_REFUSAL = 'Creating a virtual machine on a computer other than this compute ' \
-                        'resource’s own endpoint is refused until per-node addressing lands: the ' \
-                        'name the endpoint gives itself did not match the machine’s computer name. ' \
-                        'Nothing was asked of the host and nothing was created.'
+                        'resource’s own endpoint needs per-node addressing: the name the endpoint ' \
+                        'gives itself did not match, and no node→endpoint override and no cluster ' \
+                        'address read routed the target. Nothing was asked of the host and nothing ' \
+                        'was created.'
 
     # B6: a cluster reading the ledger could not hold is a reading no future
     # decision may lean on, so the write failing is itself a refusal.
@@ -324,6 +377,7 @@ module ForemanHyperv
 
     validates :url, :user, :password, presence: true
     validate :hyperv_node_overrides_shape
+    validate :hyperv_ca_trust_path_shape
     after_validation :validate_connectivity unless Rails.env.test?
 
     def self.provider_friendly_name
@@ -596,7 +650,7 @@ module ForemanHyperv
 
       # PLG-15b opened creates for stand-alone machines; PLG-22 enables the
       # cluster create path — with the era rule the destroy path uses too:
-      # a fog that does not answer the five behaviours gets the pre-enablement
+      # a fog that does not answer the six behaviours gets the pre-enablement
       # refusals verbatim (the cluster ask refused before any read of the
       # endpoint, the stand-alone gate refusing on every unknown), and only
       # the enablement's partner fog runs the unlocked path below.
@@ -632,23 +686,24 @@ module ForemanHyperv
       # The identity ladder (N6), decided before the model is built so the
       # model rides the RIGHT client: the self rung serves through this
       # resource's own client; a named node reaches its SEPARATE per-node
-      # client only through the operator override (PLG-5a — the only source
-      # of FQDN identity), with the override's identity spliced into the
-      # model's computer name (N4); a named node with no override is
-      # per-node addressing with nothing to dial, and stays refused — the
-      # same fail-closed the reads use. In the pre-enablement era the named
-      # target had nowhere to go anyway, and the self-rung check below
-      # answers exactly as it did before.
+      # client through the operator override (PLG-5a — the operator's own
+      # assertion, validated at save) or through the address the cluster
+      # itself gives the node (PLG-5b — the (w) MSI read, client-role pick
+      # rule), with that identity spliced into the model's computer name
+      # (N4). A named node neither overridden nor discoverable is per-node
+      # addressing with nothing to dial, and the refusal names it — the same
+      # fail-closed the reads use. In the pre-enablement era the named target
+      # had nowhere to go anyway, and the self-rung check below answers
+      # exactly as it did before.
       build_client = client
       computer = attr[:computer_name].presence
-      routed_via_override = false
+      routed_via_node = false
       if enablement_supported? && computer && !self_rung_name?(computer)
         override = node_override(computer)
-        raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL if override.nil?
-
-        build_client = client_for_node(computer)
-        computer = override.split(':', 2).first
-        routed_via_override = true
+        computer = override.split(':', 2).first if override
+        computer = discover_node_address(computer) if override.nil?
+        build_client = client_for_node(attr[:computer_name])
+        routed_via_node = true
       end
 
       vm = build_client.servers.new(
@@ -664,11 +719,12 @@ module ForemanHyperv
       )
       # N6 self rung: a machine built through this resource's own client has
       # to carry the name the endpoint gives itself (Get-VMHost), compared
-      # case-insensitively — an override-routed machine is the one exception
-      # the ladder allows, its identity being the operator's own assertion
-      # (validated at save) dialled through its own client. servers.new has
+      # case-insensitively — a node-routed machine is the one exception the
+      # ladder allows, its identity an assertion the ladder already checked:
+      # the operator's (validated at save) or the cluster's own network read
+      # (PLG-5b), dialled through the node's own client. servers.new has
       # built a model and sent nothing, so this raise tears nothing down.
-      raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL unless routed_via_override || self_rung?(vm)
+      raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL unless routed_via_node || self_rung?(vm)
 
       vm.create(
         # TODO: should be :VHD if image build - when image build support exists
@@ -825,7 +881,7 @@ module ForemanHyperv
 
       unless enablement_supported?
         # The pre-enablement gate, verbatim: a fog that does not answer the
-        # five behaviours gets the refusals this plugin shipped with, word for
+        # six behaviours gets the refusals this plugin shipped with, word for
         # word — enablement is a property of the fog+plugin pair, and the
         # plugin does not run a decision its partner cannot keep.
         case standalone_destroy_state(vm)
@@ -1018,12 +1074,20 @@ module ForemanHyperv
     protected
 
     def client
-      @client ||= Fog::Compute.new(
+      options = {
         provider: :HyperV,
         hyperv_endpoint: url,
         hyperv_username: user,
         hyperv_password: password
-      )
+      }
+      # The SAME trust the per-node compositions get: over https this client
+      # runs the address read, the cluster reads and test_connection against
+      # the very certificates hyperv_ca_trust_path exists to verify (the
+      # revalidation row that caught the omission refused with a bare
+      # SSLError before any composition decision was reached). Absent the
+      # attribute, absent the option — the pre-PLG-5b build, verbatim.
+      options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
+      @client ||= Fog::Compute.new(options)
     end
 
     private
@@ -1079,10 +1143,10 @@ module ForemanHyperv
     # the behaviour but not the list, is not this build's partner). A fog too
     # old to even define CAPABILITIES answers "everything missing" — the
     # pre-enablement era, refusing exactly what it refused before enablement.
-    # The whole check is a local constant read and five respond_to?/predicate
+    # The whole check is a local constant read and six respond_to?/predicate
     # calls on the client object: no wire traffic, and it is safe to ask on
     # every operation.
-    # @return [Boolean] does the installed fog answer all five?
+    # @return [Boolean] does the installed fog answer all six?
     def enablement_supported?
       missing_enablement_capabilities.empty?
     end
@@ -2247,8 +2311,9 @@ module ForemanHyperv
     # node this asks is addressed by an IDENTITY that resolves, never by the
     # role's unqualified name (N5, §45.3): the override host when the operator
     # supplied one (PLG-5a), the endpoint host when the owner is the endpoint's
-    # own node, and nothing at all otherwise — a node without usable identity
-    # is refused its reads, and no fog call carries its name.
+    # own node, the address the cluster gives the node under the client-role
+    # pick rule (PLG-5b), and nothing else — a node with no usable identity is
+    # refused its reads by name, and no fog call carries its unqualified name.
     def vm_from_cluster_owner(uuid)
       # Checked before the StandardError rescue below can fold it into nil: a
       # hostile id must raise, not answer "no owner", and this read takes the
@@ -2275,13 +2340,14 @@ module ForemanHyperv
         return client.servers.get(uuid, computer_name: endpoint_host_name)
       end
 
-      # Fail closed (N6, pre-registered): fog would take this name to its
-      # completion sink — the prefix-cache path that can complete against the
-      # WRONG endpoint and fake a pass (R22) — so the name never leaves here.
-      logger.warn "Virtual machine #{uuid} is owned by cluster node #{owner}: this compute resource " \
-                  'has no node→endpoint override for it, so reads through that node are refused ' \
-                  'until hyperv_node_overrides carries it (or PLG-5b discovers the address)'
-      nil
+      # PLG-5b rung 3: the cluster itself names the node's address. A node
+      # the read cannot answer for raises naming itself — fog would take the
+      # unqualified name to its completion sink, the prefix-cache path that
+      # can complete against the WRONG endpoint and fake a pass (R22), so the
+      # name never leaves here without an address behind it.
+      address = discover_node_address(owner)
+      logger.info "Virtual machine #{uuid} is owned by cluster node #{owner}, reading it at the cluster's address"
+      client_for_node(owner).servers.get(uuid, computer_name: address)
     rescue StandardError => e
       raise if e.is_a?(ForemanHyperv::UnsafeIdentifier)
 
@@ -2317,16 +2383,20 @@ module ForemanHyperv
       node_override_map[node_name.to_s.strip.downcase]
     end
 
-    # The composed per-node endpoint (N4): scheme, TLS and port come from the
-    # compute resource; the override supplies ONLY the identity spliced in.
-    # The path is /wsman because WinRM always answers there. The R17 check is
-    # on this composition: an unparseable endpoint has no measured scheme
-    # either, so it refuses too.
+    # The composed per-node endpoint (N4): scheme and port come from the
+    # compute resource; the identity is the override value (PLG-5a) or the
+    # address the cluster gives the node (PLG-5b) — never the role's
+    # unqualified name. The path is /wsman because WinRM always answers
+    # there. The R17 check is on this composition, and an unparseable
+    # endpoint has no measured scheme either, so it refuses too.
     def node_endpoint(node_name)
       override = node_override(node_name)
-      return nil if override.nil?
-
-      identity_host, identity_port = override.split(':', 2)
+      identity_host, identity_port =
+        if override
+          override.split(':', 2)
+        else
+          [discover_node_address(node_name), nil]
+        end
       base = begin
         URI.parse(url.to_s)
       rescue URI::Error
@@ -2336,25 +2406,190 @@ module ForemanHyperv
                         scheme: base&.scheme,
                         host: identity_host,
                         port: identity_port || base&.port)
-      unless base&.scheme == 'http'
+      case base&.scheme
+      when 'http'
+        composed
+      when 'https'
+        if NODE_IPV4.match?(identity_host)
+          raise ForemanHyperv::OperationRefused, format(NODE_TLS_IP_REFUSAL, endpoint: composed)
+        end
+
+        if hyperv_ca_trust_path.blank?
+          raise ForemanHyperv::OperationRefused, format(NODE_TLS_TRUST_REFUSAL, endpoint: composed)
+        end
+
+        composed
+      else
         raise ForemanHyperv::OperationRefused, format(NODE_ENDPOINT_REFUSAL, endpoint: composed)
       end
-
-      composed
     end
 
     # A SEPARATE Fog::Compute per node (N4): hyperv_host is never passed, so
     # fog cannot compose an endpoint from it behind our back; the endpoint
-    # arrives complete. One instance per node per resource, so one connection
-    # cache per node — R22's "exactly one connection" is about THIS instance.
+    # arrives complete. An https composition has already been refused unless
+    # a CA file was named, and fog's default trust store does not see the
+    # system anchors on this platform (row (w)), so the named file rides the
+    # option in every case. One instance per node per resource, so one
+    # connection cache per node — R22's "exactly one connection" is about
+    # THIS instance.
     def client_for_node(node_name)
-      @node_clients ||= {}
-      @node_clients[node_name.to_s.strip.downcase] ||= Fog::Compute.new(
+      options = {
         provider: :HyperV,
         hyperv_endpoint: node_endpoint(node_name),
         hyperv_username: user,
         hyperv_password: password
-      )
+      }
+      options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
+
+      @node_clients ||= {}
+      @node_clients[node_name.to_s.strip.downcase] ||= Fog::Compute.new(options)
+    end
+
+    # --- PLG-5b: the address the cluster gives its own nodes ---------------------
+
+    # One shell, one JSON answer, per the measured cluster-read rules: the
+    # answering cluster is witnessed FIRST (an empty interface list from a
+    # cluster that answered is a contradiction the caller refuses, and it is
+    # only visible next to the name); both legs are wrapped in @() because
+    # PowerShell collapses an empty pipeline to $null and a one-element
+    # ConvertTo-Json to a bare object; the network Role is joined
+    # server-side because the raw MSCluster_NetworkInterface Roles came back
+    # EMPTY on this build (the (w) MSI row), while the cmdlets answer the
+    # full shape; Node and Network arrive as STRINGS, not objects — reading
+    # .Node.Name read empty on the live cluster (the row that caught this)
+    # and a silently empty label would drop every interface off the map;
+    # and no early-terminating Select-Object anywhere (evidence §2: it kills
+    # cluster cmdlet pipelines).
+    def cluster_node_address_script
+      <<~SCRIPT
+        $WarningPreference = 'SilentlyContinue'
+        $cluster = Get-Cluster
+        $networkRoles = @{}
+        @(Get-ClusterNetwork) | ForEach-Object { $networkRoles[[string]$_.Name] = $_.Role }
+        $interfaces = @(@(Get-ClusterNetworkInterface) | ForEach-Object {
+          [PSCustomObject]@{
+            node = [string]$_.Node
+            adapter = [string]$_.Name
+            network = [string]$_.Network
+            address = [string]$_.Address
+            netRole = $networkRoles[[string]$_.Network]
+          }
+        })
+        @{ clusterName = [string]$cluster.Name; interfaces = $interfaces } | ConvertTo-Json -Compress -Depth 4
+      SCRIPT
+    end
+
+    # label → candidate addresses, and the envelope refusal. One read per
+    # compute-resource instance: the whole cluster answers, so two lookups
+    # are not two reads — and a refusal is cached too, because a cluster
+    # that could not answer once has not learned anything between two
+    # decisions in the same request.
+    def cluster_node_addresses
+      unless defined?(@cluster_node_addresses)
+        @cluster_node_address_refusal = nil
+        begin
+          @cluster_node_addresses = read_cluster_node_addresses
+        rescue ForemanHyperv::OperationRefused => e
+          @cluster_node_addresses = {}
+          @cluster_node_address_refusal = e.message
+        end
+      end
+      @cluster_node_addresses
+    end
+
+    # The node's dialable address as the cluster itself states it, or a
+    # refusal that names the node and the reason — never a guess. The pick
+    # rule is the measured one: an interface counts for placement traffic
+    # only when its cluster network carries Role = 3 (cluster AND client);
+    # the internal-only net (Role 1) holds addresses no client can dial.
+    # The node is named downcased: the cluster answers in NETBIOS casing,
+    # the map's keyspace is downcased, and the operator must be able to
+    # grep the refusal for the name they typed.
+    def discover_node_address(node_name)
+      node = node_name.to_s.strip.downcase
+      if cluster_node_addresses && @cluster_node_address_refusal
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node, reason: @cluster_node_address_refusal)
+      end
+
+      seen = @cluster_node_addresses[node.split('.').first]
+      if seen.nil?
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node, reason: NODE_ADDRESS_NO_ROWS)
+      end
+
+      candidates, client_role = seen
+      unless client_role
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node, reason: NODE_ADDRESS_NO_CLIENT_ROLE)
+      end
+
+      if candidates.size > 1
+        ambiguous = format(NODE_ADDRESS_AMBIGUOUS, candidates: candidates.join(', '))
+        raise ForemanHyperv::OperationRefused, format(NODE_ADDRESS_REFUSAL, node: node, reason: ambiguous)
+      end
+
+      address = candidates.first
+      unless NODE_IPV4.match?(address.to_s)
+        not_ipv4 = format(NODE_ADDRESS_NOT_IPV4, address: address)
+        raise ForemanHyperv::OperationRefused, format(NODE_ADDRESS_REFUSAL, node: node, reason: not_ipv4)
+      end
+
+      address
+    end
+
+    # The read and its envelope, refuse-don't-guess: silence, undecodable
+    # JSON, a missing cluster witness, and an answering cluster with no
+    # interfaces at all each refuse before any node is picked; a collapsed
+    # one-element answer is normalised back to a list (measured on this
+    # build). Returns label → [candidate addresses, saw-client-role?].
+    def read_cluster_node_addresses
+      raise ForemanHyperv::OperationRefused, NODE_ADDRESS_CLIENT_REFUSAL unless client.respond_to?(:run_cmd)
+
+      reply = begin
+        client.run_cmd(cluster_node_address_script, _skip_json: true).stdout.to_s.strip
+      rescue StandardError => e
+        raise ForemanHyperv::OperationRefused, "the cluster address read did not answer (#{e.class})."
+      end
+      parsed = begin
+        Fog::JSON.decode(reply)
+      rescue StandardError
+        raise ForemanHyperv::OperationRefused, 'the cluster address read answered no decodable JSON.'
+      end
+      unless parsed.is_a?(Hash)
+        raise ForemanHyperv::OperationRefused, 'the cluster address read answered no decodable JSON.'
+      end
+
+      if parsed['clusterName'].to_s.strip.empty?
+        raise ForemanHyperv::OperationRefused,
+              'the answer names no answering cluster, so its interface list proves nothing.'
+      end
+
+      rows = case parsed['interfaces']
+             when Array then parsed['interfaces']
+             when Hash then [parsed['interfaces']]
+             else []
+             end
+      if rows.empty?
+        raise ForemanHyperv::OperationRefused,
+              "#{parsed['clusterName']} answered with no cluster network interfaces at all — a cluster " \
+              'that answers and names no interface is a contradiction, not an empty directory.'
+      end
+
+      rows.each_with_object({}) do |row, map|
+        next unless row.is_a?(Hash)
+
+        label = row['node'].to_s.strip.split('.').first.to_s.downcase
+        next if label.empty?
+
+        candidates, client_role = map.fetch(label, [[], false])
+        address = row['address'].to_s.strip
+        if row['netRole'].to_i == 3
+          candidates << address unless candidates.include?(address)
+          client_role = true
+        end
+        map[label] = [candidates, client_role]
+      end
     end
 
     # Whether the role's owner is the node this endpoint itself serves: the
@@ -2393,6 +2628,21 @@ module ForemanHyperv
                    "for node #{node.strip}: #{value.strip.inspect} is not a bare host or host:port " \
                    '(no scheme, no path, port 1-65535) — refused, not repaired')
       end
+    end
+
+    # PLG-5b: the CA file the hardened per-node compositions verify against,
+    # read on the FOREMAN host where fog builds the trust store. Absolute,
+    # plain-path characters only, no `..` normalization games — refused at
+    # save naming the value verbatim, the same discipline as the override.
+    def hyperv_ca_trust_path_shape
+      value = hyperv_ca_trust_path
+      return if value.blank?
+
+      return if CA_TRUST_PATH_SHAPE.match?(value) && value.split('/').exclude?('..')
+
+      errors.add(:hyperv_ca_trust_path,
+                 "#{value.inspect} is not a plain absolute path (no spaces, no backticks, no " \
+                 'subshell characters, no .. segments) — refused, not repaired')
     end
 
     def validate_vm(attr, new: false)

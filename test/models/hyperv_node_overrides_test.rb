@@ -13,8 +13,11 @@ require 'active_support/test_case'
 # supplies scheme, TLS and port, the override supplies the identity spliced in
 # (N4); hyperv_host itself is never passed. R17: the check runs on the
 # COMPOSED endpoint — a hardened (https) CR would compose an unvalidated
-# transport, and PLG-5a refuses every composition that is not the measured
-# http+negotiate pattern until PLG-5b has validated the matrix. The read path
+# transport, and PLG-5a refused every composition that was not the measured
+# http+negotiate pattern until PLG-5b validated the matrix; PLG-5b has
+# landed, so https now composes only for a named identity with an explicit
+# CA trust path (see hyperv_node_discovery_test.rb), and unoverridden nodes
+# go to the cluster's own address read. The read path
 # this ships is vm_from_cluster_owner: with an override the owning node is
 # addressed by the OVERRIDE HOST (fog re-splicing the unqualified name fails
 # outright on the Foreman host, §45.3, or completes against the prefix cache
@@ -201,22 +204,29 @@ class HypervNodeOverridesTest < ActiveSupport::TestCase
     assert_equal "http://#{OVERRIDE_HOST}:5986/wsman", cr.send(:node_endpoint, OWNER_NODE)
   end
 
-  def test_an_unoverridden_node_composes_nothing
-    cr, = build_cr(overrides: 'hv-node9 = 10.0.0.9')
-    assert_nil cr.send(:node_endpoint, OWNER_NODE)
+  # PLG-5b changed this rung: an unoverridden node is now ASKED OF THE CLUSTER
+  # (Get-ClusterNetworkInterface). A client that cannot answer the address read
+  # leaves nothing to dial, and the refusal names the node — the fail-closed
+  # is unchanged, the silence is not.
+  def test_an_unoverridden_node_is_asked_of_the_cluster_and_refused_when_it_cannot_answer
+    cr, fog = build_cr(overrides: 'hv-node9 = 10.0.0.9')
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.send(:node_endpoint, OWNER_NODE) }
+    assert_includes error.message.downcase, 'hv-node2', 'the refusal must name the node it could not address'
+    assert_empty fog.fog_calls, 'a client that cannot answer the address read is refused without calling it'
   end
 
-  # R17 MECHANISM, red: the check is on the COMPOSED endpoint, not the
-  # override string. An https CR composes https://identity:5986/wsman — a
-  # transport nobody measured — and PLG-5a refuses it until PLG-5b.
-  def test_a_hardened_cr_endpoint_refuses_the_composed_endpoint_until_plg5b
+  # R17, post-PLG-5b: the matrix row is measured, so the check names its
+  # measured reason instead of a pending PR. An IPv4 identity under https has
+  # no hostname for the certificate to verify against (row (w): no verified
+  # path to an IP endpoint), so the composition stays refused.
+  def test_a_hardened_cr_refuses_an_ip_identity_for_hostname_verification
     cr, fog = build_cr(
       overrides: "hv-node2 = #{OVERRIDE_HOST}",
       url: 'https://hv-node1.lab.maughmer.net:5986/wsman'
     )
     error = assert_raises(ForemanHyperv::OperationRefused) { cr.send(:node_endpoint, OWNER_NODE) }
-    assert_includes error.message, 'PLG-5b', 'the refusal must name the PR that validates hardened transports'
     assert_includes error.message, OVERRIDE_HOST, 'the refusal must name the endpoint it refused to compose'
+    assert_includes error.message.downcase, 'hostname', 'the reason is certificate hostname verification (row (w))'
     assert_empty fog.fog_calls, 'the refusal happens before anything reaches fog'
   end
 
@@ -283,11 +293,15 @@ class HypervNodeOverridesTest < ActiveSupport::TestCase
     assert_empty fog.servers_get_calls, 'the CR client must not be asked for a node it does not serve'
   end
 
-  def test_a_role_from_an_unoverridden_node_fails_closed_with_no_fog_call_for_the_node
+  # PLG-5b: the unoverridden node is discovered — and when the cluster read
+  # cannot answer (this double has no run_cmd), the refusal travels up naming
+  # the node, still with no fog call carrying its unqualified name.
+  def test_a_role_from_an_unoverridden_node_the_cluster_cannot_address_fails_closed_naming_it
     fog = CrFog.new(roles: role_owner(OWNER_NODE))
     cr, = build_cr(overrides: 'hv-node9 = 10.0.0.9', fog: fog)
 
-    assert_nil cr.send(:vm_from_cluster_owner, VM_GUID)
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.send(:vm_from_cluster_owner, VM_GUID) }
+    assert_includes error.message.downcase, 'hv-node2', 'the refusal names the node it could not address'
     assert_empty fog.servers_get_calls,
                  'fail closed means NO fog call carries the node — not a name fog will ' \
                  'prefix-cache into the CR endpoint'

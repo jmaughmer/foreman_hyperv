@@ -438,7 +438,7 @@ class HypervStandaloneCreateTest < ActiveSupport::TestCase
     cr, _fog, vm = build_cr(fog: fog, vm: vm)
 
     error = assert_raises(ForemanHyperv::OperationRefused) { cr.create_vm(create_attrs) }
-    assert_includes error.message, 'did not match the machine'
+    assert_includes error.message, 'needs per-node addressing'
     assert_not_includes vm.calls.map { |call| call.is_a?(Array) ? call.first : call }, :create,
                         'the self rung lands before vm.create: servers.new sent nothing'
   end

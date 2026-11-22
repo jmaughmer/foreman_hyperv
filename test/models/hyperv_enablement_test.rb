@@ -19,7 +19,7 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 # PLG-22: the enablement. With FOG-10/11/14/15, PLG-15b/15c/21b/5a and FOG-9
 # merged and fog deployed at the pinned build, the plugin's remaining refusals
 # lift — but they lift CONDITIONALLY, on the fog actually installed: every
-# unlocked operation first asks the client all five capability predicates (the
+# unlocked operation first asks the client all six capability predicates (the
 # CAPABILITIES constant AND supports_*? answering true), and a fog missing any
 # of them gets the pre-enablement refusals verbatim, word for word, in the
 # pre-enablement order (a cluster ask refused before the endpoint is read; the
@@ -55,7 +55,7 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 # fog's own read-back-proven removal script. Every connection shell is its
 # own shell (measured), so guard and mutation ride together or the guard
 # proves nothing. An honest limit, stated: fog model-internal mutations do
-# not take a plugin-supplied guard; the five capability predicates plus
+# not take a plugin-supplied guard; the six capability predicates plus
 # FOG-11's completion gate are what bind those to the named host.
 class HypervEnablementTest < ActiveSupport::TestCase
   # The fog answer shapes, spelled out: the suites assert on their fields and
@@ -80,7 +80,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
   end
 
   # A fog that answers every behaviour the enablement stands on: the
-  # CAPABILITIES constant AND the five predicates.
+  # CAPABILITIES constant AND the six predicates.
   class FogFull
     attr_reader :calls
 
@@ -95,6 +95,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     def supports_literal_path_destructive? = true
     def supports_stdout_json_hygiene? = true
     def supports_input_hardening? = true
+    def supports_cluster_capacity_projection? = true
 
     def remove_cluster_virtual_machine_role(**args)
       @calls << [:remove_cluster_virtual_machine_role, args]
@@ -229,7 +230,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     assert_equal Fog::Hyperv::CAPABILITIES.sort, ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.keys.sort
   end
 
-  def test_enablement_stands_when_the_fog_answers_all_five
+  def test_enablement_stands_when_the_fog_answers_all_six
     cr, = build_cr(full_fog)
     assert cr.send(:enablement_supported?)
     assert_empty cr.send(:missing_enablement_capabilities)
@@ -238,7 +239,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
 
   def test_a_fog_missing_any_behaviour_is_pre_enablement
     %i[tri_state_cluster exact_host_connection literal_path_destructive
-       stdout_json_hygiene input_hardening].each do |missing|
+       stdout_json_hygiene input_hardening cluster_capacity_projection].each do |missing|
       cr, = build_cr(FogMissing.new(missing: missing))
       assert_not cr.send(:enablement_supported?), "a fog missing #{missing} must not carry the enablement"
       assert_equal [missing], cr.send(:missing_enablement_capabilities)
