@@ -357,6 +357,34 @@ module ForemanHyperv
     # PLG-15 discipline again: refused at save, not repaired.
     CA_TRUST_PATH_SHAPE = %r{\A/[A-Za-z0-9._\-/]+\z}
 
+    # PLG-14: the cluster resource states the capacity projection was MEASURED
+    # to answer (evidence §30.2, re-confirmed §34.5): 2 = Online, 3 = Offline.
+    # Anything else — including silence — is excluded from placement storage
+    # WITH A REASON, never treated as either (FOG-8's own rule, passed through
+    # uninterpreted by fog on purpose).
+    VOLUME_STATE_ONLINE = 2
+    VOLUME_STATE_OFFLINE = 3
+
+    # PLG-14: the two ways a placement read can say "not this volume" and mean
+    # different things. A volume the cluster ANSWERS but does not offer (it is
+    # offline, stateless, or answers no mount path) gets its exclusion named —
+    # the operator picked a real volume and deserves to hear why the cluster
+    # declined it. A volume never answered at all keeps the membership refusal
+    # word for word, because that is a different fact.
+    STORAGE_EXCLUDED_REFUSAL = 'Refusing to place a disk on the shared volume %<volume>s: %<reason>s. ' \
+                               'It is a volume of this cluster but not placement storage; nothing was ' \
+                               'asked of the host.'
+    # The chosen storage answering no mount path is the one shape where the
+    # create used to GUESS: `storage&.id || hypervisor.virtual_machine_path`
+    # fell through to the node's local disk — off the CSV for a clustered
+    # machine — and [nil, name].join('\\') named the disk folder relatively
+    # (the FOG-17 read-side shape). Both guesses are refusals now.
+    STORAGE_BLANK_PATH_REFUSAL = 'Refusing to place the virtual machine on the shared volume ' \
+                                 '%<volume>s: the volume answers no mount path, and no config path ' \
+                                 'or disk folder may be guessed from its name — a guessed path lands ' \
+                                 'the files on one node’s local disk, off the cluster. Nothing was ' \
+                                 'asked of the host and nothing was created.'
+
     # The self rung's refusal (N6): a target that is not the endpoint's own
     # machine is per-node territory, and per-node addressing needs an
     # identity. Failing closed here is the pre-registered shipping state,
@@ -569,8 +597,15 @@ module ForemanHyperv
     # means the UI says "no datastores" and the API says 200 with [], which is the
     # truth about this host.
     #
-    # The fields are core's rabl's (available_storage_domains.rabl reads name, id,
-    # capacity, freespace, uncommitted) rather than Hyper-V's own names.
+    # PLG-14: what is offered is what is PLACEABLE. The volumes come from fog's
+    # capacity projection (FOG-8) and only its measured Online state (2) with a
+    # confirmed mount path is offered at all; an offline volume (3), an
+    # unmeasured state, a silence, and an online volume answering no path are
+    # each excluded, logged naming the volume and the reason. The fields are
+    # core's rabl's (available_storage_domains.rabl reads name, id, capacity,
+    # freespace, uncommitted) rather than Hyper-V's own names, and the id stays
+    # the mount path because that is what the form and the deprecated
+    # /available_storage_domains/:name route address volumes by.
     ApiStorageDomain = Struct.new(:name, :id, :capacity, :freespace, :uncommitted)
 
     def available_storage_domains(cluster_id = nil)
@@ -580,13 +615,7 @@ module ForemanHyperv
       # with no cluster, asking fog for one raises, and a stale cluster id in a URL is
       # not a reason to find out whether it does.
       cluster = clusters.detect { |c| c.id == cluster_id || c.name == cluster_id }
-      return [] unless cluster&.respond_to?(:shared_volumes)
-
-      cluster.shared_volumes.map do |volume|
-        ApiStorageDomain.new(volume.name, volume.volume_path,
-                             volume.shared_volume&.[](:size),
-                             volume.shared_volume&.[](:free_space), nil)
-      end
+      placement_storage_domains(cluster).first
     end
 
     # The deprecated /available_storage_domains/:name route asks for one by name with
@@ -682,6 +711,17 @@ module ForemanHyperv
       # logger.debug "Creating VM with arguments; #{attr}"
       cluster = cluster_named(attr[:cluster_name])
       storage = placement_storage(cluster, attr)
+
+      # PLG-14: a chosen storage that answers no mount path refuses the create
+      # outright. The pre-PLG-14 code GUESSED twice here — `storage&.id ||
+      # hypervisor.virtual_machine_path` put a clustered machine's config on
+      # the node's local disk, and the placement_path join below named the
+      # disk folder relatively (C:\<name>) — and both guesses put files where
+      # the cluster cannot follow them. The stand-alone case (no storage at
+      # all) keeps its honest fallback below, untouched.
+      if storage && storage.id.to_s.strip.empty?
+        raise ForemanHyperv::OperationRefused, format(STORAGE_BLANK_PATH_REFUSAL, volume: storage.name)
+      end
 
       # The identity ladder (N6), decided before the model is built so the
       # model rides the RIGHT client: the self rung serves through this
@@ -1447,9 +1487,18 @@ module ForemanHyperv
       return if asked_volumes.empty?
 
       cluster = cluster_name ? cluster_named(cluster_name) : endpoint_cluster
-      domains = cluster ? available_storage_domains(cluster.id) : []
+      offered, excluded = placement_storage_domains(cluster)
       asked_volumes.each do |asked|
-        next if domains.any? { |domain| domain.name == asked || domain.id == asked }
+        next if offered.any? { |domain| domain.name == asked || domain.id == asked }
+
+        # Two different facts, two different refusals: a volume the cluster
+        # ANSWERS but declines (offline, no path, an unmeasured state) names
+        # itself with its reason; a volume never answered at all keeps the
+        # membership refusal — the ask could not have come from this endpoint.
+        hit = excluded.detect { |volume, _reason| volume.name == asked || volume.volume_path == asked }
+        if hit
+          raise ForemanHyperv::OperationRefused, format(STORAGE_EXCLUDED_REFUSAL, volume: asked, reason: hit.last)
+        end
 
         raise ForemanHyperv::OperationRefused,
               'Refusing to place a disk on a shared volume this compute resource has not read from ' \
@@ -2055,17 +2104,87 @@ module ForemanHyperv
     # one named wins), or the cluster's first volume when nothing was named. Raising
     # on a volume that is not there — silently placing onto a different one than the
     # user asked for is how machines end up on the wrong storage.
+    # Where a clustered machine's config and disks go. PLG-14 made every
+    # branch here name itself: an empty placement set says whether the
+    # cluster answered no volumes at all or answered volumes it excluded
+    # (with each volume's reason), and a named ask that is not placeable
+    # distinguishes "this cluster has no such volume" from "it has this one
+    # and declined it for a reason" — the operator who typed a real volume
+    # name deserves the second answer when it is the truth.
     def placement_storage(cluster, attr)
       return nil unless cluster
 
-      domains = available_storage_domains(cluster.id)
-      raise Foreman::Exception, "Cluster #{cluster.name} has no shared volumes to place a virtual machine on" if domains.empty?
+      offered, excluded = placement_storage_domains(cluster)
+      if offered.empty?
+        if excluded.empty?
+          raise Foreman::Exception, "Cluster #{cluster.name} has no shared volumes to place a virtual machine on"
+        end
+
+        listing = excluded.map { |volume, reason| "#{volume.name} — #{reason}" }.join('; ')
+        raise Foreman::Exception,
+              "Cluster #{cluster.name} has no placeable shared volume to place a virtual machine on " \
+              "(excluded: #{listing})"
+      end
 
       asked = nested_attributes_for(:volumes, attr[:volumes_attributes]).map { |vol| vol[:datastore] }.compact.first
-      return domains.first unless asked
+      return offered.first unless asked
 
-      domains.detect { |domain| domain.name == asked || domain.id == asked } ||
-        raise(Foreman::Exception, "Cluster #{cluster.name} has no shared volume named #{asked}")
+      match = offered.detect { |domain| domain.name == asked || domain.id == asked }
+      return match if match
+
+      hit = excluded.detect { |volume, _reason| volume.name == asked || volume.volume_path == asked }
+      if hit
+        raise Foreman::Exception,
+              "Cluster #{cluster.name} has no placeable shared volume named #{asked}: #{hit.last}"
+      end
+
+      raise Foreman::Exception, "Cluster #{cluster.name} has no shared volume named #{asked}"
+    end
+
+    # ONE read of the cluster's projected volumes answers both questions this
+    # era asks: what to OFFER (name/mount-path/size/free-space, ready for the
+    # rabl and the form) and what to REFUSE WITH A REASON (each volume that is
+    # not placement storage, paired with why). A capacity read that fog itself
+    # refuses — a contradicted witness, an uninterpretable answer — travels
+    # up untouched: fog already refuses rather than guess, and a rescue here
+    # would turn a stated refusal back into silence.
+    def placement_storage_domains(cluster)
+      return [[], []] unless cluster&.respond_to?(:shared_volumes)
+
+      offered = []
+      excluded = []
+      cluster.shared_volumes.each do |volume|
+        reason = placement_exclusion_reason(volume)
+        if reason
+          logger.info "Shared volume #{volume.name} of cluster #{cluster.name} is not placement storage: #{reason}"
+          excluded << [volume, reason]
+          next
+        end
+
+        offered << ApiStorageDomain.new(volume.name, volume.volume_path, volume.size, volume.free_space, nil)
+      end
+      [offered, excluded]
+    end
+
+    # The exclusion, decided as ONE pure function so the list, the placement
+    # refusals and the membership refusals cannot drift apart on what counts
+    # as storage. The online branch still checks the path: a mount path is
+    # never synthesised from the volume name (FOG-8), and without one the
+    # config path and disk folder would both be guesses.
+    def placement_exclusion_reason(volume)
+      case volume.state
+      when VOLUME_STATE_ONLINE
+        return nil if volume.volume_path.to_s.strip.present?
+
+        'it answers no mount path on the node it was read from, and a path is never synthesised from the volume name'
+      when VOLUME_STATE_OFFLINE
+        'it is offline (cluster resource state 3)'
+      when nil
+        'it answered no cluster resource state at all'
+      else
+        "it answers cluster resource state #{volume.state.inspect}, which is neither " \
+        'measured Online (2) nor Offline (3)'
+      end
     end
 
     # A machine placed into a cluster is clustered by default; the planned HA
