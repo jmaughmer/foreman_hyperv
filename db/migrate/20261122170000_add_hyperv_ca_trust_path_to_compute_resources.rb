@@ -8,8 +8,10 @@
 # refused, so this attribute is what makes the hardened ladder rungs dialable
 # at all. NULL (the default) means no explicit trust: http resources need
 # none, and https per-node compositions stay refused — exactly the fail-closed
-# state that preceded this attribute.
-class AddHypervCaTrustPathToComputeResources < ActiveRecord::Migration[6.1]
+# state that preceded this attribute. (The class spells CA uppercase because
+# that is what the inflector camelizes `hyperv_ca_trust_path` to — the name
+# must round-trip for ActiveRecord's constantize.)
+class AddHypervCATrustPathToComputeResources < ActiveRecord::Migration[6.1]
   def change
     add_column :compute_resources, :hyperv_ca_trust_path, :string
   end
