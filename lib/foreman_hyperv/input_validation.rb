@@ -66,8 +66,15 @@ module ForemanHyperv
     # create/update interface loops dispatch these hashes with
     # nic.send(:"#{k}=", v) — send reaches every setter that exists on the
     # model, so the key must be on a fixed list, not merely non-empty.
+    # ip/ip6 are core's pass-through keys, not fog's: host_interfaces_attrs
+    # merges them onto every physical NIC's compute_attributes on create, and
+    # create_interfaces excepts them (with identity) before fog's setters —
+    # they ride to this validator and no further, their characters still
+    # checked. PLG-24: the host form carries them, and before this line the
+    # first clustered machine died on the IPv4 its operator typed.
     NIC_KEYS = %i[
       _destroy _delete id identity mac mac_address name switch_name switch_id
+      ip ip6
       is_legacy is_management_os connected dynamic_mac_address_enabled
       mac_address_spoofing dhcp_guard router_guard allow_teaming
       compute_attributes
