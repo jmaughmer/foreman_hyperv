@@ -30,21 +30,12 @@ module FogExtensions
 
       def volumes_attributes=(_attributes); end
 
-      # Cluster placement: the folder this machine's disks go into instead of
-      # wherever its node keeps disks by default. A clustered machine's disks have
-      # to live on cluster shared storage, so the compute resource sets this to
-      # C:\ClusterStorage\<volume>\<vm name> while it builds the machine; nil — the
-      # case for every stand-alone machine, and for every machine before the
-      # resource has a cluster — leaves fog's own path building in charge.
-      attr_accessor :placement_path
-
-      # fog builds this from the node's VirtualHardDiskPath; for a machine being
-      # placed onto a cluster shared volume that path is the wrong drive entirely.
-      def build_vhd_path(filename = nil)
-        return [placement_path, filename].compact.join('\\') if placement_path
-
-        super
-      end
+      # PLG-16 retired the shim's placement_path accessor and build_vhd_path
+      # override: fog declares placement_path itself (FOG-17) and owns the one
+      # disk-folder join that refuses — instead of joining relative — every
+      # shape that cannot name an absolute location. The compute resource
+      # names the placement in the servers.new attributes; nothing here
+      # answers for it again.
 
       # Override fog configuration with explicit cluster_name handling
       def cluster
