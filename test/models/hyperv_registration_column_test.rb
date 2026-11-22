@@ -191,7 +191,8 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
   end
 
   def test_a_machine_with_no_id_cannot_be_asked_about
-    registration = build_cr(FogDouble.new(RolesDouble.new([]))).vm_registration(VmDouble.new(id: nil, name: 'x', path: CSV))
+    cr = build_cr(FogDouble.new(RolesDouble.new([])))
+    registration = cr.vm_registration(VmDouble.new(id: nil, name: 'x', path: CSV))
 
     assert_equal :unknown, registration.state,
                  'with nothing to key on the answer is "not asked", not "no role"'
@@ -210,10 +211,9 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
   end
 
   def test_the_labels_say_what_the_operator_can_do_with_each_row
-    clustered = build_cr(FogDouble.new(RolesDouble.new(
-      [RoleDouble.new(name: 'Virtual Machine elena-smolen.maughmer.net',
-                      virtual_machine_id: ELENA, owner_node: 'HV-NODE2')]
-    ))).vm_registration(clustered_vm)
+    elenas_role = RoleDouble.new(name: 'Virtual Machine elena-smolen.maughmer.net',
+                                 virtual_machine_id: ELENA, owner_node: 'HV-NODE2')
+    clustered = build_cr(FogDouble.new(RolesDouble.new([elenas_role]))).vm_registration(clustered_vm)
     leftover = build_cr(FogDouble.new(RolesDouble.new([]))).vm_registration(leftover_vm)
     standalone = build_cr(FogDouble.new(RolesDouble.new([]))).vm_registration(standalone_vm)
     unknown = build_cr(LegacyFogDouble.new).vm_registration(standalone_vm)
@@ -222,12 +222,12 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
                     'the clustered row names the OWNING node: the Computer column already prints the ' \
                     'node that answered, and two columns agreeing on the reader is how a live move ' \
                     'goes unnoticed'
-    refute clustered.warning?, 'a clustered machine is a healthy machine'
+    assert_not clustered.warning?, 'a clustered machine is a healthy machine'
     assert_includes leftover.label, 'no cluster role'
     assert leftover.warning?,
            'the leftover is the row the operator came to clean up; it must not sit in the table ' \
            'wearing the same face as a healthy one'
-    refute standalone.warning?, "a stand-alone machine on its own node is nobody's cleanup"
+    assert_not standalone.warning?, "a stand-alone machine on its own node is nobody's cleanup"
     assert unknown.warning?, 'an unreadable cluster must not read as a healthy verdict'
   end
 end
