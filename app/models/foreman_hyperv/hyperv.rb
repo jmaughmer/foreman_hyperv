@@ -2447,8 +2447,11 @@ module ForemanHyperv
     # ConvertTo-Json to a bare object; the network Role is joined
     # server-side because the raw MSCluster_NetworkInterface Roles came back
     # EMPTY on this build (the (w) MSI row), while the cmdlets answer the
-    # full shape; and no early-terminating Select-Object anywhere (evidence
-    # §2: it kills cluster cmdlet pipelines).
+    # full shape; Node and Network arrive as STRINGS, not objects — reading
+    # .Node.Name read empty on the live cluster (the row that caught this)
+    # and a silently empty label would drop every interface off the map;
+    # and no early-terminating Select-Object anywhere (evidence §2: it kills
+    # cluster cmdlet pipelines).
     def cluster_node_address_script
       <<~SCRIPT
         $WarningPreference = 'SilentlyContinue'
@@ -2457,11 +2460,11 @@ module ForemanHyperv
         @(Get-ClusterNetwork) | ForEach-Object { $networkRoles[[string]$_.Name] = $_.Role }
         $interfaces = @(@(Get-ClusterNetworkInterface) | ForEach-Object {
           [PSCustomObject]@{
-            node = [string]$_.Node.Name
+            node = [string]$_.Node
             adapter = [string]$_.Name
-            network = [string]$_.Network.Name
+            network = [string]$_.Network
             address = [string]$_.Address
-            netRole = $networkRoles[[string]$_.Network.Name]
+            netRole = $networkRoles[[string]$_.Network]
           }
         })
         @{ clusterName = [string]$cluster.Name; interfaces = $interfaces } | ConvertTo-Json -Compress -Depth 4

@@ -190,6 +190,9 @@ class HypervNodeDiscoveryTest < ActiveSupport::TestCase
     assert_includes script, "$WarningPreference = 'SilentlyContinue'"
     assert_includes script, 'ConvertTo-Json -Compress -Depth 4'
     assert_not script.include?('Select-Object -First'), 'early termination kills cluster pipelines (evidence §2)'
+    assert_includes script, 'node = [string]$_.Node'
+    assert_not script.include?('$_.Node.Name'),
+               'Node answers a STRING on the live cluster — .Node.Name read empty and dropped every row (live row)'
   end
 
   # ---- the pick rule, over the measured answer ----
