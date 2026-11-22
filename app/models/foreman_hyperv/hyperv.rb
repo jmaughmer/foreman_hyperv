@@ -1074,12 +1074,20 @@ module ForemanHyperv
     protected
 
     def client
-      @client ||= Fog::Compute.new(
+      options = {
         provider: :HyperV,
         hyperv_endpoint: url,
         hyperv_username: user,
         hyperv_password: password
-      )
+      }
+      # The SAME trust the per-node compositions get: over https this client
+      # runs the address read, the cluster reads and test_connection against
+      # the very certificates hyperv_ca_trust_path exists to verify (the
+      # revalidation row that caught the omission refused with a bare
+      # SSLError before any composition decision was reached). Absent the
+      # attribute, absent the option — the pre-PLG-5b build, verbatim.
+      options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
+      @client ||= Fog::Compute.new(options)
     end
 
     private
