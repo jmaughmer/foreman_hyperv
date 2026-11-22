@@ -4,6 +4,7 @@
   <th><%= _('CPUs') -%></th>
   <th><%= _('Memory') -%></th>
   <th><%= _('Computer') -%></th>
+  <th><%= _('Registration') -%></th>
   <th><%= _('Power') -%></th>
   <th><%= _('Actions') -%></th>
 </tr>
@@ -15,6 +16,12 @@
       <td><%= vm.processor_count %></td>
       <td><%= number_to_human_size vm.memory_startup %></td>
       <td><%= vm.computer_name %></td>
+      <%# PLG-29a: who owns this machine, from the cluster's own role listing (one
+          read for the whole page). The leftover of a release-without-delete and an
+          unreadable cluster are the two answers an operator must not miss, so they
+          are coloured the way the Power column colours power. %>
+      <td><% registration = @compute_resource.vm_registration(vm) -%>
+        <span class="<%= 'text-danger' if registration.state == :clustered_storage_without_role %><%= 'text-warning' if registration.state == :unknown %>"><%= '⚠ ' if registration.state == :clustered_storage_without_role %><%= registration.label %></span></td>
       <td><span <%= vm_power_class(vm.ready?) %>><%= vm_state(vm) %></span></td>
       <td>
         <%= action_buttons(vm_power_action(vm, authorizer),

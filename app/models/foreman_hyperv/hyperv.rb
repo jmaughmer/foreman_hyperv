@@ -1184,6 +1184,68 @@ module ForemanHyperv
       vm_attrs
     end
 
+    # PLG-29a: the registration verdict for one listed machine.
+    #
+    # The instance list printed only vm.computer_name, which is the node that
+    # ANSWERED the read: a clustered machine's owner is whichever node holds it
+    # now, and a machine the cluster released without deleting it looks, on that
+    # list, exactly like a healthy one (evidence §58: the operator released a
+    # machine through Failover Cluster Manager and the row kept reading as a
+    # machine that belonged there). The cluster's own role listing answers the
+    # question for every machine on the page in one read, so the column joins
+    # against that.
+    #
+    # This is a display verdict only. No destroy or disk path reads it — the
+    # destructive gates keep their own fresh, per-machine role proof, because
+    # "no role" is the answer that licenses removing disks and one page render's
+    # memory of the cluster is not a basis for deleting them.
+    Registration = Struct.new(:state, :owner_node, :cluster_name, keyword_init: true) do
+      # The two states an operator acts on: the release-without-delete (delete
+      # it), and the answer too degraded to trust (verify before deleting).
+      def warning?
+        %i[clustered_storage_without_role unknown].include?(state)
+      end
+
+      def label
+        case state
+        when :clustered
+          ['Clustered', cluster_name.presence, owner_node.presence && "owner #{owner_node}"].compact.join(' — ')
+        when :clustered_storage_without_role then 'Cluster storage, no cluster role'
+        when :standalone then "Stand-alone on #{owner_node}"
+        when :standalone_no_cluster then 'Stand-alone'
+        else 'Unknown'
+        end
+      end
+    end
+
+    # See Registration. Public because the instance table calls it with the
+    # compute resource as receiver. A machine with no id is answered :unknown
+    # rather than name-matched: the name join exists for a role whose
+    # undocumented id field came back empty, not for a machine the page cannot
+    # key, and a column that tells an operator what is safe to delete earns
+    # trust by never guessing. A cluster that raises, and a fog that cannot be
+    # asked at all, are likewise :unknown — never stand-alone verdicts, which is
+    # where a stale "no role" would invite deleting a clustered machine's disks.
+    def vm_registration(vm)
+      return Registration.new(state: :unknown) if vm.id.blank?
+
+      roles = cluster_role_index
+      return Registration.new(state: :unknown) if roles.nil? || roles == :unsupported
+      return Registration.new(state: :standalone_no_cluster, owner_node: reading_node(vm)) if roles == :not_a_cluster
+
+      role = roles[vm.id.to_s.downcase] || roles["#{ROLE_NAME_PREFIX}#{vm.name}"]
+      if role
+        return Registration.new(state: :clustered, owner_node: role.owner_node,
+                                cluster_name: endpoint_cluster&.name)
+      end
+
+      if vm.path.to_s.include?('\\ClusterStorage\\')
+        Registration.new(state: :clustered_storage_without_role, owner_node: reading_node(vm))
+      else
+        Registration.new(state: :standalone, owner_node: reading_node(vm))
+      end
+    end
+
     protected
 
     def client
@@ -2123,6 +2185,52 @@ module ForemanHyperv
     rescue StandardError => e
       Rails.logger.warn "Hyper-V cluster support for #{name} could not be read: #{e.message.lines.first}"
       @cluster_endpoint = false
+    end
+
+    # The cluster's roles keyed by BOTH identities that name a machine: its
+    # reported machine id — case-insensitively, because the cluster reports ids
+    # upper-case and the plugin holds them lower-case, and fog's own -VMId filter
+    # matches case-insensitively too — and the group name the cluster builds from
+    # the machine's name, because the id field is reported on ClusterGroup but
+    # undocumented and can come back empty (the same acceptance readback_finds_role?
+    # uses on the create path). One read answers the whole page; a per-machine
+    # probe would multiply a 2–8 s round trip by the row count.
+    #
+    # Three ways this answers WITHOUT an index, kept distinct from each other and
+    # from an empty index because they license different operator actions:
+    # :not_a_cluster (the endpoint disproved the question — everything it holds
+    # is stand-alone), :unsupported (a fog that cannot be asked), and nil (asked,
+    # could not answer). Only the empty index is the answer "no role".
+    def cluster_role_index
+      return @cluster_role_index if instance_variable_defined?(:@cluster_role_index)
+
+      @cluster_role_index = build_cluster_role_index
+    end
+
+    def build_cluster_role_index
+      return :unsupported unless client.respond_to?(:cluster_virtual_machine_roles) &&
+                                 client.respond_to?(:supports_clusters?)
+      return :not_a_cluster unless client.supports_clusters?
+
+      roles = Array(client.cluster_virtual_machine_roles.all).flatten.compact
+      roles.each_with_object({}) do |role, index|
+        role_id = role.respond_to?(:virtual_machine_id) ? role.virtual_machine_id : nil
+        index[role_id.to_s.downcase] = role if role_id.present?
+        role_name = role.respond_to?(:name) ? role.name.to_s : ''
+        index[role_name] = role if role_name.start_with?(ROLE_NAME_PREFIX)
+      end
+    rescue StandardError => e
+      # "Could not answer" stays its own answer — see vm_registration.
+      logger.warn "The instance list could not read cluster roles for #{name}: " \
+                  "#{e.class}: #{e.message.to_s.lines.first.to_s.strip}"
+      nil
+    end
+
+    # The node that answered the read. Printed for stand-alone machines, where
+    # the answering node IS the owner; never called an owner elsewhere, because
+    # computer_name is the reader and goes stale on a live move (PLG-27's lesson).
+    def reading_node(vm)
+      vm.respond_to?(:computer_name) ? vm.computer_name : nil
     end
 
     # Which shape the cached listings hold: a stand-alone host's answers, or a named
