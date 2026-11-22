@@ -149,6 +149,32 @@ class InputValidationTest < ActiveSupport::TestCase
     IV.validate_hash!({ path: 'C:\\ClusterStorage\\Volume3\\iso\\cd.iso' }, context: :dvd)
   end
 
+  # PLG-24: core's ComputeResource#host_interfaces_attrs merges ip: and ip6:
+  # onto every physical NIC's compute_attributes — so a UI create carries them
+  # even though they name nothing Hyper-V is asked to do (create_interfaces
+  # excepts them before fog's setters). On 2026-11-22 the first clustered
+  # machine driven through the host form died here, on the value the operator
+  # had typed into IPv4 address, before fog sent anything. The keys are
+  # legitimate form traffic; their characters still meet the allowlist.
+  def test_nic_context_accepts_cores_passthrough_ip_keys
+    IV.validate_hash!(
+      interfaces_attributes: {
+        '0' => {
+          _destroy: '0',
+          identity: '',
+          switch_id: '',
+          vlan_operation_mode: 'Untagged',
+          ip: '192.168.55.5/24',
+          ip6: ''
+        }
+      }
+    )
+    IV.validate_hash!({ ip: '10.0.2.7' }, context: :nic)
+    IV.validate_hash!({ ip6: 'fe80::a00:27ff:fe4e:66a1' }, context: :nic)
+    assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.validate_hash!({ ip: "1.2.3.4';whoami;'" }, context: :nic) }
+    assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.validate_hash!({ ip6: 'fe80::$(id)' }, context: :nic) }
+  end
+
   def test_refuse_text_single_value
     assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.refuse_text!(:cluster_name, "x';whoami;'") }
     IV.refuse_text!(:cluster_name, 'HVCLUSTER')
