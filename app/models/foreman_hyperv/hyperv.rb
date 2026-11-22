@@ -2514,15 +2514,14 @@ module ForemanHyperv
       end
 
       if candidates.size > 1
-        raise ForemanHyperv::OperationRefused,
-              format(NODE_ADDRESS_REFUSAL, node: node,
-                                             reason: format(NODE_ADDRESS_AMBIGUOUS, candidates: candidates.join(', ')))
+        ambiguous = format(NODE_ADDRESS_AMBIGUOUS, candidates: candidates.join(', '))
+        raise ForemanHyperv::OperationRefused, format(NODE_ADDRESS_REFUSAL, node: node, reason: ambiguous)
       end
 
       address = candidates.first
       unless NODE_IPV4.match?(address.to_s)
-        raise ForemanHyperv::OperationRefused,
-              format(NODE_ADDRESS_REFUSAL, node: node, reason: format(NODE_ADDRESS_NOT_IPV4, address: address))
+        not_ipv4 = format(NODE_ADDRESS_NOT_IPV4, address: address)
+        raise ForemanHyperv::OperationRefused, format(NODE_ADDRESS_REFUSAL, node: node, reason: not_ipv4)
       end
 
       address

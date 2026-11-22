@@ -270,8 +270,11 @@ class HypervNodeDiscoveryTest < ActiveSupport::TestCase
   end
 
   def test_a_cluster_answering_no_interfaces_at_all_is_a_refused_contradiction
-    [{ 'interfaces' => [] }, { 'interfaces' => nil }, { 'clusterName' => 'HV-CL01' }].each do |shape|
-      answer = measured_answer.merge(shape)
+    [
+      { 'clusterName' => 'HV-CL01', 'interfaces' => [] },
+      { 'clusterName' => 'HV-CL01', 'interfaces' => nil },
+      { 'clusterName' => 'HV-CL01' }
+    ].each do |answer|
       cr, = build_cr(fog: CrFog.new(address_answer: Fog::JSON.encode(answer)))
       assert_raises(ForemanHyperv::OperationRefused) { cr.send(:discover_node_address, OWNER_NODE) }
     end
