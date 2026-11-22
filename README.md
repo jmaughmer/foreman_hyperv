@@ -66,6 +66,11 @@ so clustered hosts need the gem from source:
 gem 'fog-hyperv', github: 'ananace/fog-hyperv'
 ```
 
+The enabled cluster paths additionally require a build that answers all six
+capability predicates the plugin asks (`Fog::Hyperv::CAPABILITIES`); older
+builds — the released 0.2.x included — are answered the pre-enablement
+refusals verbatim, with the missing behaviours named.
+
 ### Verifying a compute resource
 
 Listing the virtual switches exercises the whole path, so the API endpoint for
@@ -100,14 +105,28 @@ URL supplies the scheme and port; the override supplies the identity spliced
 into it, and the per-node client is built from that composed endpoint. Prefer
 IP addresses unless the Foreman host really resolves the FQDNs.
 
-Until the hardened-transport matrix is validated (PLG-5b), only the measured
-http + negotiate pattern composes: a compute resource whose URL is https
-refuses per-node addressing with an explicit refusal rather than composing an
-unvalidated transport. A node with no override and no name the endpoint can
-serve itself is refused its per-node reads — no fog call carries its name —
-which is the fail-closed default, not a bug. Disk removals and VM destroys on
-cluster resources remain refused in code until the enablement gates named by
-those refusals have landed; enablement is a code PR, not a configuration.
+The composed per-node endpoint rides one of the two transport families the
+measured matrix validated (PLG-5b): http + negotiate with any identity, or
+https with a certificate-verifiable hostname and a `hyperv_ca_trust_path` on
+the resource — https to an IPv4 identity is refused outright, because the
+node certificate gives it no hostname to verify and forcing verification off
+is not this plugin's choice. A node with no override and no address the
+cluster itself gives it is refused its per-node reads — no fog call carries
+its name — which is the fail-closed default, not a bug.
+
+Clustered creates, disk removals and VM destroys run when the installed
+`fog-hyperv` answers all six behaviours the enablement stands on; a fog
+answering fewer gets the pre-enablement refusals verbatim, with the missing
+behaviours named. Enablement is a code PR, not a configuration — and neither
+is any other lift a refusal promises.
+
+## Runbook
+
+What a refusal means, and the paths this plugin leaves to an operator by
+hand — resolving a stranded cluster-role write, reading and clearing the
+sightings ledger, an endpoint whose cluster reads can never answer, a disk
+whose file cannot be proven safe to delete — are in
+[docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## Contributing
 

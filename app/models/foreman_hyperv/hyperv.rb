@@ -271,7 +271,8 @@ module ForemanHyperv
     # P/Invoke are ALWAYS indeterminate (N2), never a feature-absent reading.
     # Hosts that block Add-Type (R11: Constrained Language Mode, WDAC, AppLocker)
     # read indeterminate PERMANENTLY, so standalone destroy never unlocks on
-    # them — the accepted availability trade, with a manual runbook in the docs.
+    # them — the accepted availability trade, with a manual runbook in
+    # docs/RUNBOOK.md.
     CLUSAPI_NO_CLUSTER_SERVICE = 0
     CLUSAPI_NOT_CONFIGURED = 1
     CLUSAPI_NOT_RUNNING = 3
