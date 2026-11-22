@@ -83,24 +83,27 @@ module ForemanHyperv
                    'additionally requires a named method that proves node-set completeness; ' \
                    'enablement is a code PR, not a configuration.'
 
-    # PLG-22: the enablement set. Everything this PR unlocks stands on five
+    # PLG-22: the enablement set. Everything this PR unlocks stands on six
     # behaviours of the fog it is built against — the tri-state cluster reads,
     # the exact-host connection gate (FOG-11), the literal-path destructive
-    # calls (FOG-14), the stdout hygiene contract (FOG-15) and the input
-    # hardening (FOG-9) — and the runtime check asks the installed fog for ALL
-    # of them: the constant list AND the per-behaviour predicate every client
-    # of that build answers. A fog missing any one is the pre-enablement era
-    # again, and every operation this PR unlocks refuses exactly as it refused
-    # before. The constant is FOG-9's, and the plugin gate trusts it for the
-    # rule behind it (R13): the builder validator and the connection gate are
-    # ONE pure function there, so there is nothing here for a second list to
-    # re-prove.
+    # calls (FOG-14), the stdout hygiene contract (FOG-15), the input
+    # hardening (FOG-9) and the cluster capacity projection (FOG-8) — and the
+    # runtime check asks the installed fog for ALL of them: the constant list
+    # AND the per-behaviour predicate every client of that build answers. A
+    # fog missing any one is the pre-enablement era again, and every
+    # operation this PR unlocks refuses exactly as it refused before. The
+    # constant is FOG-9's, and the plugin gate trusts it for the rule behind
+    # it (R13): the builder validator and the connection gate are ONE pure
+    # function there, so there is nothing here for a second list to re-prove.
+    # (PLG-5b grew the set with FOG-8's sixth: the capacity read PLG-14 puts
+    # in front of placement stands or falls on that projection.)
     ENABLEMENT_CAPABILITIES = {
       tri_state_cluster: :supports_clusters?,
       exact_host_connection: :supports_exact_host_connections?,
       literal_path_destructive: :supports_literal_path_destructive?,
       stdout_json_hygiene: :supports_stdout_json_hygiene?,
-      input_hardening: :supports_input_hardening?
+      input_hardening: :supports_input_hardening?,
+      cluster_capacity_projection: :supports_cluster_capacity_projection?
     }.freeze
 
     # The capability-era refusal: the plugin build is enabled, the installed
@@ -647,7 +650,7 @@ module ForemanHyperv
 
       # PLG-15b opened creates for stand-alone machines; PLG-22 enables the
       # cluster create path — with the era rule the destroy path uses too:
-      # a fog that does not answer the five behaviours gets the pre-enablement
+      # a fog that does not answer the six behaviours gets the pre-enablement
       # refusals verbatim (the cluster ask refused before any read of the
       # endpoint, the stand-alone gate refusing on every unknown), and only
       # the enablement's partner fog runs the unlocked path below.
@@ -878,7 +881,7 @@ module ForemanHyperv
 
       unless enablement_supported?
         # The pre-enablement gate, verbatim: a fog that does not answer the
-        # five behaviours gets the refusals this plugin shipped with, word for
+        # six behaviours gets the refusals this plugin shipped with, word for
         # word — enablement is a property of the fog+plugin pair, and the
         # plugin does not run a decision its partner cannot keep.
         case standalone_destroy_state(vm)
@@ -1132,10 +1135,10 @@ module ForemanHyperv
     # the behaviour but not the list, is not this build's partner). A fog too
     # old to even define CAPABILITIES answers "everything missing" — the
     # pre-enablement era, refusing exactly what it refused before enablement.
-    # The whole check is a local constant read and five respond_to?/predicate
+    # The whole check is a local constant read and six respond_to?/predicate
     # calls on the client object: no wire traffic, and it is safe to ask on
     # every operation.
-    # @return [Boolean] does the installed fog answer all five?
+    # @return [Boolean] does the installed fog answer all six?
     def enablement_supported?
       missing_enablement_capabilities.empty?
     end
@@ -2494,18 +2497,33 @@ module ForemanHyperv
     def discover_node_address(node_name)
       node = node_name.to_s.strip.downcase
       if cluster_node_addresses && @cluster_node_address_refusal
-        raise format(NODE_ADDRESS_REFUSAL, node: node, reason: @cluster_node_address_refusal)
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node, reason: @cluster_node_address_refusal)
       end
 
       seen = @cluster_node_addresses[node.split('.').first]
-      raise format(NODE_ADDRESS_REFUSAL, node: node, reason: NODE_ADDRESS_NO_ROWS) if seen.nil?
+      if seen.nil?
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node, reason: NODE_ADDRESS_NO_ROWS)
+      end
 
       candidates, client_role = seen
-      raise format(NODE_ADDRESS_REFUSAL, node: node, reason: NODE_ADDRESS_NO_CLIENT_ROLE) unless client_role
-      raise format(NODE_ADDRESS_REFUSAL, node: node, candidates: candidates.join(', ')) if candidates.size > 1
+      unless client_role
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node, reason: NODE_ADDRESS_NO_CLIENT_ROLE)
+      end
+
+      if candidates.size > 1
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node,
+                                             reason: format(NODE_ADDRESS_AMBIGUOUS, candidates: candidates.join(', ')))
+      end
 
       address = candidates.first
-      raise format(NODE_ADDRESS_REFUSAL, node: node, address: address) unless NODE_IPV4.match?(address.to_s)
+      unless NODE_IPV4.match?(address.to_s)
+        raise ForemanHyperv::OperationRefused,
+              format(NODE_ADDRESS_REFUSAL, node: node, reason: format(NODE_ADDRESS_NOT_IPV4, address: address))
+      end
 
       address
     end
