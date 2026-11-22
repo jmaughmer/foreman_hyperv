@@ -33,7 +33,7 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 class HypervClusterBackedHostsTest < ActiveSupport::TestCase
   alias assert_not refute
 
-  CR_URL = 'http://hv-node1.lab.maughmer.net:5985/wsman'.freeze
+  CR_URL = 'http://hv-node1.lab.maughmer.net:5985/wsman'
 
   # A cluster node exactly as fog hands it over. #host is the fog read that
   # dials the node THROUGH THE CLIENT THAT OWNS THE CLUSTER READ — the
@@ -135,7 +135,7 @@ class HypervClusterBackedHostsTest < ActiveSupport::TestCase
 
     hosts = cr.send(:cluster_backed_hosts, FakeCluster.new('HV-CL01', nodes))
 
-    assert_equal ['hv-node1', 'HV-NODE2'], hosts.map(&:name)
+    assert_equal %w[hv-node1 HV-NODE2], hosts.map(&:name)
   end
 
   # The form's entry point: the named cluster gets the resilient listing, no
