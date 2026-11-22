@@ -344,6 +344,26 @@ class HypervNodeDiscoveryTest < ActiveSupport::TestCase
     without_trust.send(:client_for_node, OWNER_NODE)
   end
 
+  # The trust is not a per-node-only decoration: the resource's OWN client runs
+  # the address read, the cluster reads and test_connection, and over https
+  # every one of them hits the same certificate (row 3 of the revalidation row:
+  # a trust-less main client turned the designed https+IP composition refusal
+  # into an SSLError before the composition was ever reached).
+  def test_the_resources_own_client_carries_the_ca_trust_path_only_when_named
+    skip 'the hyperv_ca_trust_path column has not been migrated in this test database' unless trust_column?
+    with_trust, = build_cr(ca_trust_path: CA_FILE)
+    with_trust.unstub(:client)
+    Fog::Compute.expects(:new).with do |options|
+      options[:hyperv_ca_trust_path] == CA_FILE && options[:hyperv_endpoint] == CR_URL
+    end.returns(Object.new)
+    with_trust.send(:client)
+
+    without_trust, = build_cr
+    without_trust.unstub(:client)
+    Fog::Compute.expects(:new).with { |options| !options.key?(:hyperv_ca_trust_path) }.returns(Object.new)
+    without_trust.send(:client)
+  end
+
   # ---- the read ladder: override, self, discovery, refusal ----
 
   def test_a_role_from_a_discovered_node_is_read_on_the_per_node_client_at_the_discovered_ip
