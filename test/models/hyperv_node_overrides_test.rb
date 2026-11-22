@@ -250,15 +250,18 @@ class HypervNodeOverridesTest < ActiveSupport::TestCase
     first = Object.new
     second = Object.new
     # Exact-hash expectations, no block matchers: the complete options hash IS
-    # the claim (hyperv_host absent by construction), and mocha's count stays
+    # the claim (hyperv_host absent by construction, and the PLG-16 WinRM
+    # waits present on every composed client), and mocha's count stays
     # honest — a third Fog::Compute.new anywhere is an unexpected invocation.
     Fog::Compute.expects(:new)
                 .with(provider: :HyperV, hyperv_endpoint: "http://#{OVERRIDE_HOST}:5985/wsman",
-                      hyperv_username: 'u', hyperv_password: 'p')
+                      hyperv_username: 'u', hyperv_password: 'p',
+                      hyperv_operation_timeout: 90, hyperv_receive_timeout: 120)
                 .returns(first)
     Fog::Compute.expects(:new)
                 .with(provider: :HyperV, hyperv_endpoint: 'http://192.168.1.68:5985/wsman',
-                      hyperv_username: 'u', hyperv_password: 'p')
+                      hyperv_username: 'u', hyperv_password: 'p',
+                      hyperv_operation_timeout: 90, hyperv_receive_timeout: 120)
                 .returns(second)
     node2 = cr.send(:client_for_node, OWNER_NODE)
     assert_same first, node2
