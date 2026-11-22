@@ -796,10 +796,17 @@ module ForemanHyperv
         boot_device: attr[:boot_device].present? ? attr[:boot_device].to_sym : :NetworkAdapter,
         path: storage&.id || hypervisor.virtual_machine_path
       )
-      # PLG-16 retired the post-create `vm.placement_path =` write: the
-      # placement was named in the model's attributes above, so fog composes
-      # the disk folder from it — and refuses any shape that used to join
-      # relative — while the machine's disks are built.
+      # The host's New-VM answer merges back over the model with every
+      # return field — and placement is not something a host knows: it
+      # answers the placement an EMPTY STRING, which erases the one named at
+      # construction (measured: at disk-build time the live model answered
+      # placement "" and the disk took the host's own disk root — empty is
+      # fog's own "no placement", so the refused join never saw the folder).
+      # The placement is therefore re-asserted, unconditionally, through
+      # fog's declared writer while the machine's disks are still to be
+      # built; vm.vhds is bound to this exact model, so fog's refused join
+      # (FOG-17) composes the disk folder from it.
+      vm.placement_path = placement_path if placement_path
 
       if vm.generation == :UEFI
         vm.secure_boot_enabled = attr[:secure_boot_enabled]
@@ -2950,6 +2957,11 @@ module ForemanHyperv
       volumes = nested_attributes_for :volumes, attr[:volumes_attributes]
       logger.debug "Creating volumes with: #{volumes}"
       volumes.each do |vol|
+        # vm.vhds is fog-hyperv's own collection association: the collection
+        # (and every machine built from it) is bound to THIS machine — the
+        # trace measured the vhd's vm is the very model create_vm holds — so
+        # fog's refused join (FOG-17) composes the disk folder from the
+        # placement that model carries.
         vhd = vm.vhds.create basename: vol[:basename], size: vol[:size_bytes].to_i
         vm.hard_drives.create vhd: vhd
       end

@@ -16,8 +16,10 @@ require 'test_helper'
 # in it (§51's mechanism disclosure). This suite pins the retirement:
 #
 #   1. the placement rides the model through fog's own declared attribute —
-#      named in the servers.new attributes, before the machine is built — and
-#      the compute resource never sets it by writer after the create;
+#      named in the servers.new attributes, before the machine is built —
+#      and re-asserted exactly once when the host create answer merges back
+#      over the model and erases it (measured: without the re-assert the
+#      first PLG-16 live row put the disk at the host's own disk root);
 #   2. the plugin shim answers NOTHING for placement: no accessor, no
 #      build_vhd_path override, and the build_vhd_path a prepended server
 #      carries is fog's own method again;
@@ -37,16 +39,20 @@ class HypervPlacementWiringTest < ActiveSupport::TestCase
   CR_URL = "http://#{HOST}:5985/wsman".freeze
 
   # The machine fog's servers.new builds. It records the CONSTRUCTOR
-  # attributes exactly as they arrived (that is the PLG-16 claim), refuses to
-  # pretend placement was never written by also recording every
-  # placement_path= writer call, and carries the self-rung name the create
-  # insists on for a machine built on the resource's own client.
+  # attributes exactly as they arrived (that is the PLG-16 claim), carries
+  # placement the way fog-core does (a declared attribute merged at
+  # construction), has create() answer the way FOG-17's really does — the
+  # host's New-VM reply merges back over the model and knows no placement,
+  # so the merge erases it (measured by the first PLG-16 live row: the disk
+  # fell to the host's own disk root) — and records every placement_path=
+  # writer call after construction.
   class PlacementVm
-    attr_reader :new_attributes, :create_kwargs, :placement_writes, :generation
+    attr_reader :new_attributes, :create_kwargs, :placement_writes, :generation, :placement_path
 
     def initialize(attributes)
       @new_attributes = (attributes || {}).dup
       @placement_writes = []
+      @placement_path = @new_attributes[:placement_path]
       @generation = :BIOS
     end
 
@@ -60,10 +66,16 @@ class HypervPlacementWiringTest < ActiveSupport::TestCase
 
     def placement_path=(value)
       @placement_writes << value
+      @placement_path = value
     end
 
     def create(**attrs)
       @create_kwargs = attrs
+      # fog's create merges the host answer over the model by return fields,
+      # and the host answers placement as an EMPTY STRING (measured by the
+      # PLG-16 trace row) — empty is fog's own "no placement", so the merge
+      # erases the named folder.
+      @placement_path = ''
     end
 
     def persisted?
@@ -121,10 +133,14 @@ class HypervPlacementWiringTest < ActiveSupport::TestCase
 
     placed = fog.servers.built.new_attributes[:placement_path]
     assert_equal "#{VOL1}\\#{VM_NAME}", placed,
-                 'the placement folder must ride the model when it is built, so fog composes the ' \
-                 'disk folder from the one attribute it refuses — not from a writer call after the create'
-    assert_empty fog.servers.built.placement_writes,
-                 'the compute resource must stop hand-writing placement onto the model after the create'
+                 'the placement folder rides the model the moment it is built, so fog — not a ' \
+                 'plugin join — composes the disk path from the one attribute it refuses'
+    assert_equal [placed], fog.servers.built.placement_writes,
+                 'the host create answer erases the named placement when it merges over the ' \
+                 'model; the compute resource re-asserts it through fog own declared writer, ' \
+                 'exactly once, before the disks are built'
+    assert_equal placed, fog.servers.built.placement_path,
+                 'the placement is still named when the disks of the machine are built'
   end
 
   # ---- 3. stand-alone semantics ride unchanged ----
