@@ -106,6 +106,18 @@ module ForemanHyperv
       cluster_capacity_projection: :supports_cluster_capacity_projection?
     }.freeze
 
+    # The WinRM waits every client this resource composes insists on (PLG-16,
+    # evidence §37.6): fog sends operation_timeout/receive_timeout ONLY when
+    # configured, and nothing had ever configured them — the gem's own
+    # measured 60 s/70 s then capped the path under the >=90 s the plan chose
+    # over the NTLM/fresh-connection worst case, and a stalled cold cluster
+    # read ran against whatever the gem guesses. The receive wait stays above
+    # the operation wait so a receive never kills an operation still inside
+    # its own cap; at the cap the answer comes back partial (measured, §42.4)
+    # and the reads' own validation refuses it rather than trusting it.
+    WINRM_OPERATION_TIMEOUT = 90
+    WINRM_RECEIVE_TIMEOUT = 120
+
     # The capability-era refusal: the plugin build is enabled, the installed
     # fog is not. Names the missing behaviours so the operator knows what to
     # upgrade, and quotes no remote text.
@@ -715,8 +727,8 @@ module ForemanHyperv
       # PLG-14: a chosen storage that answers no mount path refuses the create
       # outright. The pre-PLG-14 code GUESSED twice here — `storage&.id ||
       # hypervisor.virtual_machine_path` put a clustered machine's config on
-      # the node's local disk, and the placement_path join below named the
-      # disk folder relatively (C:\<name>) — and both guesses put files where
+      # the node's local disk, and the placement folder join named the disk
+      # folder relatively (C:\<name>) — and both guesses put files where
       # the cluster cannot follow them. The stand-alone case (no storage at
       # all) keeps its honest fallback below, untouched.
       if storage && storage.id.to_s.strip.empty?
@@ -746,9 +758,22 @@ module ForemanHyperv
         routed_via_node = true
       end
 
+      # PLG-16: the placement folder rides the model through fog's own
+      # declared attribute, named BEFORE the machine is built. FOG-17 made fog
+      # the one place that composes a machine's disk folder — an absolute
+      # placement folder replaces the node's disk root outright, and every
+      # shape that used to answer a relative join is refused there by name,
+      # not joined. The value is the placed volume's mount folder plus a
+      # folder named for the machine: a clustered machine's VHDXs have to sit
+      # where every node can reach them. nil — the stand-alone case — names no
+      # placement and leaves fog's host-root default in charge (likewise
+      # refused rather than joined when the host answers no root).
+      placement_path = [storage.id, attr[:name]].join('\\') if storage
+
       vm = build_client.servers.new(
         name: attr[:name],
         computer_name: computer || hypervisor.name,
+        placement_path: placement_path,
         generation: attr[:generation],
         dynamic_memory_enabled: Foreman::Cast.to_bool(attr[:dynamic_memory_enabled]),
         memory_startup: attr[:memory_startup].to_i,
@@ -771,10 +796,10 @@ module ForemanHyperv
         boot_device: attr[:boot_device].present? ? attr[:boot_device].to_sym : :NetworkAdapter,
         path: storage&.id || hypervisor.virtual_machine_path
       )
-      # The node's own disk path is the wrong drive for a clustered machine: every
-      # node has to be able to read the VHDXs, so they go under the shared volume
-      # the config was placed on, in a folder named for the machine.
-      vm.placement_path = [storage.id, vm.name].join('\\') if storage
+      # PLG-16 retired the post-create `vm.placement_path =` write: the
+      # placement was named in the model's attributes above, so fog composes
+      # the disk folder from it — and refuses any shape that used to join
+      # relative — while the machine's disks are built.
 
       if vm.generation == :UEFI
         vm.secure_boot_enabled = attr[:secure_boot_enabled]
@@ -1127,6 +1152,10 @@ module ForemanHyperv
       # SSLError before any composition decision was reached). Absent the
       # attribute, absent the option — the pre-PLG-5b build, verbatim.
       options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
+      # The waits PLG-16 says on EVERY composed client — this one runs the
+      # cluster reads the stalled-cold-cmdlet finding is about.
+      options[:hyperv_operation_timeout] = WINRM_OPERATION_TIMEOUT
+      options[:hyperv_receive_timeout] = WINRM_RECEIVE_TIMEOUT
       @client ||= Fog::Compute.new(options)
     end
 
@@ -2559,6 +2588,10 @@ module ForemanHyperv
         hyperv_password: password
       }
       options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
+      # The same waits as the resource's own client (PLG-16): a node-routed
+      # write gets the same bounded waits as the endpoint reads.
+      options[:hyperv_operation_timeout] = WINRM_OPERATION_TIMEOUT
+      options[:hyperv_receive_timeout] = WINRM_RECEIVE_TIMEOUT
 
       @node_clients ||= {}
       @node_clients[node_name.to_s.strip.downcase] ||= Fog::Compute.new(options)
