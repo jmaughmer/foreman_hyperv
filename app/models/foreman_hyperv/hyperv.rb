@@ -852,7 +852,19 @@ module ForemanHyperv
         # of finding it raises StrandIndeterminate — which the rescue below
         # answers by touching nothing. role_added stays false until the readback
         # has actually found the role.
-        role_added = add_cluster_role_proven(vm)
+        #
+        # PLG-27: the Add runs on the client the machine was BUILT on, at the
+        # identity the ladder resolved for it. vm.computer_name is not safe on
+        # a node-routed machine: the host's create answer merges back over the
+        # model, and its ComputerName field is the node's own name (measured:
+        # "HV-NODE2"). Fog's host set registers each client's endpoint and the
+        # names discovered FOR THAT ENDPOINT — so the owning node's name lives
+        # in the per-node client's set and never in the endpoint's, and the
+        # endpoint client refused the Add before the cmdlet ran. The self rung
+        # keeps the model's name verbatim: the check above proved it is the
+        # name the endpoint gives itself, and fog registers that for it.
+        role_target = routed_via_node ? computer : vm.computer_name
+        role_added = add_cluster_role_proven(vm, service: build_client, target: role_target)
       end
 
       vm.start if start
@@ -2263,8 +2275,14 @@ module ForemanHyperv
     # the log, and StrandIndeterminate stops the caller from tearing anything
     # down. The fog call being absent (fog too old to add roles) still raises
     # BEFORE anything is sent, which keeps its deterministic rollback.
-    def add_cluster_role_proven(vm)
-      unless client.respond_to?(:add_cluster_virtual_machine_role)
+    # PLG-27: the Add rides the client that built the machine (default: this
+    # resource's own client), dialled at an identity THAT client's host set
+    # registers (default: the model's name, which is honest when the model is
+    # self-rung). The proof is unchanged either way — the role readback stays
+    # a cluster read on the resource's own endpoint, which every node of the
+    # cluster answers for.
+    def add_cluster_role_proven(vm, service: client, target: vm.computer_name)
+      unless service.respond_to?(:add_cluster_virtual_machine_role)
         raise Foreman::Exception, 'Placing a virtual machine in a cluster needs a fog-hyperv that can add cluster roles'
       end
 
@@ -2273,7 +2291,7 @@ module ForemanHyperv
         # Everything from here on is post-send: after this line every exception
         # class — including fog's decode error on a success — is indeterminate
         # and belongs to the readback, not to a rollback.
-        client.add_cluster_virtual_machine_role(id: vm.id, computer_name: vm.computer_name)
+        service.add_cluster_virtual_machine_role(id: vm.id, computer_name: target)
       rescue StandardError => e
         send_error = e
       end
