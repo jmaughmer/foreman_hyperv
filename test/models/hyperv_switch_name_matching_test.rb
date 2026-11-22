@@ -25,14 +25,18 @@ require 'test_helper'
 # translation, and select_nic uses it as the last cross-node identity both sides
 # can answer to.
 class HypervSwitchNameMatchingTest < ActiveSupport::TestCase
-  ENDPOINT_GUID = '908ed04b-1960-48b2-9cab-037e9cebf603'.freeze # HV-NODE1's GUID for "External" (measured)
-  NODE_GUID = '0f4f2b6d-2f77-4715-82a2-64881a921f57'.freeze     # HV-NODE2's GUID for the SAME "External" (measured shape)
-  ADAPTER_ID = 'Microsoft:47BCF071-75B6-495B-A1C2-0A77622D482B\\84B39840-3455-4A56-A585-D84556520B89'.freeze
+  ENDPOINT_GUID = '908ed04b-1960-48b2-9cab-037e9cebf603' # HV-NODE1's GUID for "External" (measured)
+  NODE_GUID = '0f4f2b6d-2f77-4715-82a2-64881a921f57'     # HV-NODE2's GUID, same "External"
+  ADAPTER_ID = 'Microsoft:47BCF071-75B6-495B-A1C2-0A77622D482B\\84B39840-3455-4A56-A585-D84556520B89'
 
   # The Foreman NIC as core hands it to select_nic mid-orchestration: no MAC yet
   # (that is what the match must deliver), compute_attributes exactly as the form
   # stored them — the endpoint's GUID, an empty identity, nothing else.
   NicDouble = Struct.new(:mac, :compute_attributes, keyword_init: true)
+
+  # One line of the endpoint's switch listing: the GUID the form value carries,
+  # and the name every node of the cluster shares for it.
+  Switch = Struct.new(:id, :name)
 
   def nic
     NicDouble.new(mac: nil, compute_attributes: { 'identity' => '', 'switch_id' => ENDPOINT_GUID,
@@ -41,9 +45,11 @@ class HypervSwitchNameMatchingTest < ActiveSupport::TestCase
 
   # An adapter exactly as the queried machine answers it (measured): the node's
   # GUID, the shared name, a MAC already assigned by the hypervisor.
+  AdapterDouble = Struct.new(:id, :mac, :name, :switch_id, :switch_name, :vlan_operation_mode, keyword_init: true)
+
   def adapter(attrs = {})
-    OpenStruct.new({ id: ADAPTER_ID, mac: '00:15:5d:01:42:10', name: 'Network Adapter',
-                     switch_name: 'External', vlan_operation_mode: :Untagged }.merge(attrs))
+    AdapterDouble.new({ id: ADAPTER_ID, mac: '00:15:5d:01:42:10', name: 'Network Adapter',
+                        switch_name: 'External', vlan_operation_mode: :Untagged }.merge(attrs))
   end
 
   def vm_model
@@ -59,11 +65,11 @@ class HypervSwitchNameMatchingTest < ActiveSupport::TestCase
 
     matched = vm.select_nic([adapter(switch_id: NODE_GUID)], n)
 
-    refute_nil matched,
-               'the adapter on HV-NODE2 carries the node GUID for the very switch the NIC record ' \
-               'names by the ENDPOINT GUID; the endpoint listing already proves both GUIDs are ' \
-               'named "External", and matching may throw away a machine over the mismatch that ' \
-               'translation resolves'
+    assert_not_nil matched,
+                   'the adapter on HV-NODE2 carries the node GUID for the very switch the NIC record ' \
+                   'names by the ENDPOINT GUID; the endpoint listing already proves both GUIDs are ' \
+                   'named "External", and matching may throw away a machine over the mismatch that ' \
+                   'translation resolves'
     assert_equal ADAPTER_ID, matched.id
     assert_equal ADAPTER_ID, n.compute_attributes['identity'],
                  'the identity recorded on the NIC stays the adapter id — the edit path reads ' \
@@ -87,7 +93,7 @@ class HypervSwitchNameMatchingTest < ActiveSupport::TestCase
 
     matched = vm.select_nic([adapter(switch_id: ENDPOINT_GUID)], n)
 
-    refute_nil matched, 'on the endpoint itself the stored GUID IS the adapter GUID — no resolver attached'
+    assert_not_nil matched, 'on the endpoint itself the stored GUID IS the adapter GUID — no resolver attached'
     assert_equal ADAPTER_ID, n.compute_attributes['identity']
   end
 
@@ -176,7 +182,7 @@ class HypervSwitchNameMatchingTest < ActiveSupport::TestCase
     cr.stubs(:readback_finds_role?).returns([true, nil])
     # The endpoint's own switch listing — the one table that knows the GUID behind
     # the form value and the name every node shares.
-    cr.stubs(:switches).returns([OpenStruct.new(id: ENDPOINT_GUID, name: 'External')])
+    cr.stubs(:switches).returns([Switch.new(ENDPOINT_GUID, 'External')])
     cr
   end
 
@@ -187,10 +193,10 @@ class HypervSwitchNameMatchingTest < ActiveSupport::TestCase
                       dynamic_memory_enabled: '0', notes: 'plg28')
 
     resolver = vm.switch_name_resolver
-    refute_nil resolver,
-               'core reads the machine it was handed back to assign MACs (setComputeDetails -> ' \
-               'select_nic); the cross-node switch identity lives only on the endpoint listing, ' \
-               'so the machine core holds must carry that translation'
+    assert_not_nil resolver,
+                   'core reads the machine it was handed back to assign MACs (setComputeDetails -> ' \
+                   'select_nic); the cross-node switch identity lives only on the endpoint listing, ' \
+                   'so the machine core holds must carry that translation'
     assert_equal 'External', resolver.call(ENDPOINT_GUID),
                  'the endpoint GUID the form stored resolves to the name every node shares'
     assert_nil resolver.call('ffffffff-ffff-ffff-ffff-ffffffffffff'),
