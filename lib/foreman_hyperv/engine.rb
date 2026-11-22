@@ -15,7 +15,10 @@ module ForemanHyperv
 
           # PLG-5a: hyperv_node_overrides joins the writable CR attributes so
           # the API and UI can carry the node→endpoint override map.
-          parameter_filter ComputeResource, :url, :user, :password, :hyperv_node_overrides
+          # PLG-5b: hyperv_ca_trust_path joins them too — the CA file the
+          # hardened per-node compositions verify against.
+          parameter_filter ComputeResource, :url, :user, :password, :hyperv_node_overrides,
+                           :hyperv_ca_trust_path
         end
       end
     end
