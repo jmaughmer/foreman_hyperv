@@ -4,7 +4,7 @@
   begin
     clusters = compute_resource.clusters.map(&:name)
     f.object.cluster_name = clusters.first if clusters.count == 1
-    computers = (compute_resource.cluster(f.object.cluster_name) || compute_resource).hosts
+    computers = compute_resource.form_computers(f.object.cluster_name)
     f.object.computer_name ||= computers.first.name
   rescue Fog::Hyperv::Errors::PSError => ex
     # In case of errors

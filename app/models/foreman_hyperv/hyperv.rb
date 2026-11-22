@@ -521,6 +521,21 @@ module ForemanHyperv
       cluster_named(name)
     end
 
+    # The computers the machine form offers its Computer Name select between
+    # (PLG-25). The named cluster is listed through cluster_backed_hosts — the
+    # resilient per-node listing — and NOT through fog's Cluster#hosts, which
+    # dials every node through this resource's own client and takes the whole
+    # listing down with the first node that client refuses (every
+    # non-endpoint node, under exact_host_connection). With no cluster named
+    # the resource's own listing answers, endpoint cluster included, already
+    # cached.
+    def form_computers(cluster_name = nil)
+      cluster = cluster_named(cluster_name)
+      return hosts if cluster.nil?
+
+      cluster_backed_hosts(cluster)
+    end
+
     def clusters
       client.clusters.load(
         cache.cache(:clusters) do
@@ -2007,16 +2022,20 @@ module ForemanHyperv
     # The hosts a placement choice is made between: the endpoint on its own, or every
     # node of the cluster when it belongs to one. Get-VMHost answers for the machine it
     # ran on and nothing else, so a cluster's other nodes come from the cluster's node
-    # list and their details from each node in turn. A node that answers the cluster
-    # but not WinRM stays in the list with only its name: the machine form leans on
-    # this listing, and one node being down is a thing to report, not a reason to hide
-    # the node or to fail the page.
+    # list and their details from each node in turn — through that node's own client
+    # (client_for_node, PLG-5a/5b), because fog's exact_host_connection capability
+    # refuses to dial any name the resource's own client has not already spoken to,
+    # and node.host would ride that client for every non-endpoint node (PLG-25: the
+    # VM tab's first load, refused on hv-node2). A node that cannot be reached stays
+    # in the list with only its name: the machine form leans on this listing, and one
+    # node being down is a thing to report, not a reason to hide the node or to fail
+    # the page.
     def cluster_backed_hosts(cluster = nil)
       return client.hosts.all unless cluster
 
       cluster.nodes.each_with_object([]) do |node, hosts|
         hosts << begin
-          node.host
+          client_for_node(node.name).hosts.first
         rescue StandardError => e
           Rails.logger.warn "Hyper-V node #{node.name} is in cluster #{cluster.name} but not reachable over WinRM: #{e.message.lines.first}"
           node_only = client.hosts.new(name: node.name)
