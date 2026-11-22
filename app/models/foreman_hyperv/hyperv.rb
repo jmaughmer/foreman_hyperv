@@ -867,6 +867,19 @@ module ForemanHyperv
         role_added = add_cluster_role_proven(vm, service: build_client, target: role_target)
       end
 
+      # PLG-28: hand the machine core holds (setComputeDetails reads THIS object
+      # back to assign MACs) the endpoint's switch-name translation. The NIC
+      # records carry the endpoint's GUID for the switch the form offered; the
+      # queried adapter of a node-routed machine answers the node's own GUID for
+      # the same switch, and only the endpoint's listing proves the two are one
+      # name. The lambda reads that listing lazily (it is cached) and answers
+      # only what the endpoint itself reports — an unknown GUID stays unresolved.
+      vm.switch_name_resolver = lambda do |guid|
+        next if guid.blank?
+
+        switches(nil).detect { |sw| sw.id.to_s.casecmp?(guid.to_s) }&.name
+      end
+
       vm.start if start
       vm
     rescue StrandIndeterminate
