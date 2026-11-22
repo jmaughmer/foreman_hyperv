@@ -332,6 +332,9 @@ class HypervAvailableStorageDomainsTest < ActiveSupport::TestCase
   # client — the same surface the stand-alone suite's VmDouble carries.
   class VmRecorder
     attr_accessor :id, :name, :computer_name, :path, :generation, :hard_drives, :placement_path
+    # PLG-28: the plugin's fog extension gives every fog server this accessor;
+    # a double of that class answers to it too.
+    attr_accessor :switch_name_resolver
     attr_reader :create_kwargs
 
     def initialize(computer_name)

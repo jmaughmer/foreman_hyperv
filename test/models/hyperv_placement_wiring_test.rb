@@ -47,6 +47,9 @@ class HypervPlacementWiringTest < ActiveSupport::TestCase
   # fell to the host's own disk root) — and records every placement_path=
   # writer call after construction.
   class PlacementVm
+    # PLG-28: the plugin's fog extension gives every fog server this accessor;
+    # a double of that class answers to it too.
+    attr_accessor :switch_name_resolver
     attr_reader :new_attributes, :create_kwargs, :placement_writes, :generation, :placement_path
 
     def initialize(attributes)
