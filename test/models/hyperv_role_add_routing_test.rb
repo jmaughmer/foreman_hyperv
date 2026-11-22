@@ -50,7 +50,7 @@ class HypervRoleAddRoutingTest < ActiveSupport::TestCase
   # model the moment the machine exists. That overwrite is the whole trap this
   # suite pins.
   class RoutingVm
-    attr_reader :new_attributes, :id, :name
+    attr_reader :new_attributes, :id, :name, :computer_name
 
     def initialize(attributes, answer_name)
       @new_attributes = (attributes || {}).dup
@@ -58,10 +58,6 @@ class HypervRoleAddRoutingTest < ActiveSupport::TestCase
       @computer_name = @new_attributes[:computer_name]
       @id = VM_ID
       @name = @new_attributes[:name]
-    end
-
-    def computer_name
-      @computer_name
     end
 
     def create(**_attrs)
