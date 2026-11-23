@@ -239,6 +239,16 @@ module ForemanHyperv
     # populated (see add_cluster_role_proven).
     ROLE_NAME_PREFIX = 'Virtual Machine '
 
+    # PLG-35: how many live reads the role index demands before it believes
+    # a flap-shaped answer, and how long it waits between asks. Two asks a
+    # pause apart: the WinRM flaps on record cleared within seconds (a
+    # fresh instance read correctly while the memo still held the flap's
+    # answer), and the cap keeps a true outage at one pause with the same
+    # honest answer it gives today.
+    ROLE_INDEX_PROBE_ATTEMPTS = 2
+    ROLE_INDEX_READ_ATTEMPTS = 2
+    ROLE_INDEX_RETRY_DELAY_SECONDS = 2
+
     # PLG-15b arm (a): the cluster membership read is one minimal-property WQL
     # query against the cluster's own namespace — the same fog run_wql path
     # supports_clusters? uses (which appends the `/*` grammar itself), pinned
@@ -2347,12 +2357,21 @@ module ForemanHyperv
       @cluster_role_index = build_cluster_role_index
     end
 
+    # PLG-35: the answers this builds its verdicts from are LIVE reads, and
+    # fog's Real#supports_clusters? rescues every transport error into
+    # false — so one WinRM flap used to write :not_a_cluster into this
+    # instance's memo and the page printed "Stand-alone" for a clustered
+    # machine (observed live; a fresh instance seconds later read
+    # correctly). The retry below is the plugin's only lever: a flap
+    # answers differently one pause later, a genuine stand-alone host does
+    # not. The tri-state is untouched — a read that raises through the
+    # retry is still nil, "could not answer".
     def build_cluster_role_index
       return :unsupported unless client.respond_to?(:cluster_virtual_machine_roles) &&
                                  client.respond_to?(:supports_clusters?)
-      return :not_a_cluster unless client.supports_clusters?
+      return :not_a_cluster unless cluster_membership_confirmed?
 
-      roles = Array(client.cluster_virtual_machine_roles.all).flatten.compact
+      roles = read_cluster_roles
       roles.each_with_object({}) do |role, index|
         role_id = role.respond_to?(:virtual_machine_id) ? role.virtual_machine_id : nil
         index[role_id.to_s.downcase] = role if role_id.present?
@@ -2360,10 +2379,47 @@ module ForemanHyperv
         index[role_name] = role if role_name.start_with?(ROLE_NAME_PREFIX)
       end
     rescue StandardError => e
-      # "Could not answer" stays its own answer — see vm_registration.
+      # "Could not answer" stays its own answer — see vm_registration. A
+      # probe that RAISES (a fog outside this fork's swallow-everything
+      # contract) rides here too, and is not the flap the retry speaks of.
       logger.warn "The instance list could not read cluster roles for #{name}: " \
                   "#{e.class}: #{e.message.to_s.lines.first.to_s.strip}"
       nil
+    end
+
+    # A false from the membership probe is confirmed by ONE more probe a
+    # pause later. Two consistent answers ARE the verdict — no third
+    # attempt, so a stand-alone deployment pays one confirmation and never
+    # a spin, and a flapped no followed by a yes never reaches the page.
+    def cluster_membership_confirmed?
+      (1..ROLE_INDEX_PROBE_ATTEMPTS).each do |attempt|
+        return true if client.supports_clusters?
+
+        role_index_flap_pause if attempt < ROLE_INDEX_PROBE_ATTEMPTS
+      end
+      false
+    end
+
+    # The roles listing retried once on a raise — the same flap, the same
+    # pause. A read that raises through the retry re-raises the original
+    # error into the outer rescue: the page answers :unknown exactly as it
+    # does today, one pause later.
+    def read_cluster_roles
+      (1..ROLE_INDEX_READ_ATTEMPTS).each do |attempt|
+        return Array(client.cluster_virtual_machine_roles.all).flatten.compact
+      rescue StandardError
+        raise if attempt >= ROLE_INDEX_READ_ATTEMPTS
+
+        role_index_flap_pause
+      end
+    end
+
+    # The pause between retry attempts, on its own method so tests pin the
+    # CALLS without running the clock. Two seconds is a rounding error
+    # against the 2–8 s a healthy cluster read already costs, and well
+    # inside the flaps on record.
+    def role_index_flap_pause
+      sleep ROLE_INDEX_RETRY_DELAY_SECONDS
     end
 
     # The node that answered the read. Printed for stand-alone machines, where

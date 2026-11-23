@@ -33,13 +33,28 @@ require 'test_helper'
 #      gets a role (PLG-22/27), and a machine the cluster released without being
 #      deleted keeps the path and loses the role;
 #   4. one page renders one cluster read, not one per row (a per-VM role probe
-#      costs 2–8 s here, and the page lists every machine the node answers).
+#      costs 2–8 s here, and the page lists every machine the node answers);
+#   5. PLG-35: a FLAPPED read is retried before it becomes a verdict.
+#      fog's supports_clusters? swallows every transport error into false,
+#      so one WinRM hiccup used to print "Stand-alone" for a clustered
+#      machine (§66-era evidence: a fresh instance read correctly). Two
+#      consistent probes now ARE the verdict; one no followed by a yes is
+#      a flap. The roles read retries once on a raise for the same reason,
+#      and the tri-state (nil = "could not answer") survives the retry.
 class HypervRegistrationColumnTest < ActiveSupport::TestCase
   HOST = 'hv-node1'
   CR_URL = "http://#{HOST}:5985/wsman".freeze
   ELENA = '3323c48a-a1bb-4609-b25d-b02013bc701f'
   NICK = '55fa093f-1d2e-413c-a945-a505b8f4a46e'
   CSV = 'C:\ClusterStorage\Volume1'
+
+  setup do
+    # The flap retry really sleeps between attempts; the suite pins the
+    # CALLS, never the clock (any_instance so the pre-existing tests that
+    # walk a retry path — stand-alone confirmation, raising roles — do
+    # not each add seconds to every seed run).
+    ForemanHyperv::Hyperv.any_instance.stubs(:role_index_flap_pause)
+  end
 
   # A cluster role exactly as fog's ClusterVirtualMachineRole answers it: the
   # group name the cluster builds ("Virtual Machine <machine name>", measured
@@ -91,6 +106,47 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
   class LegacyFogDouble
     def supports_clusters?
       true
+    end
+  end
+
+  # PLG-35: a probe whose answers are scripted in order. A flap IS this
+  # shape from the plugin's seat: fog's Real#supports_clusters? rescues
+  # every transport error into false, so a WinRM hiccup and a genuinely
+  # stand-alone host are the SAME answer — only the sequence tells them
+  # apart (a flap's second probe says yes; a stand-alone host never does).
+  class FlappingProbeFogDouble < FogDouble
+    attr_reader :probe_calls
+
+    def initialize(roles_collection, probe_answers)
+      super(roles_collection)
+      @probe_answers = probe_answers
+      @probe_calls = 0
+    end
+
+    def supports_clusters?
+      @probe_calls += 1
+      @probe_answers[[@probe_calls - 1, @probe_answers.size - 1].min]
+    end
+  end
+
+  # PLG-35: the roles read raising a SCRIPTED number of times before it
+  # answers (a raising-forever read stays on RolesDouble#raise_error).
+  class FlappingRolesDouble
+    attr_reader :calls
+
+    def initialize(roles, raise_times:)
+      @roles = roles
+      @raise_times = raise_times
+      @calls = 0
+    end
+
+    def all(_filters = nil)
+      @calls += 1
+      if @raise_times.positive?
+        @raise_times -= 1
+        raise Timeout::Error
+      end
+      @roles
     end
   end
 
@@ -229,5 +285,81 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
            'wearing the same face as a healthy one'
     assert_not standalone.warning?, "a stand-alone machine on its own node is nobody's cleanup"
     assert unknown.warning?, 'an unreadable cluster must not read as a healthy verdict'
+  end
+
+  # ---- PLG-35: the role index survives a WinRM flap ----
+
+  def test_a_single_flapped_cluster_probe_never_prints_stand_alone_for_a_clustered_machine
+    elenas_role = RoleDouble.new(name: 'Virtual Machine elena-smolen.maughmer.net',
+                                 virtual_machine_id: ELENA, owner_node: 'HV-NODE2')
+    roles = RolesDouble.new([elenas_role])
+    fog = FlappingProbeFogDouble.new(roles, [false, true])
+    cr = build_cr(fog)
+    cr.expects(:role_index_flap_pause).once
+
+    registration = cr.vm_registration(clustered_vm)
+
+    assert_equal :clustered, registration.state,
+                 'one flapped probe is a transport hiccup, not a cluster verdict: the plugin ' \
+                 'observed this live — a clustered machine printed Stand-alone for one page load ' \
+                 'and read correctly on the next instance'
+    assert_equal 2, fog.probe_calls, 'the no gets exactly one confirmation probe'
+    assert_equal 1, roles.calls, 'once the re-probe says cluster, the roles are read normally'
+  end
+
+  def test_two_consistent_no_probes_are_the_stand_alone_verdict_and_there_is_no_third
+    roles = RolesDouble.new([])
+    fog = FlappingProbeFogDouble.new(roles, [false, false])
+    cr = build_cr(fog)
+
+    registration = cr.vm_registration(standalone_vm)
+
+    assert_equal :standalone_no_cluster, registration.state,
+                 'a host that answers no twice, seconds apart, HAS disproven the cluster — ' \
+                 'the confirmation retry must end in the same honest verdict the single probe gave'
+    assert_equal 2, fog.probe_calls, 'two consistent probes are the verdict; the retry must not spin'
+    assert_equal 0, roles.calls, 'a stand-alone endpoint is never asked for roles, before or after'
+  end
+
+  def test_a_roles_read_that_raises_once_answers_with_the_retry_not_unknown
+    elenas_role = RoleDouble.new(name: 'Virtual Machine elena-smolen.maughmer.net',
+                                 virtual_machine_id: ELENA, owner_node: 'HV-NODE2')
+    roles = FlappingRolesDouble.new([elenas_role], raise_times: 1)
+    cr = build_cr(FogDouble.new(roles))
+    cr.expects(:role_index_flap_pause).once
+
+    registration = cr.vm_registration(clustered_vm)
+
+    assert_equal :clustered, registration.state,
+                 'the same flap that mislabels via the probe also kills the roles read outright; ' \
+                 'one retry absorbs it and the page shows the truth instead of Unknown'
+    assert_equal 2, roles.calls, 'exactly one retry of the raising read'
+  end
+
+  def test_a_roles_read_that_keeps_raising_stays_unknown_at_exactly_the_capped_attempts
+    roles = FlappingRolesDouble.new([], raise_times: 2)
+    cr = build_cr(FogDouble.new(roles))
+
+    registration = cr.vm_registration(clustered_vm)
+
+    assert_equal :unknown, registration.state,
+                 'a flap that outlives the retry answers what it answers today: could not ' \
+                 'answer — never a stand-alone verdict, which licenses disk removal'
+    assert_equal 2, roles.calls, 'the cap is the cap: two attempts, no more, no page-turn spin'
+  end
+
+  def test_a_healthy_endpoint_pays_the_flap_retry_nothing
+    elenas_role = RoleDouble.new(name: 'Virtual Machine elena-smolen.maughmer.net',
+                                 virtual_machine_id: ELENA, owner_node: 'HV-NODE2')
+    roles = RolesDouble.new([elenas_role])
+    fog = FlappingProbeFogDouble.new(roles, [true])
+    cr = build_cr(fog)
+    cr.expects(:role_index_flap_pause).never
+
+    registration = cr.vm_registration(clustered_vm)
+
+    assert_equal :clustered, registration.state
+    assert_equal 1, fog.probe_calls, 'a yes is never re-asked: the healthy page costs what it cost before'
+    assert_equal 1, roles.calls, 'and the one-read-per-page guarantee stands untouched'
   end
 end
