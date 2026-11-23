@@ -59,6 +59,30 @@
       <%= prop :state %>
       <%= prop :status %>
       <%= prop :notes %>
+      <%# PLG-31: what the cluster will do about this machine — read from the
+          same role listing the Registration column joins against, so these
+          rows cost no additional cluster round trip. The word is the
+          documented meaning, the number in parentheses is what the cluster
+          actually answered, and the failback rows appear only when fog has
+          the contract to be asked. Display only: the knobs change in
+          Failover Cluster Manager. %>
+      <% ha = @compute_resource.cluster_ha_settings(@vm) -%>
+      <% if ha.found? -%>
+        <tr>
+          <td><%= _('Failover priority') %></td>
+          <td><%= ha.priority_label %></td>
+        </tr>
+        <% unless ha.auto_failback_label.nil? -%>
+          <tr>
+            <td><%= _('Cluster auto failback') %></td>
+            <td><%= ha.auto_failback_label %></td>
+          </tr>
+          <tr>
+            <td><%= _('Failback window') %></td>
+            <td><%= ha.failback_window_label %></td>
+          </tr>
+        <% end -%>
+      <% end -%>
       <tr>
         <td><%= _('Running on') %></td>
         <td><%= link_to @compute_resource, compute_resource_path(@compute_resource) %></td>
