@@ -146,6 +146,18 @@ module FogExtensions
       # as before.
       attr_accessor :switch_name_resolver
 
+      # PLG-30: the create form's Automatic failback checkbox is answered on the
+      # machine the form renders (checkbox_f reads f.object.auto_failback), but
+      # the CLUSTER's reported value lives on the cluster role, not here — this
+      # accessor exists so the form can render a create-time REQUEST: fresh it
+      # is nil (the box renders unchecked), the form value survives assignment
+      # for the create path to read out of attr, and neither costs a wire
+      # round trip. The write itself rides the cluster-role request
+      # (set_cluster_virtual_machine_role_auto_failback), never this model.
+      # Without it the create form 500s at render for every compute resource:
+      # the fog Server has no such attribute of its own.
+      attr_accessor :auto_failback
+
       def select_nic(fog_nics, nic)
         nic_attrs = nic.compute_attributes
 
