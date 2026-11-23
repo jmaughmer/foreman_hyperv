@@ -229,12 +229,15 @@ class HypervEnablementTest < ActiveSupport::TestCase
   def test_the_capability_list_is_fogs_set_split_between_enablement_and_opt_in
     # Fog's CAPABILITIES is the union of two plugin-side kinds: the enablement
     # six — the era partnership every unlocked operation runs on — and, since
-    # PLG-30, one opt-in entry (:cluster_role_failback) that gates a single
-    # setting and its column word, not the era. The equality is pinned whole:
+    # PLG-30, opt-in entries that gate one setting each and their column
+    # words, not the era: :cluster_role_failback joined first, and PLG-31b's
+    # :cluster_role_owner_nodes (the preferred-owners read and its row)
+    # joins the same side, for the same reason. The equality is pinned whole:
     # a new fog behaviour has to join one side of this line on purpose, never
-    # by accident (this is that line moving for PLG-30).
+    # by accident (this is that line moving again).
     assert_equal Fog::Hyperv::CAPABILITIES.sort,
-                 (ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.keys + [:cluster_role_failback]).sort
+                 (ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.keys +
+                   [:cluster_role_failback, :cluster_role_owner_nodes]).sort
   end
 
   def test_enablement_stands_when_the_fog_answers_all_six
