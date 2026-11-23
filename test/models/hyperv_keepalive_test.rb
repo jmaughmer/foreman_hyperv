@@ -156,6 +156,20 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     pipeline.take_rows
   end
 
+  # DB-backed selections need a user with rights: the harness default cannot
+  # even set these attributes (Foreman answers with its permission message,
+  # and create! returns an unsaved record). The migrated-but-unseeded test
+  # DB has no admin, so the test provides one — transactional, like the rows.
+  setup do
+    # User.current starts nil in this harness, and creating an admin needs a
+    # current user allowed to grant admin flags.
+    User.current = User.anonymous_admin
+    User.current = User.unscoped.find_by(login: 'admin') ||
+                   User.create!(login: 'admin', admin: true, firstname: 'Test',
+                                lastname: 'Admin', mail: 'admin@test.local',
+                                password: 'keepalive-test-password')
+  end
+
   def teardown
     ForemanHyperv::Keepalive.reset_state
   end
@@ -190,6 +204,25 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     assert_equal 0, cr.client_fog.nodes_calls
   end
 
+  # Replace Keepalive.tick_one for the duration of the block with a recorder
+  # (singleton redefinition — the mechanism proven on this harness). Mocha
+  # DOES NOT SUPPORT A BLOCK ON stubs: obj.stubs(:m) { ... } silently ignores
+  # the block and returns nil (discovered the hard way here — a tick recorder
+  # that "never fired" was actually a stub whose block never ran). Records
+  # the instances it saw and answers with impl (default: every tick ok).
+  def stub_ticks(seen, impl = nil)
+    outer = ForemanHyperv::Keepalive
+    outer.singleton_class.send(:alias_method, :__p34_orig_tick__, :tick_one)
+    outer.singleton_class.send(:define_method, :tick_one) do |cr|
+      seen << cr
+      impl ? impl.call(cr) : true
+    end
+    yield seen
+  ensure
+    outer.singleton_class.send(:alias_method, :tick_one, :__p34_orig_tick__)
+    outer.singleton_class.send(:remove_method, :__p34_orig_tick__)
+  end
+
   # ---- 2: selection, and one tick per enabled resource ----
 
   def create_cr(name:, keepalive:)
@@ -201,21 +234,20 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     on = create_cr(name: 'ka-on', keepalive: true)
     create_cr(name: 'ka-off', keepalive: false)
     seen = []
-    ForemanHyperv::Keepalive.stubs(:tick_one) { |cr| seen << cr.id; true }
+    ticked_ids = nil
+    stub_ticks(seen) { ticked_ids = ForemanHyperv::Keepalive.tick_all }
 
-    ticked_ids = ForemanHyperv::Keepalive.tick_all
-
-    assert_equal [on.id], seen, 'ON ticks; OFF never gets dialled'
+    assert_equal [on.id], seen.map(&:id), "ON ticks; OFF never gets dialled (seen=#{seen.map(&:id).inspect})"
     assert_equal [on.id], ticked_ids, 'tick_all reports what it actually ticked'
   end
 
   def test_each_tick_runs_on_a_freshly_loaded_resource
     on = create_cr(name: 'ka-fresh', keepalive: true)
     seen = []
-    ForemanHyperv::Keepalive.stubs(:tick_one) { |cr| seen << cr; true }
-
-    ForemanHyperv::Keepalive.tick_all
-    ForemanHyperv::Keepalive.tick_all
+    stub_ticks(seen) do
+      ForemanHyperv::Keepalive.tick_all
+      ForemanHyperv::Keepalive.tick_all
+    end
 
     assert_equal 2, seen.size
     refute_same seen.first, seen.second,
@@ -241,7 +273,7 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
 
     warns = nil
     ok = nil
-    capture_warns { ok = ForemanHyperv::Keepalive.tick_one(cr) }
+    warns = capture_warns { ok = ForemanHyperv::Keepalive.tick_one(cr) }
 
     assert_equal false, ok, 'a tick that cannot answer is reported, never re-raised'
     assert_equal 1, warns.count { |m| m.include?('keepalive') && m.include?('ka-boom') },
@@ -251,13 +283,12 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
   def test_one_clusters_failure_cannot_hold_the_next_cluster_hostage
     boom = create_cr(name: 'ka-boom', keepalive: true)
     fine = create_cr(name: 'ka-fine', keepalive: true)
-    ForemanHyperv::Keepalive.stubs(:tick_one) do |cr|
-      cr.id == boom.id ? false : true
-    end
-
-    ticked = ForemanHyperv::Keepalive.tick_all
+    seen = []
+    ticked = nil
+    stub_ticks(seen, ->(cr) { cr.id != boom.id }) { ticked = ForemanHyperv::Keepalive.tick_all }
 
     assert_equal [fine.id], ticked, 'the failing cluster drops out; the tick moves on'
+    assert_equal [boom.id, fine.id], seen.map(&:id), 'both were attempted, in id order'
   end
 
   def test_repeats_of_the_same_failure_warn_at_most_once_per_warn_window
@@ -320,7 +351,7 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
 
     connection.stubs(:select_value).returns(true)
     connection.expects(:select_value).with { |sql| sql.include?('pg_advisory_unlock') }.returns(true)
-    assert_equal :done, ForemanHyperv::Keepalive.with_single_runner { :done }
+    assert_equal :done, ForemanHyperv::Keepalive.with_single_runner { ran = true; :done }
     assert ran
   end
 
