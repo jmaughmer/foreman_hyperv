@@ -1470,8 +1470,15 @@ module ForemanHyperv
     # instance (one page load). A pipeline that cannot start is nil, and a nil
     # pipeline is today's sequential page, verbatim — no read is lost, only
     # the overlap is given up.
+    #
+    # PLG-33c: the block is the fourth hop's body — the cluster role listing,
+    # which the pipeline starts on its own fresh client the moment the probe
+    # answers CLUSTER. The role index built at render consumes that answer;
+    # the page never dials a second probe or a second roles read for it.
     def launch_listing_pipeline
-      @listing_pipeline = ListingPipeline.start(self)
+      @listing_pipeline = ListingPipeline.start(self) do |roles_client|
+        pipelined_role_read(roles_client)
+      end
     end
 
     def client
@@ -2468,15 +2475,20 @@ module ForemanHyperv
     def build_cluster_role_index
       return :unsupported unless client.respond_to?(:cluster_virtual_machine_roles) &&
                                  client.respond_to?(:supports_clusters?)
+
+      # PLG-33c: a listing in flight started this read the moment its probe
+      # answered CLUSTER. That YES is the membership answer — PLG-35's
+      # confirmation exists for a flapped NO, and a flapped no never started
+      # a lane — so the lane's array, even an empty one, builds the index
+      # with ZERO reads on the resource's own client. No lane (no listing, a
+      # stand-alone gate, a failed lane) runs the sequential path below
+      # verbatim, retry and all.
+      lane = take_pipelined_role_read
+      return index_cluster_roles(lane) if lane
+
       return :not_a_cluster unless cluster_membership_confirmed?
 
-      roles = read_cluster_roles
-      roles.each_with_object({}) do |role, index|
-        role_id = role.respond_to?(:virtual_machine_id) ? role.virtual_machine_id : nil
-        index[role_id.to_s.downcase] = role if role_id.present?
-        role_name = role.respond_to?(:name) ? role.name.to_s : ''
-        index[role_name] = role if role_name.start_with?(ROLE_NAME_PREFIX)
-      end
+      index_cluster_roles(read_cluster_roles)
     rescue StandardError => e
       # "Could not answer" stays its own answer — see vm_registration. A
       # probe that RAISES (a fog outside this fork's swallow-everything
@@ -2484,6 +2496,41 @@ module ForemanHyperv
       logger.warn "The instance list could not read cluster roles for #{name}: " \
                   "#{e.class}: #{e.message.to_s.lines.first.to_s.strip}"
       nil
+    end
+
+    # PLG-33c: the lane's roles, or nil for "no lane" (never started — the
+    # common no-listing case — or already claimed). A lane that FAILED is
+    # named once with its own words, then answers nil so the sequential path
+    # runs: the operator sees the pipelined read failed, and the page still
+    # gets the retry the sequential path has always had.
+    def take_pipelined_role_read
+      return nil unless instance_variable_defined?(:@listing_pipeline) && @listing_pipeline
+
+      @listing_pipeline.take_role_lane
+    rescue StandardError => e
+      logger.warn "The pipelined cluster role read for #{name} failed " \
+                  "(#{e.class}: #{e.message.to_s.lines.first.to_s.strip}); reading cluster roles synchronously"
+      nil
+    end
+
+    # The lane's read body (PLG-33c): the roles listing on the pipeline's
+    # OWN fresh client — the one-client-one-thread WinRM rule the whole
+    # pipeline holds — normalized exactly like the sequential read so both
+    # paths hand index_cluster_roles the same shape.
+    def pipelined_role_read(roles_client)
+      Array(roles_client.cluster_virtual_machine_roles.all).flatten.compact
+    end
+
+    # Roles keyed by BOTH identities that name a machine — the shared body
+    # of the lane-delivered and the sequential index, so the two paths can
+    # never drift (see cluster_role_index for why both keys exist).
+    def index_cluster_roles(roles)
+      roles.each_with_object({}) do |role, index|
+        role_id = role.respond_to?(:virtual_machine_id) ? role.virtual_machine_id : nil
+        index[role_id.to_s.downcase] = role if role_id.present?
+        role_name = role.respond_to?(:name) ? role.name.to_s : ''
+        index[role_name] = role if role_name.start_with?(ROLE_NAME_PREFIX)
+      end
     end
 
     # A false from the membership probe is confirmed by ONE more probe a
