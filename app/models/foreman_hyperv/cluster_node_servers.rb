@@ -28,6 +28,11 @@ module ForemanHyperv
   # reports; answering the other nodes' rows instead would print a page that
   # looks complete and is not.
   class ClusterNodeServers
+    # The reads run concurrently, but WinRM caps shells per user and a large
+    # cluster must not stampede it; the bound is also what the test suite
+    # pins, so it is part of the contract, not a tuning detail.
+    MAX_CONCURRENT_NODE_READS = 8
+
     def initialize(compute_resource)
       @cr = compute_resource
     end
@@ -44,10 +49,9 @@ module ForemanHyperv
       names = node_names
       return endpoint_vms(filters) if names.nil?
 
-      endpoint = endpoint_vms(filters)
       seen = {}
       rows = []
-      yield_sources(names, filters, endpoint) do |vms|
+      yield_sources(names, filters) do |vms|
         vms.each do |vm|
           id = vm.id.to_s.downcase
           key = id.presence || :"unnamed-#{rows.size}"
@@ -95,21 +99,92 @@ module ForemanHyperv
     # URL the resource was built with, and the endpoint read above already
     # covers it — asking the ladder too would spend a second WinRM round trip
     # on the same answer.
-    def yield_sources(names, filters, endpoint)
-      yield endpoint
+    #
+    # PLG-33: the reads are independent and each touches exactly one fog
+    # client, so they run concurrently — the sequential ladder measured ~10 s
+    # of the ~13.5 s an idle three-node page costs. The per-node clients are
+    # still RESOLVED on this thread (composition is fail-soft and the
+    # resource's client memo is not thread-safe); the threads only perform
+    # the reads. Answers are yielded here in the classic order — endpoint
+    # first, then the other nodes in the order the cluster names them — so
+    # the join's contract never depends on thread timing. A node's failure is
+    # fail-soft exactly as before; the endpoint's own failure is re-raised
+    # raw on this thread, because answering with the other nodes' rows would
+    # print a page that looks complete and is not.
+    def yield_sources(names, filters)
+      sources = sources_for(names, filters)
+      answers = read_concurrently(sources)
+      raise answers.first[:error] if answers.first[:error]
+
+      answers.each { |answer| yield answer[:vms] }
+    end
+
+    # The sources in yielded order: the endpoint's own read first, then one
+    # read per other node, each bound to the client the ladder resolved for
+    # that node on THIS thread. A node whose client cannot be composed costs
+    # its rows and warns, exactly as a node whose read fails does.
+    def sources_for(names, filters)
+      sources = [{ node: nil, read: -> { endpoint_vms(filters) } }]
       own = @cr.send(:endpoint_host_name)
       names.each do |node|
         next if own.present? && node.casecmp?(own)
 
         begin
-          yield Array(@cr.send(:client_for_node, node).servers.all(filters)).flatten.compact
+          node_client = @cr.send(:client_for_node, node)
         rescue StandardError => e
-          # Fail-soft per node, and loud: the rows that exist still print, and
-          # the log names the node whose machines are missing from the page.
-          Rails.logger.warn "Hyper-V node #{node} of cluster #{@cr.name} did not answer the " \
-                            "instance listing: #{e.class}: #{e.message.to_s.lines.first.to_s.strip}"
+          log_node_failure(node, e)
+          next
+        end
+        sources << { node: node, read: -> { Array(node_client.servers.all(filters)).flatten.compact } }
+      end
+      sources
+    end
+
+    # Runs the reads on a bounded pool (WinRM caps shells per user) and
+    # returns the answers in source order. Each thread touches exactly one
+    # fog client, so the one-connection-per-client rule holds by
+    # construction; the endpoint's refusal is stashed and re-raised on the
+    # caller's thread. An exception the inner rescue does not cover escapes
+    # through join, raw.
+    def read_concurrently(sources)
+      answers = Array.new(sources.size) { { vms: [] } }
+      queue = Queue.new
+      sources.each_with_index { |source, index| queue << [index, source] }
+      workers = [sources.size, MAX_CONCURRENT_NODE_READS].min.times.map do
+        Thread.new do
+          until (item = pop_drain(queue)).nil?
+            index, source = item
+            answers[index] =
+              begin
+                { vms: source[:read].call }
+              rescue StandardError => e
+                if index.zero?
+                  { error: e }
+                else
+                  log_node_failure(source[:node], e)
+                  { vms: [] }
+                end
+              end
+          end
         end
       end
+      workers.each(&:join)
+      answers
+    end
+
+    # Non-blocking pop: ThreadError means drained for good, because every
+    # source is queued before the first worker starts.
+    def pop_drain(queue)
+      queue.pop(true)
+    rescue ThreadError
+      nil
+    end
+
+    # Fail-soft per node, and loud: the rows that exist still print, and the
+    # log names the node whose machines are missing from the page.
+    def log_node_failure(node, error)
+      Rails.logger.warn "Hyper-V node #{node} of cluster #{@cr.name} did not answer the " \
+                        "instance listing: #{error.class}: #{error.message.to_s.lines.first.to_s.strip}"
     end
   end
 end
