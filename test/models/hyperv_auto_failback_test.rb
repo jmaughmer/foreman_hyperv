@@ -53,7 +53,7 @@ class HypervAutoFailbackTest < ActiveSupport::TestCase
     end
 
     def methods_of(service_tag)
-      entries.select { |e| e[:service] == service_tag }.map { |e| e[:method] }
+      entries.filter_map { |e| e[:method] if e[:service] == service_tag }
     end
   end
 
@@ -63,7 +63,7 @@ class HypervAutoFailbackTest < ActiveSupport::TestCase
   # so "the refused write rolled the strand back" is an observable fact.
   class FailbackVm
     attr_accessor :switch_name_resolver
-    attr_reader :id, :name, :computer_name, :new_attributes
+    attr_reader :id, :name, :computer_name, :new_attributes, :destroyed, :stopped
 
     def initialize(attributes, answer_name, log)
       @new_attributes = (attributes || {}).dup
@@ -75,8 +75,6 @@ class HypervAutoFailbackTest < ActiveSupport::TestCase
       @stopped = false
       @destroyed = false
     end
-
-    attr_reader :destroyed, :stopped
 
     def create(**_attrs)
       @computer_name = @answer_name
@@ -420,8 +418,8 @@ class HypervAutoFailbackTest < ActiveSupport::TestCase
 
       assert_nil registration.auto_failback
       assert_not_includes registration.label, 'failback',
-                           'failback is a property of a cluster role; rows without one have nothing ' \
-                           'to report and must not look half-filled'
+                          'failback is a property of a cluster role; rows without one have nothing ' \
+                          'to report and must not look half-filled'
     end
   end
 end

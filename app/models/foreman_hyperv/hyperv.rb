@@ -1293,9 +1293,8 @@ module ForemanHyperv
         # the field; either absence answers nil, which the label renders as
         # silence — never as off. This stays a display join: nothing on the
         # destructive side reads it.
-        failback = if cluster_failback_supported? && role.respond_to?(:auto_failback)
-                     role.auto_failback
-                   end
+        reported = cluster_failback_supported? && role.respond_to?(:auto_failback)
+        failback = reported ? role.auto_failback : nil
         return Registration.new(state: :clustered, owner_node: role.owner_node,
                                 cluster_name: endpoint_cluster&.name, auto_failback: failback)
       end
