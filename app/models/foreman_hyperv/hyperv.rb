@@ -341,26 +341,33 @@ module ForemanHyperv
     NODE_ENDPOINT_REFUSAL = 'Refusing to reach a cluster node through %<endpoint>s: the composed ' \
                             'per-node endpoint uses a transport the (w) matrix did not validate. Only ' \
                             'http, and https with a certificate-verifiable name and a ' \
-                            'hyperv_ca_trust_path, are composed. No node operation was attempted.'
+                            'hyperv_ca_trust_path or the hyperv_ssl_verify opt-out, are composed. ' \
+                            'No node operation was attempted.'
 
     # PLG-5b, row (w): HTTPS-NEG-IP was the measured dead end — an IPv4
-    # identity gives the node certificate no hostname to verify against, and
-    # the fix (ssl_verify false) is exactly what this plugin refuses to force
-    # on an operator. The refusal says so.
+    # identity gives the node certificate no hostname to verify against.
+    # PLG-32 hands the fix to the operator: the refusal fired while
+    # verification is ON names hyperv_ssl_verify as the lever, so the text
+    # never sells a dead end that a checkbox now opens.
     NODE_TLS_IP_REFUSAL = 'Refusing to reach %<endpoint>s over https: an IPv4 identity gives the ' \
                           'certificate no hostname to verify against (the (w) transport matrix found ' \
-                          'no hostname-verified path to an IP endpoint, and forcing certificate ' \
-                          'verification off is not this plugin’s choice). A hyperv_node_overrides ' \
-                          'entry naming the node carries the composition. No node operation was ' \
-                          'attempted.'
+                          'no hostname-verified path to an IP endpoint). A hyperv_node_overrides ' \
+                          'entry naming the node with a verifiable hostname composes, or the ' \
+                          'hyperv_ssl_verify opt-out composes it as it stands — verification off is ' \
+                          'the operator’s deliberate choice, never this plugin’s. No node operation ' \
+                          'was attempted.'
 
     # The other half of row HTTPS-NEG-FQDN: the chain verified ONLY against
     # the explicit CA file; fog's default store does not see the system
-    # anchors on this platform (measured, (w) final rows).
+    # anchors on this platform (measured, (w) final rows). PLG-32: naming the
+    # CA file is no longer the only lever left, so the text says so.
     NODE_TLS_TRUST_REFUSAL = 'Refusing to reach %<endpoint>s over https: hyperv_ca_trust_path is ' \
                              'not set on this compute resource, so the node certificate has nothing ' \
                              'to verify against — the (w) matrix validated https only with an ' \
-                             'explicit CA trust. No node operation was attempted.'
+                             'explicit CA trust. Either name the CA file, or take the ' \
+                             'hyperv_ssl_verify opt-out — verification off is the operator’s ' \
+                             'deliberate choice, never this plugin’s. No node operation was ' \
+                             'attempted.'
 
     # PLG-5b: the address the cluster gives its own nodes is a fact with a
     # shape; anything outside the shape is REFUSED naming the node and the
@@ -1337,6 +1344,11 @@ module ForemanHyperv
       # SSLError before any composition decision was reached). Absent the
       # attribute, absent the option — the pre-PLG-5b build, verbatim.
       options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
+      # PLG-32: the opt-out ONLY — a resource that never opted out keeps the
+      # pre-PLG-32 wire byte-identical and fog's own verified default. This
+      # client runs test_connection and the cluster reads, so the opt-out has
+      # to reach it or Test Connection would contradict the checkbox.
+      options[:hyperv_ssl_verify] = false if hyperv_ssl_verify == false
       # The waits PLG-16 says on EVERY composed client — this one runs the
       # cluster reads the stalled-cold-cmdlet finding is about.
       options[:hyperv_operation_timeout] = WINRM_OPERATION_TIMEOUT
@@ -2817,12 +2829,20 @@ module ForemanHyperv
       when 'http'
         composed
       when 'https'
-        if NODE_IPV4.match?(identity_host)
-          raise ForemanHyperv::OperationRefused, format(NODE_TLS_IP_REFUSAL, endpoint: composed)
-        end
+        # PLG-32: the operator's explicit opt-out composes https for ANY
+        # identity, exactly as http does — hostname verification is the exact
+        # thing switching verification off removes, so it can no longer be the
+        # refusal's reason, and fog carries the opt-out on the wire. The
+        # scheme-sanity refusal below is NOT relaxed: the opt-out is about
+        # certificate trust, not about garbage URLs.
+        unless hyperv_ssl_verify == false
+          if NODE_IPV4.match?(identity_host)
+            raise ForemanHyperv::OperationRefused, format(NODE_TLS_IP_REFUSAL, endpoint: composed)
+          end
 
-        if hyperv_ca_trust_path.blank?
-          raise ForemanHyperv::OperationRefused, format(NODE_TLS_TRUST_REFUSAL, endpoint: composed)
+          if hyperv_ca_trust_path.blank?
+            raise ForemanHyperv::OperationRefused, format(NODE_TLS_TRUST_REFUSAL, endpoint: composed)
+          end
         end
 
         composed
@@ -2833,12 +2853,12 @@ module ForemanHyperv
 
     # A SEPARATE Fog::Compute per node (N4): hyperv_host is never passed, so
     # fog cannot compose an endpoint from it behind our back; the endpoint
-    # arrives complete. An https composition has already been refused unless
-    # a CA file was named, and fog's default trust store does not see the
-    # system anchors on this platform (row (w)), so the named file rides the
-    # option in every case. One instance per node per resource, so one
-    # connection cache per node — R22's "exactly one connection" is about
-    # THIS instance.
+    # arrives complete. An https composition arrives here only with a named CA
+    # file or under the PLG-32 opt-out (node_endpoint), and fog's default trust
+    # store does not see the system anchors on this platform (row (w)), so the
+    # named file rides the option in every case and the opt-out rides when
+    # taken. One instance per node per resource, so one connection cache per
+    # node — R22's "exactly one connection" is about THIS instance.
     def client_for_node(node_name)
       options = {
         provider: :HyperV,
@@ -2847,6 +2867,10 @@ module ForemanHyperv
         hyperv_password: password
       }
       options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
+      # PLG-32: the opt-out reaches the routed clients too — an opt-out that
+      # only relaxed the composition and not the dial would refuse nothing and
+      # still fail every read.
+      options[:hyperv_ssl_verify] = false if hyperv_ssl_verify == false
       # The same waits as the resource's own client (PLG-16): a node-routed
       # write gets the same bounded waits as the endpoint reads.
       options[:hyperv_operation_timeout] = WINRM_OPERATION_TIMEOUT

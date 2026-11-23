@@ -2,6 +2,18 @@
 <%= text_f f, :user, label: _('User') %>
 <%= password_f f, :password, label: _('Password') %>
 
+<%# PLG-32: the transport controls the plugin already honored but only the API
+    could reach. Verification stays ON by default — the (w) matrix measured
+    https as trustable only against an explicit CA file — and switching it off
+    is the operator's deliberate choice, which is exactly what the checkbox
+    makes explicit. %>
+<%= checkbox_f f, :hyperv_ssl_verify, label: _('Verify SSL certificate'),
+               help_block: _('On (the default) an https endpoint is accepted only when its certificate verifies. Off is a deliberate opt-out: the certificate is not checked, and https composes for any endpoint identity, including an IPv4 one. Ignored on http endpoints.') %>
+<%= text_f f, :hyperv_ca_trust_path, label: _('CA trust file path'),
+           help_block: _('Absolute path, on the Foreman server, to a CA certificate file that https endpoints are verified against (a bare absolute path or nothing at all — anything else is refused on save).') %>
+<%= textarea_f f, :hyperv_node_overrides, label: _('Cluster node endpoint overrides'),
+               help_block: _('One NODE = host[:port] line per cluster node this endpoint does not serve. The value is a bare host or host:port — the scheme and port come from the WinRM endpoint above.') %>
+
 <%# Currently not working due to marshaling errors %>
 <%#= checkbox_f f, :caching_enabled, :label => _("Enable Caching"),
                   :help_inline => _("Cache slow calls to Hyper-V to speed up page rendering") %>
