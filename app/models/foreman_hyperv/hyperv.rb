@@ -249,6 +249,13 @@ module ForemanHyperv
     ROLE_INDEX_READ_ATTEMPTS = 2
     ROLE_INDEX_RETRY_DELAY_SECONDS = 2
 
+    # PLG-31: the value a clustered group carries on BOTH ends of its
+    # failback window when no window is set — measured on HV-CL01 (§60,
+    # re-grounded §74) and documented by this fog's role model. Named here
+    # rather than borrowed from fog so the display reads the wire value
+    # even on a fog whose model predates that constant.
+    FAILBACK_WINDOW_DISABLED = 4_294_967_295
+
     # PLG-15b arm (a): the cluster membership read is one minimal-property WQL
     # query against the cluster's own namespace — the same fog run_wql path
     # supports_clusters? uses (which appends the `/*` grammar itself), pinned
@@ -1321,6 +1328,98 @@ module ForemanHyperv
       else
         Registration.new(state: :standalone, owner_node: reading_node(vm))
       end
+    end
+
+    # PLG-31: what the cluster will DO about a machine — failover priority,
+    # automatic failback, the failback window — for the VM detail page. The
+    # three values ride the role objects the Registration column already
+    # joins against, so the section costs the page no round trip the
+    # listing does not already pay.
+    #
+    # Display honesty, the rules the labels enforce: a documented number is
+    # shown as its documented word WITH the raw value the cluster actually
+    # answered; an undocumented number is shown raw, never mapped by guess;
+    # an attribute the cluster never sent is Unknown; and a fog without the
+    # failback contract says NOTHING about failback — the PLG-30 silence
+    # rule, because "Off" is a claim the read never made. The maps and the
+    # window sentinel are grounded against the live cluster (§74), not
+    # folklore. Nothing destructive reads any of this: the knobs are changed
+    # in Failover Cluster Manager until a failover-safe write path exists.
+    HASettings = Struct.new(:state, :priority, :auto_failback_type, :failback_window_start, :failback_window_end,
+                            keyword_init: true) do
+      def found?
+        state == :found
+      end
+
+      def priority_label
+        return nil unless found?
+
+        case priority
+        when nil then 'Unknown'
+        when 0 then 'None (0)'
+        when 1_000 then 'Low (1000)'
+        when 2_000 then 'Medium (2000)'
+        when 3_000 then 'High (3000)'
+        else priority.to_s
+        end
+      end
+
+      def auto_failback_label
+        return nil unless found?
+        return nil if auto_failback_type == :unreported
+
+        case auto_failback_type
+        when nil then 'Unknown'
+        when 0 then 'Off (0)'
+        when 1 then 'On (1)'
+        when 2 then 'On, in failback window (2)'
+        # fog's own rule for this property: 0 is off, any other value is
+        # some flavour of on — so an unmapped nonzero says On, with its raw
+        # value beside it for the operator to see the map did not know it.
+        else "On (#{auto_failback_type})"
+        end
+      end
+
+      def failback_window_label
+        return nil unless found?
+        return nil if failback_window_start == :unreported
+
+        if failback_window_start.nil? || failback_window_end.nil?
+          'Unknown'
+        elsif failback_window_start == ForemanHyperv::Hyperv::FAILBACK_WINDOW_DISABLED ||
+              failback_window_end == ForemanHyperv::Hyperv::FAILBACK_WINDOW_DISABLED
+          'None'
+        else
+          # The sentinel's meaning is measured; the pair's UNIT is not —
+          # so a real window renders exactly what the cluster said.
+          "#{failback_window_start}\u2013#{failback_window_end} (raw cluster values)"
+        end
+      end
+    end
+
+    # See HASettings. Public because the VM detail view calls it with the
+    # compute resource as receiver, exactly like vm_registration. The lookups
+    # and the index states are the Registration column's own: a machine with
+    # no id, a machine the index does not carry, and a cluster that could not
+    # answer (nil, :unsupported, :not_a_cluster) all answer :not_found, which
+    # renders the section as silence. The failback pair is gated on the fog
+    # contract; priority predates that contract and shows regardless.
+    def cluster_ha_settings(vm)
+      return HASettings.new(state: :not_found) if vm.id.blank?
+
+      roles = cluster_role_index
+      return HASettings.new(state: :not_found) if roles.nil? || roles == :unsupported || roles == :not_a_cluster
+
+      role = roles[vm.id.to_s.downcase] || roles["#{ROLE_NAME_PREFIX}#{vm.name}"]
+      return HASettings.new(state: :not_found) unless role
+
+      attrs = role.respond_to?(:attributes) ? role.attributes : {}
+      reported = cluster_failback_supported? && role.respond_to?(:auto_failback_type)
+      HASettings.new(state: :found,
+                     priority: attrs[:priority],
+                     auto_failback_type: reported ? attrs[:auto_failback_type] : :unreported,
+                     failback_window_start: reported ? attrs[:failback_window_start] : :unreported,
+                     failback_window_end: reported ? attrs[:failback_window_end] : :unreported)
     end
 
     # PLG-29b: on a cluster, the instance list is the CLUSTER's inventory.
