@@ -143,6 +143,12 @@ class HypervParallelNodeListingTest < ActiveSupport::TestCase
     cr = CrWithNodes.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.node_fogs = node_fogs
     cr.stubs(:client).returns(fog)
+    # PLG-33b: the pipeline composes its own endpoint clients; in these faked
+    # suites it must arrive at the SAME fog double, or the speculative reads
+    # dial real fog while every assertion watches this one. The read-count,
+    # order and bound assertions are untouched — the pipeline only changes
+    # WHEN these same reads happen, and they stay counted.
+    cr.stubs(:fresh_endpoint_client).returns(fog)
     cr
   end
 

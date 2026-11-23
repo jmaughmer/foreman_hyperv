@@ -33,8 +33,14 @@ module ForemanHyperv
     # pins, so it is part of the contract, not a tuning detail.
     MAX_CONCURRENT_NODE_READS = 8
 
-    def initialize(compute_resource)
+    # PLG-33b: +pipeline+ carries the endpoint-side reads the request already
+    # started (the node list, the endpoint's rows) and hands them to the
+    # listing that was always going to make them. Direct instantiation — every
+    # existing caller and test — passes no pipeline and reads exactly as
+    # PLG-33 left it.
+    def initialize(compute_resource, pipeline: nil)
       @cr = compute_resource
+      @pipeline = pipeline
     end
 
     # The union, endpoint node first: a machine the endpoint answers for keeps
@@ -74,18 +80,31 @@ module ForemanHyperv
 
     private
 
-    # The endpoint's answer, unsaftened — see the class doc.
+    # The endpoint's answer, unsaftened — see the class doc. PLG-33b: the
+    # page's plain listing ({}, the shape the request started) consumes the
+    # speculative endpoint read; a filtered listing re-reads with its filters
+    # through the resource's client — a speculative read made without them can
+    # never answer with them, and a second live read costs one warm round trip
+    # on the rare path that asks for one. A speculative read already taken (a
+    # second listing on the same request) likewise re-reads live.
     def endpoint_vms(filters)
-      Array(@cr.send(:client).servers.all(filters)).flatten.compact
+      raw = filters.empty? ? @pipeline&.take_rows : nil
+      raw = @cr.send(:client).servers.all(filters) if raw.nil?
+      Array(raw).flatten.compact
     end
 
     # The cluster's own node list, asked once per listing. Answered nil when
     # the fog cannot be asked at all: the degradation is then exactly the
-    # pre-PLG-29b answer (the endpoint's rows), not a raised page.
+    # pre-PLG-29b answer (the endpoint's rows), not a raised page. PLG-33b:
+    # the request's speculative read answers it when it is still unclaimed —
+    # the filters never apply to the node list, and a consumed failure
+    # re-raises HERE, into the same rescue, so the operator sees the same
+    # "could not be read" line and the page degrades the same way.
     def node_names
       @node_names ||= begin
-        names = Array(@cr.send(:client).cluster_nodes).map { |node| node.name.to_s.strip }.reject(&:empty?)
-        names.presence
+        raw = @pipeline&.take_nodes
+        raw = @cr.send(:client).cluster_nodes if raw.nil?
+        Array(raw).map { |node| node.name.to_s.strip }.reject(&:empty?).presence
       rescue StandardError => e
         Rails.logger.warn "Hyper-V cluster node list for #{@cr.name} could not be read: " \
                           "#{e.class}: #{e.message.to_s.lines.first.to_s.strip}"
