@@ -26,7 +26,16 @@ require 'test_helper'
 #   4. the guards: the interval reader clamps garbage to the frozen band,
 #      the advisory lock makes the tick single-runner across Foreman's own
 #      processes (a holder that cannot lock does nothing), and the scheduler
-#      thread is not started in the test environment.
+#      thread is not started in the test environment;
+#   5. the PLG-34b per-beat ELECTION: one beat per interval epoch across all
+#      of Foreman's processes (Pass 70 proved every booted process carries a
+#      thread and each beats at its own phase). The winner acquires
+#      pg_try_advisory_lock(KEY, epoch) — a session lock bucketed by
+#      (now / interval) — and HOLDS it until the epoch moves; losers beat
+#      nothing and wake once a second to try the next bucket; losing the lock
+#      (connection reaped) re-elects with no beat skipped; a non-Postgres
+#      deployment never lets the election silence beats. B1: the default
+#      interval is 60 s, the clamp band 60–3600 is unchanged.
 class HypervKeepaliveTest < ActiveSupport::TestCase
   HOST = 'hv-node1'
   CR_URL = "http://#{HOST}:5985/wsman".freeze
@@ -345,7 +354,10 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     # holds, because an admin can type anything.
     stubs = { nil: nil, blank: '', text: 'abc', symbol: :thinking,
               zero: 0, negative: -5, fast: 30, huge: 99_999, stringy: '300', good: 300 }
-    expected = { nil: 300, blank: 300, text: 300, symbol: 300,
+    # PLG-34b B1: the DEFAULT fell 300 -> 60, so every garbage row now lands
+    # on 60 (which is also the band floor — double-pinned). Real values in
+    # the band still pass through untouched.
+    expected = { nil: 60, blank: 60, text: 60, symbol: 60,
                  zero: 60, negative: 60, fast: 60, huge: 3_600, stringy: 300, good: 300 }
     expected.each do |key, want|
       Foreman.settings.stubs(:[]).with(:hyperv_keepalive_interval_seconds).returns(stubs[key])
@@ -386,5 +398,177 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
 
     assert_nil ForemanHyperv::Keepalive.thread,
                'the suite stays deterministic: the tick loop is a production creature'
+  end
+
+  # ---- 5: PLG-34b, the per-beat election ----
+
+  # A scripted stand-in for the AR connection the election talks to. Blocks
+  # on mocha stubs are IGNORED by this harness's mocha 2.x (the PLG-34 tick
+  # recorder learned that the hard way), so per-phase behavior is mutable
+  # attributes on a real object, not stub blocks. The election speaks
+  # TWO-key advisory SQL (resource key + epoch bucket); the tick-
+  # serialization lock stays one-key and is answered true here because
+  # these tests are about the election.
+  class ElectionConnection
+    attr_reader :locks, :unlocks, :select_calls
+    attr_accessor :adapter, :try_two, :unlock
+
+    def initialize(adapter: 'PostgreSQL')
+      @adapter = adapter
+      @locks = []
+      @unlocks = []
+      @select_calls = 0
+      @try_two = true
+      @unlock = true
+    end
+
+    def adapter_name
+      @adapter
+    end
+
+    def select_value(sql)
+      @select_calls += 1
+      case sql
+      when /pg_try_advisory_lock\((\d+),\s*(\d+)\)/
+        @locks << [Regexp.last_match(1).to_i, Regexp.last_match(2).to_i]
+        @try_two
+      when /pg_advisory_unlock\((\d+),\s*(\d+)\)/
+        @unlocks << [Regexp.last_match(1).to_i, Regexp.last_match(2).to_i]
+        @unlock
+      else
+        true
+      end
+    end
+  end
+
+  def election_connection(adapter: 'PostgreSQL')
+    # A dedicated seam (not ActiveRecord::Base.connection): the User lookup
+    # inside tick_all's as_anonymous_admin resolves through the Base
+    # connection too, so stubbing that would starve the real selection of
+    # its adapter. election_connection is the ONLY thing the scheduler asks
+    # the database layer for.
+    conn = ElectionConnection.new(adapter: adapter)
+    ForemanHyperv::Keepalive.stubs(:election_connection).returns(conn)
+    conn
+  end
+
+  ELECT_BASE = 1_800_000_000 # deterministic wall clock; the epoch is base/interval
+
+  def test_a_thread_that_does_not_own_the_current_epoch_beats_nothing
+    create_cr(name: 'ka-elect-loser', keepalive: true)
+    connection = election_connection
+    connection.try_two = false # another process already won this epoch
+    seen = []
+    ticked = nil
+    outcome = nil
+
+    stub_ticks(seen) do
+      ticked = ForemanHyperv::Keepalive.tick_all
+      outcome = ForemanHyperv::Keepalive.beat_once
+    end
+
+    assert_equal [], ticked, 'a losing tick_all reports nothing ticked'
+    assert_empty seen, 'a losing thread must not dial the nodes AT ALL'
+    assert_equal :lost, outcome, 'the loop must SEE the loss (it polls instead of sleeping)'
+  end
+
+  def test_the_winner_locks_the_epoch_once_holds_it_and_moves_only_when_the_epoch_moves
+    create_cr(name: 'ka-elect-winner', keepalive: true)
+    connection = election_connection
+    seen = []
+    key = ForemanHyperv::Keepalive::ADVISORY_LOCK_KEY
+    ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(60)
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE)
+    epoch = ELECT_BASE / 60
+
+    stub_ticks(seen) do
+      ForemanHyperv::Keepalive.tick_all
+      ForemanHyperv::Keepalive.tick_all # same epoch: already mine, tick again
+    end
+    assert_equal 2, seen.size, 'the epoch winner ticks in its own epoch'
+    assert_equal [[key, epoch]], connection.locks, 'ONE epoch-keyed acquire, no re-entrant drift'
+    assert_empty connection.unlocks, 'the winner HOLDS the bucket while the epoch stands (the heartbeat row)'
+
+    # The epoch turns over: the old bucket is released and the new one won,
+    # so the pg_locks objid advances by exactly one — the operator readout.
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 60)
+    stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
+    assert_equal 3, seen.size
+    assert_equal [[key, epoch], [key, epoch + 1]], connection.locks, 'the winner moves to the next bucket'
+    assert_equal [[key, epoch]], connection.unlocks, 'the expired bucket is released, not hoarded'
+  end
+
+  def test_a_winner_that_lost_its_connection_lock_beats_the_next_epoch_anyway
+    create_cr(name: 'ka-elect-reclaim', keepalive: true)
+    connection = election_connection
+    seen = []
+    ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(60)
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE)
+
+    stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
+    assert_equal 1, seen.size, 'wins the epoch and ticks'
+
+    # The pool reaper claims the connection mid-sleep and the session lock
+    # dies with it: the next wake sees unlock answer FALSE (not mine
+    # anymore), which is only information — the new bucket is tried like
+    # any other and won. A lost lock costs zero beats.
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 60)
+    connection.unlock = false
+    stub_ticks(seen) { assert_equal :won, ForemanHyperv::Keepalive.beat_once }
+    assert_equal 2, seen.size, 're-election after lock loss ticks, never skips'
+  end
+
+  def test_losing_one_epoch_skips_exactly_that_beat_and_the_next_is_winnable
+    create_cr(name: 'ka-elect-skip', keepalive: true)
+    connection = election_connection
+    seen = []
+    ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(60)
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE)
+
+    stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
+    assert_equal 1, seen.size
+
+    # Another process already won the NEXT bucket: this thread reports lost
+    # and dials nothing (its 1-s poll wakes it for the bucket after).
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 60)
+    connection.try_two = false
+    stub_ticks(seen) { assert_equal :lost, ForemanHyperv::Keepalive.beat_once }
+    assert_equal 1, seen.size, 'the epoch owner dials; the loser does not'
+
+    # The owner releases when ITS epoch moves: this thread wins the bucket
+    # after and beats. Never two skips in a row.
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 120)
+    connection.try_two = true
+    stub_ticks(seen) { assert_equal :won, ForemanHyperv::Keepalive.beat_once }
+    assert_equal 2, seen.size, 'one lost epoch, then beats resume'
+  end
+
+  def test_a_non_postgres_deployment_never_lets_the_election_silence_the_beats
+    cr = create_cr(name: 'ka-elect-nopg', keepalive: true)
+    connection = election_connection(adapter: 'SQLite')
+    seen = []
+    ticked = nil
+    stub_ticks(seen) { ticked = ForemanHyperv::Keepalive.tick_all }
+
+    assert_equal [cr.id], ticked, 'election unavailable means EVERY thread beats, never zero'
+    assert_equal 1, seen.size
+    assert_equal 0, connection.select_calls, 'no advisory SQL of any kind runs off Postgres'
+  end
+
+  def test_the_loser_polls_once_a_second_and_the_winner_sleeps_the_interval
+    assert_equal 1, ForemanHyperv::Keepalive::LOSER_POLL_SECONDS
+    ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(120)
+
+    assert_equal 1, ForemanHyperv::Keepalive.sleep_seconds_after(:lost)
+    assert_equal 120, ForemanHyperv::Keepalive.sleep_seconds_after(:won)
+    assert_equal 120, ForemanHyperv::Keepalive.sleep_seconds_after(:unknown),
+                 'anything but an observed loss waits the full interval'
+  end
+
+  def test_the_b1_defaults_are_sixty_seconds_and_the_band_is_untouched
+    assert_equal 60, ForemanHyperv::Keepalive::DEFAULT_INTERVAL,
+                 'PLG-34b B1: new installs beat every 60 s (warmth decays under 300 s — Pass 70)'
+    assert_equal 60, ForemanHyperv::Keepalive::MIN_INTERVAL, 'the clamp floor stays 60'
+    assert_equal 3_600, ForemanHyperv::Keepalive::MAX_INTERVAL, 'the clamp ceiling stays 3600'
   end
 end
