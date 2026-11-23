@@ -19,10 +19,42 @@ module ForemanHyperv
           # hardened per-node compositions verify against.
           # PLG-32: hyperv_ssl_verify joins them — the deliberate, per-resource
           # opt-out of certificate verification on an https endpoint.
+          # PLG-34: hyperv_keepalive joins them — the per-resource opt-in to
+          # the scheduled warm-the-hops tick.
           parameter_filter ComputeResource, :url, :user, :password, :hyperv_node_overrides,
-                           :hyperv_ca_trust_path, :hyperv_ssl_verify
+                           :hyperv_ca_trust_path, :hyperv_ssl_verify, :hyperv_keepalive
+
+          # PLG-34: ONE global interval for every enabled resource (the
+          # per-cluster column stays a plain on/off — per-cluster intervals
+          # mostly invite tuning drift). The reader in
+          # ForemanHyperv::Keepalive clamps whatever this holds into 60–3600.
+          settings do
+            category(:hyperv, N_('Hyper-V')) do
+              setting(:hyperv_keepalive_interval_seconds,
+                      type: :integer,
+                      default: 300,
+                      full_name: N_('Hyper-V keepalive interval'),
+                      description: N_('Seconds between keepalive ticks for Hyperv compute ' \
+                                      'resources that have keepalive enabled. The effective ' \
+                                      'value is clamped to 60-3600. A tick replays one page ' \
+                                      'load of endpoint reads so the next human load is warm.'))
+            end
+          end
         end
       end
+    end
+
+    # PLG-34: start the keepalive scheduler. One named thread, in-process;
+    # the beat itself is guarded by a Postgres advisory lock, so N Foreman
+    # processes never double-dial the nodes. Keepalive.start! is a no-op in
+    # the test environment and under rake, so tests and migrations stay
+    # deterministic and silent. config.after_initialize (not a named
+    # initializer) is deliberate: engine initializers run before the app's
+    # autoload is resolvable (a NameError booted the app down the first
+    # time); the after_initialize hook runs after the finisher, when the
+    # engine's models load like any other.
+    config.after_initialize do
+      ForemanHyperv::Keepalive.start!
     end
 
     # Add any db migrations. Without this the app's own maintenance check sees

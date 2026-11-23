@@ -14,6 +14,13 @@
 <%= textarea_f f, :hyperv_node_overrides, label: _('Cluster node endpoint overrides'),
                help_block: _('One NODE = host[:port] line per cluster node this endpoint does not serve. The value is a bare host or host:port — the scheme and port come from the WinRM endpoint above.') %>
 
+<%# PLG-34: the opt-in to keepalive. The first read after an idle gap pays a
+    cold WinRM shell (measured 20-120 s per node); a tick replays one page
+    load of reads so a human never pays it. Off by default: the plugin does
+    not dial a node nobody asked it to keep warm. %>
+<%= checkbox_f f, :hyperv_keepalive, label: _('Keep connections warm'),
+               help_block: _('On: Foreman periodically replays one listing of endpoint reads against this resource (interval: the Hyper-V keepalive setting, default 5 minutes), so the next page load never pays a cold WinRM shell. Off (the default): nothing dials these nodes until a human asks.') %>
+
 <%# Currently not working due to marshaling errors %>
 <%#= checkbox_f f, :caching_enabled, :label => _("Enable Caching"),
                   :help_inline => _("Cache slow calls to Hyper-V to speed up page rendering") %>
