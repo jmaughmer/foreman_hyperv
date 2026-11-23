@@ -48,8 +48,12 @@ module ForemanHyperv
     # the beat itself is guarded by a Postgres advisory lock, so N Foreman
     # processes never double-dial the nodes. Keepalive.start! is a no-op in
     # the test environment and under rake, so tests and migrations stay
-    # deterministic and silent.
-    initializer 'foreman_hyperv.keepalive', after: :after_initialize do
+    # deterministic and silent. config.after_initialize (not a named
+    # initializer) is deliberate: engine initializers run before the app's
+    # autoload is resolvable (a NameError booted the app down the first
+    # time); the after_initialize hook runs after the finisher, when the
+    # engine's models load like any other.
+    config.after_initialize do
       ForemanHyperv::Keepalive.start!
     end
 
