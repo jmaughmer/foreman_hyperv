@@ -28,27 +28,37 @@ module ForemanHyperv
           # per-cluster column stays a plain on/off — per-cluster intervals
           # mostly invite tuning drift). The reader in
           # ForemanHyperv::Keepalive clamps whatever this holds into 60–3600.
+          # PLG-34b B1: the default is 60 — measured warmth decay in a real
+          # lab lands below the human-readable band well inside 300 s
+          # (Pass 70), so the beat has to be shorter than the decay. B1
+          # changes the DEFAULT only: an already-stored value (an untouched
+          # 300 or a deliberate one) is never rewritten.
           settings do
             category(:hyperv, N_('Hyper-V')) do
               setting(:hyperv_keepalive_interval_seconds,
                       type: :integer,
-                      default: 300,
+                      default: 60,
                       full_name: N_('Hyper-V keepalive interval'),
                       description: N_('Seconds between keepalive ticks for Hyperv compute ' \
                                       'resources that have keepalive enabled. The effective ' \
-                                      'value is clamped to 60-3600. A tick replays one page ' \
-                                      'load of endpoint reads so the next human load is warm.'))
+                                      'value is clamped to 60-3600. One beat per interval runs ' \
+                                      'across all Foreman processes (a Postgres advisory-lock ' \
+                                      'election). A tick replays one page load of endpoint ' \
+                                      'reads so the next human load is warm.'))
             end
           end
         end
       end
     end
 
-    # PLG-34: start the keepalive scheduler. One named thread, in-process;
-    # the beat itself is guarded by a Postgres advisory lock, so N Foreman
-    # processes never double-dial the nodes. Keepalive.start! is a no-op in
-    # the test environment and under rake, so tests and migrations stay
-    # deterministic and silent. config.after_initialize (not a named
+    # PLG-34: start the keepalive scheduler. One named thread per booted
+    # process, in-process. PLG-34b: the beat itself runs through a Postgres
+    # advisory-lock ELECTION bucketed by interval epoch, so across all N
+    # Foreman processes exactly one thread dials per interval (losers poll
+    # the next bucket at 1 s; lock loss self-heals; non-Postgres every
+    # thread beats). Keepalive.start! is a no-op in the test environment
+    # and under rake, so tests and migrations stay deterministic and silent.
+    # config.after_initialize (not a named
     # initializer) is deliberate: engine initializers run before the app's
     # autoload is resolvable (a NameError booted the app down the first
     # time); the after_initialize hook runs after the finisher, when the
