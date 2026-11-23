@@ -255,6 +255,20 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     assert_equal on.id, seen.first.id
   end
 
+  def test_a_beat_from_a_thread_with_no_current_user_still_sees_the_enabled_resources
+    on = create_cr(name: 'ka-nobody', keepalive: true)
+    seen = []
+    ticked = nil
+    User.current = nil # exactly what the scheduler thread is: no logged-in user
+    stub_ticks(seen) { ticked = ForemanHyperv::Keepalive.tick_all }
+
+    assert_equal [on.id], ticked,
+                 "User.current == nil must not silently tick NOTHING (ticked=#{ticked.inspect})"
+    assert_equal [on.id], seen.map(&:id)
+  ensure
+    User.current = User.unscoped.find_by(login: 'admin')
+  end
+
   # ---- 3: the tick never reaches a human ----
 
   CrDouble = Struct.new(:id, :name) do
