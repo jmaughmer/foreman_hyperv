@@ -64,8 +64,10 @@
           rows cost no additional cluster round trip. The word is the
           documented meaning, the number in parentheses is what the cluster
           actually answered, and the failback rows appear only when fog has
-          the contract to be asked. Display only: the knobs change in
-          Failover Cluster Manager. %>
+          the contract to be asked. PLG-31b adds the preferred owners the
+          same read now carries — the node names, or the cluster's own "no
+          restriction" answer, and never a word a failed read did not earn.
+          Display only: the knobs change in Failover Cluster Manager. %>
       <% ha = @compute_resource.cluster_ha_settings(@vm) -%>
       <% if ha.found? -%>
         <tr>
@@ -80,6 +82,12 @@
           <tr>
             <td><%= _('Failback window') %></td>
             <td><%= ha.failback_window_label %></td>
+          </tr>
+        <% end -%>
+        <% unless ha.preferred_owners_label.nil? -%>
+          <tr>
+            <td><%= _('Preferred owners') %></td>
+            <td><%= ha.preferred_owners_label %></td>
           </tr>
         <% end -%>
       <% end -%>
