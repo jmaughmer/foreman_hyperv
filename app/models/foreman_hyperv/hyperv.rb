@@ -1337,6 +1337,24 @@ module ForemanHyperv
       ClusterNodeServers.new(self, pipeline: @listing_pipeline)
     end
 
+    # PLG-34: one keepalive tick is exactly one page load's worth of endpoint
+    # reads, answers dropped. It IS the public read path — the pipeline launch
+    # inside vms, the gate, the per-node Get-VM ladder, the role index — so it
+    # composes with PLG-33b (the tick's own speculative reads are consumed by
+    # the tick's own listing, never double-dialled) and warms precisely the
+    # hops a human pays: WSMan shell allocation, PowerShell startup, the
+    # cluster cmdlets. A stand-alone tick is the endpoint branch only: the
+    # gate's probe plus the fog collection read, no node list, no roles.
+    # Hard failures RAISE to ForemanHyperv::Keepalive.tick_one, which is what
+    # rescues and throttles them; the per-node fail-soft ladder stays inside
+    # the listing, exactly as it does for a page. Called on a freshly loaded
+    # instance every tick, so every memo here dies with its tick.
+    def keepalive_tick
+      rows = vms.all
+      cluster_role_index if cluster_endpoint?
+      rows.respond_to?(:size) ? rows.size : 0
+    end
+
     protected
 
     # PLG-33b: start the speculative endpoint-side reads, once per resource
