@@ -19,6 +19,14 @@
   <% if computers.count > 1 -%>
     <%= select_f f, :computer_name, computers, :name, :name, {}, label: _('Computer Name'), disabled: !new_host, onload: 'hypervHostChange(this);', onchange: 'hypervHostChange(this);' %>
   <% end -%>
+  <%# PLG-30: create-only. Failback is a property of the cluster role, and this
+      is the one HA setting the cluster takes as a write (fog evidence §60): it
+      is applied once, after the role add is proven, and the Registration
+      column then shows whatever the cluster reports. The edit form leaves it
+      alone — the column is where the cluster's answer is read. -%>
+  <%= checkbox_f f, :auto_failback, { help_inline: _('After the machine joins the cluster, turn on automatic failback for it. The instance list shows what the cluster reports.'),
+                                      label: _('Automatic failback'),
+                                      label_size: 'col-md-2' }, 'true', 'false' if new_host -%>
 <% end -%>
 <% cluster_errors.each do |err| -%>
 <div class="alert alert-warning alert-dismissable">
