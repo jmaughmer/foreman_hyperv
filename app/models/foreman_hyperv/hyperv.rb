@@ -1246,6 +1246,21 @@ module ForemanHyperv
       end
     end
 
+    # PLG-29b: on a cluster, the instance list is the CLUSTER's inventory.
+    # Core builds it from the endpoint's fog collection, and Get-VM answers
+    # only for the machines registered on the node it ran on — a clustered
+    # machine owned by another node was invisible to the page (evidence
+    # §58/§59: the machine the PLG-28 acceptance created never appeared in
+    # the list that was meant to clean it up). Actions already route per
+    # machine through the cluster's owner answer (PLG-27); this gives the
+    # listing the same reach. A stand-alone endpoint keeps the exact
+    # pre-PLG-29b answer — the live fog collection, untouched.
+    def vms(attrs = {})
+      return client.servers(attrs) unless cluster_endpoint?
+
+      ClusterNodeServers.new(self)
+    end
+
     protected
 
     def client
