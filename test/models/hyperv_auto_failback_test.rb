@@ -407,6 +407,27 @@ class HypervAutoFailbackTest < ActiveSupport::TestCase
     assert_equal :clustered, registration.state, 'the role itself still reads as clustered'
   end
 
+  # ---- the form object: the checkbox is answered without a wire -----------------
+
+  def test_the_fog_machine_answers_the_failback_checkbox_itself_nil_and_assignable
+    # The create form renders its Automatic failback checkbox through the fog
+    # Server object (checkbox_f reads f.object.auto_failback). The cluster's
+    # REPORTED value lives on the cluster role, not on the machine — this
+    # accessor exists so the form can render a create-time request without the
+    # machine pretending to know the cluster's answer: fresh it is nil (the
+    # box renders unchecked), it survives mass assignment, and none of that
+    # costs a wire round trip. Before this accessor existed the create form
+    # 500'd for every compute resource: the fog Server simply had no such
+    # method, and the checkbox hit it at render time.
+    server = Fog::Hyperv::Compute::Server.new
+    assert_nil server.auto_failback, 'a machine that was never asked has no failback claim'
+
+    assigned = Fog::Hyperv::Compute::Server.new(auto_failback: 'true')
+    assert_equal 'true', assigned.auto_failback,
+                 'the form value survives the model, for the plugin to read out of attr — ' \
+                 'the write itself rides the cluster-role request, never the machine model'
+  end
+
   def test_the_other_registration_states_never_mention_failback
     standalone = VmDouble.new(id: 'cccc1111-2222-3333-4444-555566667777', name: 'plain.maughmer.net',
                               path: 'C:\VMs\plain.maughmer.net')
