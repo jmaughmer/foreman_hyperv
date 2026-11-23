@@ -196,7 +196,13 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     assert_equal 1, cr.pipeline_fog.rows_calls, 'the endpoint rows, once'
     assert_equal 0, cr.client_fog.nodes_calls + cr.client_fog.rows_calls,
                  'the pipeline already answered them — nothing asked twice'
-    assert_equal 1, cr.client_fog.roles_calls, 'the role index, once (the page reads it too)'
+    # PLG-33c: the page's role index now rides the pipeline's fourth hop —
+    # the roles read starts the moment this same probe answered CLUSTER — so
+    # it is counted on the pipeline client and read on NO client twice. The
+    # recipe is still exactly one page load's worth of hops, one read each.
+    assert_equal 1, cr.pipeline_fog.roles_calls, 'the role index, once (the lane answers it)'
+    assert_equal 0, cr.client_fog.roles_calls,
+                 'the page never re-asks the endpoint with its own client'
     assert_equal 1, cr.node_fogs['hv-node2'].rows_calls, 'each other node, once'
   end
 
