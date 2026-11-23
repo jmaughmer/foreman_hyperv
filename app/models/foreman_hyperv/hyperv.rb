@@ -1417,7 +1417,7 @@ module ForemanHyperv
         case preferred_node_names
         when nil then 'Unknown'
         when [] then 'Any node (no restriction)'
-        else Array(preferred_node_names).map(&:to_s).join(', ')
+        else Array(preferred_node_names).join(', ') # join stringifies each name itself
         end
       end
     end
