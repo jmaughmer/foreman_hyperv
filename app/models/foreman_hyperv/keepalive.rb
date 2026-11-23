@@ -83,20 +83,31 @@ module ForemanHyperv
       # completed without raising — a failed resource is still ticked (and
       # warned, throttled), it just is not reported as an answer. Empty
       # list, zero cost beyond one SELECT.
+      #
+      # The beat runs AS THE ANONYMOUS ADMIN, and it is load-bearing: the
+      # scheduler thread has no logged-in user, and Foreman's per-user
+      # scoping answers any model query made with User.current == nil with
+      # a (1=0) — the selection and the per-id find_by would both return
+      # nothing, and the tick would silently dial ZERO clusters forever
+      # (caught live in production, not by the suite, because every test
+      # runs as a user). A tick is "the listing an admin would see", which
+      # is exactly the context this block gives it.
       def tick_all
-        ids = ForemanHyperv::Hyperv.where(hyperv_keepalive: true).order(:id).pluck(:id)
-        return [] if ids.empty?
+        User.as_anonymous_admin do
+          ids = ForemanHyperv::Hyperv.where(hyperv_keepalive: true).order(:id).pluck(:id)
+          next [] if ids.empty?
 
-        ticked = []
-        with_single_runner do
-          ids.each do |id|
-            cr = ComputeResource.find_by(id: id)
-            next if cr.nil? # deleted between the pluck and the dial
+          ticked = []
+          with_single_runner do
+            ids.each do |id|
+              cr = ComputeResource.find_by(id: id)
+              next if cr.nil? # deleted between the pluck and the dial
 
-            ticked << id if tick_one(cr)
+              ticked << id if tick_one(cr)
+            end
           end
+          ticked
         end
-        ticked
       end
 
       # One resource, one tick, loudly once at most. The rescue is the
