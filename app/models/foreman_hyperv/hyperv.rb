@@ -1332,20 +1332,25 @@ module ForemanHyperv
 
     # PLG-31: what the cluster will DO about a machine — failover priority,
     # automatic failback, the failback window — for the VM detail page. The
-    # three values ride the role objects the Registration column already
-    # joins against, so the section costs the page no round trip the
-    # listing does not already pay.
+    # values ride the role objects the Registration column already joins
+    # against, so the section costs the page no round trip the listing does
+    # not already pay. PLG-31b adds the fourth row: the cluster's PREFERRED
+    # OWNERS for this role, which the same role read now carries.
     #
     # Display honesty, the rules the labels enforce: a documented number is
     # shown as its documented word WITH the raw value the cluster actually
     # answered; an undocumented number is shown raw, never mapped by guess;
     # an attribute the cluster never sent is Unknown; and a fog without the
-    # failback contract says NOTHING about failback — the PLG-30 silence
-    # rule, because "Off" is a claim the read never made. The maps and the
-    # window sentinel are grounded against the live cluster (§74), not
-    # folklore. Nothing destructive reads any of this: the knobs are changed
-    # in Failover Cluster Manager until a failover-safe write path exists.
+    # contract says NOTHING — the PLG-30 silence rule, because "Off" (or
+    # "Any node") is a claim the read never made. The maps and the window
+    # sentinel are grounded against the live cluster (§74), not folklore, and
+    # the owner row's three states — names, the unset [], and a failed read —
+    # are three different claims measured on HV-CL01 (§76), kept that far
+    # apart here. Nothing destructive reads any of this: the knobs are
+    # changed in Failover Cluster Manager until a failover-safe write path
+    # exists.
     HASettings = Struct.new(:state, :priority, :auto_failback_type, :failback_window_start, :failback_window_end,
+                            :preferred_node_names,
                             keyword_init: true) do
       def found?
         state == :found
@@ -1395,6 +1400,26 @@ module ForemanHyperv
           "#{failback_window_start}\u2013#{failback_window_end} (raw cluster values)"
         end
       end
+
+      # PLG-31b: the cluster's preferred owners for this role. The three
+      # states HV-CL01 answers (§76) are three different claims, and the
+      # label keeps them that far apart: a list of names is a restricted
+      # preference and says the names; [] is the cluster's own POSITIVE "no
+      # restricted list — any node may own" answer; and nil means this
+      # group's owner read FAILED, which is Unknown — never "Any node",
+      # because a read that failed cannot claim what the cluster prefers.
+      # :unreported is the fourth state, the plugin's own: a fog without
+      # the contract, and the row prints nothing (the PLG-30 silence rule).
+      def preferred_owners_label
+        return nil unless found?
+        return nil if preferred_node_names == :unreported
+
+        case preferred_node_names
+        when nil then 'Unknown'
+        when [] then 'Any node (no restriction)'
+        else Array(preferred_node_names).join(', ') # join stringifies each name itself
+        end
+      end
     end
 
     # See HASettings. Public because the VM detail view calls it with the
@@ -1402,8 +1427,9 @@ module ForemanHyperv
     # and the index states are the Registration column's own: a machine with
     # no id, a machine the index does not carry, and a cluster that could not
     # answer (nil, :unsupported, :not_a_cluster) all answer :not_found, which
-    # renders the section as silence. The failback pair is gated on the fog
-    # contract; priority predates that contract and shows regardless.
+    # renders the section as silence. The failback trio and PLG-31b's owner
+    # list are each gated on their fog contract; priority predates both
+    # contracts and shows regardless.
     def cluster_ha_settings(vm)
       return HASettings.new(state: :not_found) if vm.id.blank?
 
@@ -1415,11 +1441,17 @@ module ForemanHyperv
 
       attrs = role.respond_to?(:attributes) ? role.attributes : {}
       reported = cluster_failback_supported? && role.respond_to?(:auto_failback_type)
+      # The owner list is a FIELD of the role read, not a request of its
+      # own, so the second half of its gate is the role in hand: a fog whose
+      # constant says yes but whose model cannot answer preferred_node_names
+      # is a mismatched partner, and the row answers with silence.
+      owner_reported = cluster_owner_nodes_supported? && role.respond_to?(:preferred_node_names)
       HASettings.new(state: :found,
                      priority: attrs[:priority],
                      auto_failback_type: reported ? attrs[:auto_failback_type] : :unreported,
                      failback_window_start: reported ? attrs[:failback_window_start] : :unreported,
-                     failback_window_end: reported ? attrs[:failback_window_end] : :unreported)
+                     failback_window_end: reported ? attrs[:failback_window_end] : :unreported,
+                     preferred_node_names: owner_reported ? attrs[:preferred_node_names] : :unreported)
     end
 
     # PLG-29b: on a cluster, the instance list is the CLUSTER's inventory.
@@ -2739,6 +2771,22 @@ module ForemanHyperv
       list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
       list.include?(:cluster_role_failback) &&
         client.respond_to?(:set_cluster_virtual_machine_role_auto_failback)
+    rescue StandardError
+      false
+    end
+
+    # PLG-31b: does the installed fog carry the cluster owner-node READ —
+    # each role answering preferred_node_names? The capability constant is
+    # the whole client-side question here: unlike failback's write there is
+    # no request method to probe, because the owner list is a FIELD of the
+    # role read the plugin already performs, not an extra shell. The other
+    # half of the check lives where the roles are — cluster_ha_settings only
+    # speaks owners when the role in hand responds to preferred_node_names,
+    # which catches the mismatched partner a constant alone would bless.
+    # A raise is an unanswered question, same rule as every gate beside it.
+    def cluster_owner_nodes_supported?
+      list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
+      list.include?(:cluster_role_owner_nodes)
     rescue StandardError
       false
     end
