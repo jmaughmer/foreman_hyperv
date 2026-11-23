@@ -1322,38 +1322,62 @@ module ForemanHyperv
     # machine through the cluster's owner answer (PLG-27); this gives the
     # listing the same reach. A stand-alone endpoint keeps the exact
     # pre-PLG-29b answer — the live fog collection, untouched.
+    # PLG-33b: the first listing per request starts the pipeline — the probe,
+    # the node list and the endpoint's rows run concurrently on their own
+    # fresh clients, and this same request's gate and listing CONSUME them,
+    # turning a page's sequential cold-hop SUM into its slowest single hop.
+    # Everything else about this method is PLG-29b verbatim: a stand-alone
+    # endpoint keeps the exact pre-PLG-29b answer — the live fog collection,
+    # the speculative reads silently discarded.
     def vms(attrs = {})
+      launch_listing_pipeline unless instance_variable_defined?(:@listing_pipeline)
+
       return client.servers(attrs) unless cluster_endpoint?
 
-      ClusterNodeServers.new(self)
+      ClusterNodeServers.new(self, pipeline: @listing_pipeline)
     end
 
     protected
 
+    # PLG-33b: start the speculative endpoint-side reads, once per resource
+    # instance (one page load). A pipeline that cannot start is nil, and a nil
+    # pipeline is today's sequential page, verbatim — no read is lost, only
+    # the overlap is given up.
+    def launch_listing_pipeline
+      @listing_pipeline = ListingPipeline.start(self)
+    end
+
     def client
+      @client ||= Fog::Compute.new(fog_client_options(url))
+    end
+
+    # The one place a fog client's wire options are composed (PLG-33b): the
+    # endpoint client, the per-node routed clients and the pipeline's fresh
+    # copies all get trust, the PLG-32 opt-out and the PLG-16 waits from here,
+    # so a future wire option lands on every dial at once. The semantics that
+    # used to sit at each site: the SAME trust the per-node compositions get —
+    # over https these clients run the address read, the cluster reads and
+    # test_connection against the very certificates hyperv_ca_trust_path
+    # exists to verify (the revalidation row that caught the omission refused
+    # with a bare SSLError before any composition decision was reached).
+    # Absent the attribute, absent the option — the pre-PLG-5b build,
+    # verbatim. PLG-32: the opt-out ONLY — a resource that never opted out
+    # keeps the pre-PLG-32 wire byte-identical and fog's own verified default;
+    # it reaches every client or Test Connection would contradict the
+    # checkbox. The waits PLG-16 says on EVERY composed client — these are the
+    # clients the stalled-cold-cmdlet finding is about.
+    def fog_client_options(endpoint)
       options = {
         provider: :HyperV,
-        hyperv_endpoint: url,
+        hyperv_endpoint: endpoint,
         hyperv_username: user,
         hyperv_password: password
       }
-      # The SAME trust the per-node compositions get: over https this client
-      # runs the address read, the cluster reads and test_connection against
-      # the very certificates hyperv_ca_trust_path exists to verify (the
-      # revalidation row that caught the omission refused with a bare
-      # SSLError before any composition decision was reached). Absent the
-      # attribute, absent the option — the pre-PLG-5b build, verbatim.
       options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
-      # PLG-32: the opt-out ONLY — a resource that never opted out keeps the
-      # pre-PLG-32 wire byte-identical and fog's own verified default. This
-      # client runs test_connection and the cluster reads, so the opt-out has
-      # to reach it or Test Connection would contradict the checkbox.
       options[:hyperv_ssl_verify] = false if hyperv_ssl_verify == false
-      # The waits PLG-16 says on EVERY composed client — this one runs the
-      # cluster reads the stalled-cold-cmdlet finding is about.
       options[:hyperv_operation_timeout] = WINRM_OPERATION_TIMEOUT
       options[:hyperv_receive_timeout] = WINRM_RECEIVE_TIMEOUT
-      @client ||= Fog::Compute.new(options)
+      options
     end
 
     private
@@ -2268,7 +2292,18 @@ module ForemanHyperv
     def cluster_endpoint?
       return @cluster_endpoint if instance_variable_defined?(:@cluster_endpoint)
 
-      @cluster_endpoint = client.respond_to?(:supports_clusters?) && client.supports_clusters?
+      # PLG-33b: when this request started a listing, the probe is already in
+      # flight — take that answer instead of asking again. The rescue and the
+      # warn below are today's, unchanged: a consumed failure re-raises on
+      # THIS thread and degrades exactly like the sequential read did. With
+      # no pipeline (every other caller) this is the sync read, verbatim.
+      probe = @listing_pipeline&.take_probe
+      @cluster_endpoint =
+        if probe.nil?
+          client.respond_to?(:supports_clusters?) && client.supports_clusters?
+        else
+          !!probe
+        end
     rescue StandardError => e
       Rails.logger.warn "Hyper-V cluster support for #{name} could not be read: #{e.message.lines.first}"
       @cluster_endpoint = false
@@ -2860,24 +2895,29 @@ module ForemanHyperv
     # taken. One instance per node per resource, so one connection cache per
     # node — R22's "exactly one connection" is about THIS instance.
     def client_for_node(node_name)
-      options = {
-        provider: :HyperV,
-        hyperv_endpoint: node_endpoint(node_name),
-        hyperv_username: user,
-        hyperv_password: password
-      }
-      options[:hyperv_ca_trust_path] = hyperv_ca_trust_path if hyperv_ca_trust_path.present?
-      # PLG-32: the opt-out reaches the routed clients too — an opt-out that
-      # only relaxed the composition and not the dial would refuse nothing and
-      # still fail every read.
-      options[:hyperv_ssl_verify] = false if hyperv_ssl_verify == false
-      # The same waits as the resource's own client (PLG-16): a node-routed
-      # write gets the same bounded waits as the endpoint reads.
-      options[:hyperv_operation_timeout] = WINRM_OPERATION_TIMEOUT
-      options[:hyperv_receive_timeout] = WINRM_RECEIVE_TIMEOUT
-
       @node_clients ||= {}
-      @node_clients[node_name.to_s.strip.downcase] ||= Fog::Compute.new(options)
+      @node_clients[node_name.to_s.strip.downcase] ||=
+        Fog::Compute.new(fog_client_options(node_endpoint(node_name)))
+    end
+
+    # PLG-33b: an INDEPENDENT client for the same endpoint the resource's own
+    # client dials. The WinRM layer underneath a fog client is per-connection
+    # scratch (the codegen shell's script file, the operation's receive
+    # state), so a second thread reading the endpoint while the first is
+    # mid-read must NOT share the client — it gets its own. Trust, opt-out and
+    # waits are identical by construction: both clients come from
+    # fog_client_options. Never cached; the caller owns this one and every hop
+    # on it is bounded by the PLG-16 waits, so a discarded speculative read
+    # cannot outlive the request that started it.
+    def fresh_endpoint_client
+      Fog::Compute.new(fog_client_options(url))
+    end
+
+    # PLG-33b: the same independence for a node-routed dial (the pipeline's
+    # speculative node-list read routes exactly like client_for_node but owns
+    # its own connection). Uncached by the same rule.
+    def fresh_node_client(node_name)
+      Fog::Compute.new(fog_client_options(node_endpoint(node_name)))
     end
 
     # --- PLG-5b: the address the cluster gives its own nodes ---------------------
