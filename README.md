@@ -108,11 +108,28 @@ IP addresses unless the Foreman host really resolves the FQDNs.
 The composed per-node endpoint rides one of the two transport families the
 measured matrix validated (PLG-5b): http + negotiate with any identity, or
 https with a certificate-verifiable hostname and a `hyperv_ca_trust_path` on
-the resource — https to an IPv4 identity is refused outright, because the
-node certificate gives it no hostname to verify and forcing verification off
-is not this plugin's choice. A node with no override and no address the
-cluster itself gives it is refused its per-node reads — no fog call carries
-its name — which is the fail-closed default, not a bug.
+the resource — while verification is on, https to an IPv4 identity is refused
+outright, because the node certificate gives it no hostname to verify
+against. A node with no override and no address the cluster itself gives it
+is refused its per-node reads — no fog call carries its name — which is the
+fail-closed default, not a bug.
+
+### `hyperv_ssl_verify`: the deliberate opt-out (PLG-32)
+
+`hyperv_ssl_verify` defaults to **on**: an https endpoint is dialed only when
+its certificate verifies, which on the measured platform means against an
+explicit `hyperv_ca_trust_path` (fog's default store does not see system
+anchors — row (w)). Switching it off is the operator's deliberate choice,
+never the plugin's: with the opt-out taken, certificate verification is off
+for that compute resource's every client — the resource's own (including
+Test Connection) and each routed per-node client — and https composes for
+any endpoint identity, IPv4 included, exactly as http does. Garbage schemes
+stay refused with or without it. When verification is on, a refusal that the
+missing verification caused names the opt-out next to the reason.
+
+The compute-resource form carries all three transport controls — the
+verification checkbox, the CA trust file path, and the node override lines —
+beside the endpoint, user and password.
 
 Clustered creates, disk removals and VM destroys run when the installed
 `fog-hyperv` answers all six behaviours the enablement stands on; a fog

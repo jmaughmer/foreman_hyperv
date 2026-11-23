@@ -17,8 +17,10 @@ module ForemanHyperv
           # the API and UI can carry the node→endpoint override map.
           # PLG-5b: hyperv_ca_trust_path joins them too — the CA file the
           # hardened per-node compositions verify against.
+          # PLG-32: hyperv_ssl_verify joins them — the deliberate, per-resource
+          # opt-out of certificate verification on an https endpoint.
           parameter_filter ComputeResource, :url, :user, :password, :hyperv_node_overrides,
-                           :hyperv_ca_trust_path
+                           :hyperv_ca_trust_path, :hyperv_ssl_verify
         end
       end
     end
