@@ -38,6 +38,35 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
   VmDouble = Struct.new(:id, :name, keyword_init: true)
   NodeDouble = Struct.new(:name)
 
+  # Rails.logger is Foreman::SilencedLogger (a SimpleDelegator over the
+  # Logging gem's logger), and neither a Mocha stub on it nor one on its
+  # delegate intercepts Rails.logger.warn in this harness (both were tried on
+  # the CT; the generated level methods SUPER around them). The mechanism
+  # that demonstrably works is a singleton redefinition of warn on the
+  # delegate — record, then call the original — plus a thread-local level lift
+  # so the delegator's level check cannot swallow the call first (the same
+  # trick SilencedLogger#silence uses). Restored in ensure either way.
+  def capture_warns
+    warns = []
+    outer = Rails.logger
+    delegate = outer.respond_to?(:__getobj__) ? outer.__getobj__ : outer
+    delegate.singleton_class.send(:alias_method, :__p33b_orig_warn__, :warn)
+    delegate.singleton_class.send(:define_method, :warn) do |*args, &block|
+      warns << (args.first || block&.call).to_s
+      __p33b_orig_warn__(*args, &block)
+    end
+    previous = outer.local_level if outer.respond_to?(:local_level)
+    outer.local_level = Logger::DEBUG if outer.respond_to?(:local_level=)
+    yield warns
+    warns
+  ensure
+    outer.local_level = previous if outer.respond_to?(:local_level=)
+    if delegate.singleton_class.method_defined?(:__p33b_orig_warn__)
+      delegate.singleton_class.send(:alias_method, :warn, :__p33b_orig_warn__)
+      delegate.singleton_class.send(:remove_method, :__p33b_orig_warn__)
+    end
+  end
+
   # Overlap accounting shared by the fakes of one listing (same shape as the
   # PLG-33 suite: max active readers at any instant; sequential measures 1).
   class Overlap
@@ -237,27 +266,27 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
   def test_a_stand_alone_endpoint_still_gets_the_untouched_collection_and_no_warns
     overlap = Overlap.new
     cr = build_cr(overlap: overlap, supports: false, nodes_error: RuntimeError)
-    Rails.logger.stubs(:warn)
+    result = nil
 
-    result = cr.vms
+    warns = capture_warns { result = cr.vms }
 
     assert_same @client_fog.servers, result,
                 'the stand-alone answer stays the live fog collection, assert_same verbatim'
-    Rails.logger.expects(:warn).with { |m| m.to_s.include?('could not be read') }.never
-    Rails.logger.expects(:warn).with { |m| m.to_s.include?('did not answer') }.never
+    assert_equal [], warns,
+                 'a discarded speculative failure must not warn on a resource the gate ' \
+                 'says has no cluster'
   end
 
   def test_a_failed_node_list_warns_once_with_the_established_text_when_the_gate_says_cluster
     overlap = Overlap.new
     cr = build_cr(overlap: overlap, nodes_error: RuntimeError)
-    warns = []
-    Rails.logger.stubs(:warn) { |message| warns << message.to_s }
+    ids = nil
 
-    ids = listed_ids(cr)
+    warns = capture_warns { ids = listed_ids(cr) }
 
     assert_equal [ELENA, PLAIN], ids, 'a node list that cannot answer degrades to the endpoint rows'
     assert_equal 1, warns.count { |m| m.include?('could not be read') && m.include?('lab-cr') },
-                 'the deferred warn fires exactly once, on consumption, with the known text'
+                 "the deferred warn fires exactly once, on consumption, with the known text; got: #{warns.inspect}"
   end
 
   # ---- 4: safety valves ----
@@ -277,16 +306,18 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
   def test_a_pipeline_that_cannot_compose_degrades_to_todays_sequential_path
     overlap = Overlap.new
     cr = build_cr(overlap: overlap, fresh_client_error: Foreman::Exception)
-    Rails.logger.stubs(:warn)
+    ids = nil
 
-    ids = listed_ids(cr)
+    warns = capture_warns { ids = listed_ids(cr) }
 
-    assert_equal [ELENA, PLAIN, NODE2_VM], ids, 'the answer is today\'s answer, verbatim'
+    assert_equal [ELENA, PLAIN, NODE2_VM], ids, "the answer is today's answer, verbatim"
     assert_equal 0, @pipeline_fog.probe_calls + @pipeline_fog.nodes_calls + @pipeline_fog.rows_calls,
                  'with no pipeline to run, the resource client answers every read as today'
     assert_equal 1, @client_fog.probe_calls
     assert_equal 1, @client_fog.nodes_calls
     assert_equal 1, @client_fog.rows_calls
+    assert_equal 1, warns.count { |m| m.include?('listing pipeline') && m.include?('could not start') },
+                 'the degrade is loud once — the operator can see the overlap was given up'
   end
 
   def test_a_cluster_node_servers_built_directly_knows_nothing_of_the_pipeline
@@ -305,11 +336,13 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
   def test_a_failing_probe_still_answers_standalone_and_warns_like_today
     overlap = Overlap.new
     cr = build_cr(overlap: overlap, probe_error: Timeout::Error)
-    Rails.logger.stubs(:warn)
+    result = nil
 
-    result = cr.vms
+    warns = capture_warns { result = cr.vms }
 
     assert_same @client_fog.servers, result,
                 'a probe that cannot answer is answered false — the stand-alone path'
+    assert_equal 1, warns.count { |m| m.include?('cluster support for lab-cr could not be read') },
+                 'the consumed failure warns with the same words the sync read used'
   end
 end

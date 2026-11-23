@@ -150,6 +150,10 @@ class HypervCrossNodeListingTest < ActiveSupport::TestCase
     cr = CrWithNodes.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.node_fogs = node_fogs
     cr.stubs(:client).returns(fog)
+    # PLG-33b: the pipeline composes its own endpoint clients; in these faked
+    # suites it must arrive at the SAME fog double (see the parallel suite for
+    # the full reason). Count, order and fail-soft assertions untouched.
+    cr.stubs(:fresh_endpoint_client).returns(fog)
     cr
   end
 
@@ -228,8 +232,19 @@ class HypervCrossNodeListingTest < ActiveSupport::TestCase
 
     assert_same endpoint, result,
                 'the stand-alone path is untouched: the fog collection itself, no union wrapper'
-    assert_equal [ELENA, PLAIN], listed_ids(cr)
-    assert_equal 1, endpoint.calls
+    ids = listed_ids(cr)
+    assert_equal [ELENA, PLAIN], ids
+    # PLG-33b accounting: two reads of the endpoint now, and both are known.
+    # The first vms() started a speculative Get-VM the stand-alone gate
+    # discarded (never shown, never answered from); this second listing
+    # re-reads LIVE — the claim-once rule that keeps §58's ghost out. One
+    # listing per request (what the page actually does) reads exactly once.
+    # take_rows SETTLES the discarded speculative read before the count: its
+    # thread runs the read concurrently, and an unjoined thread next to a
+    # call-count assert is a race, not a contract.
+    pipeline = cr.instance_variable_get(:@listing_pipeline)
+    pipeline.take_rows if pipeline
+    assert_equal 2, endpoint.calls
   end
 
   def test_a_fog_without_the_node_vocabulary_lists_the_endpoint_answer_and_does_not_raise
