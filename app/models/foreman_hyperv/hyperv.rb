@@ -38,6 +38,24 @@ module ForemanHyperv
                                 'A host that reads as clustered, or that cannot be read at all, stays ' \
                                 'refused; this lifts by a merged PR, never by configuration.'
 
+    # PLG-30: the two shapes of "you asked for failback where failback cannot
+    # land". Automatic failback is a property of a cluster ROLE — a stand-alone
+    # machine, or a cluster create that opted out of the role (ha_enabled=0),
+    # has no object to set it on — and this plugin refuses the contradiction
+    # before the wire rather than silently dropping the checkbox an operator
+    # just ticked. The fog-side refusal is the same rule aimed at the partner:
+    # a fog that never promised the failback contract does not receive a
+    # setting it cannot keep.
+    FAILBACK_NO_ROLE_REFUSAL = 'Automatic failback was asked for a machine that will not carry a ' \
+                               'cluster role: failback is a property of the role, so there is nothing ' \
+                               'to set it on. Choose a cluster (and keep the machine clustered), or ' \
+                               'uncheck failback. Nothing was asked of the host and nothing was ' \
+                               'created.'
+    FAILBACK_FOG_REFUSAL = 'Setting automatic failback needs a fog-hyperv that answers the cluster ' \
+                           'role failback contract; this one does not, and a setting the operator ' \
+                           'asked for is not silently dropped. Nothing was asked of the host and ' \
+                           'nothing was created.'
+
     # PLG-15c opened the destroy path for machines on endpoints PROVEN
     # stand-alone (standalone_destroy_state below). Everything the definition
     # calls a cluster compute resource stays refused — a clustered reading, a
@@ -726,6 +744,18 @@ module ForemanHyperv
       validate_interfaces(attr)
       validate_volumes(attr)
 
+      # PLG-30: the failback checkbox is decided before the machine exists. A
+      # setting the cluster cannot hold — asked for with no cluster, with the
+      # role explicitly opted out, or against a fog that never promised the
+      # failback contract — hears a named refusal now, on a create that has
+      # touched nothing, rather than watching the plugin quietly build a
+      # machine that never got the HA setting it was ordered with.
+      auto_failback = Foreman::Cast.to_bool(attr[:auto_failback])
+      if auto_failback && (attr[:cluster_name].blank? || !clusterize?(attr))
+        raise ForemanHyperv::OperationRefused, FAILBACK_NO_ROLE_REFUSAL
+      end
+      raise ForemanHyperv::OperationRefused, FAILBACK_FOG_REFUSAL if auto_failback && !cluster_failback_supported?
+
       # The enabled era's membership rule: every placement string the form
       # carries (computer_name, cluster_name, per-volume datastore) must be a
       # member of what the hypervisor itself reports — the character allowlist
@@ -865,6 +895,22 @@ module ForemanHyperv
         # name the endpoint gives itself, and fog registers that for it.
         role_target = routed_via_node ? computer : vm.computer_name
         role_added = add_cluster_role_proven(vm, service: build_client, target: role_target)
+
+        # PLG-30: the failback the form asked for rides the client the machine
+        # was built on at the identity the ladder resolved — the same routing
+        # rule the Add above obeys, because this is the same class of cluster
+        # write against the same owner. It runs only after the add has been
+        # PROVEN (an unproven add strands above and never reaches here), and a
+        # cluster that refuses the setting raises through the rollback below:
+        # the role this strand provably added comes off and the machine goes
+        # with it, rather than half-shipping a machine ordered with a HA
+        # setting it does not have. fog's request answers true only when its
+        # own read-back proved the write; anything else is an exception.
+        if auto_failback
+          build_client.set_cluster_virtual_machine_role_auto_failback(
+            id: vm.id, auto_failback: true, computer_name: role_target
+          )
+        end
       end
 
       # PLG-28: hand the machine core holds (setComputeDetails reads THIS object
@@ -1199,7 +1245,7 @@ module ForemanHyperv
     # destructive gates keep their own fresh, per-machine role proof, because
     # "no role" is the answer that licenses removing disks and one page render's
     # memory of the cluster is not a basis for deleting them.
-    Registration = Struct.new(:state, :owner_node, :cluster_name, keyword_init: true) do
+    Registration = Struct.new(:state, :owner_node, :cluster_name, :auto_failback, keyword_init: true) do
       # The two states an operator acts on: the release-without-delete (delete
       # it), and the answer too degraded to trust (verify before deleting).
       def warning?
@@ -1209,7 +1255,14 @@ module ForemanHyperv
       def label
         case state
         when :clustered
-          ['Clustered', cluster_name.presence, owner_node.presence && "owner #{owner_node}"].compact.join(' — ')
+          # PLG-30: the failback word rides only when the cluster REPORTED it —
+          # on a fog without the contract, or a role whose property never
+          # arrived, the row is the exact pre-PLG-30 text. nil is not "off",
+          # and a column that operators trust never prints a claim it did
+          # not read.
+          parts = ['Clustered', cluster_name.presence, owner_node.presence && "owner #{owner_node}"]
+          parts << "automatic failback #{auto_failback ? 'on' : 'off'}" unless auto_failback.nil?
+          parts.compact.join(' — ')
         when :clustered_storage_without_role then 'Cluster storage, no cluster role'
         when :standalone then "Stand-alone on #{owner_node}"
         when :standalone_no_cluster then 'Stand-alone'
@@ -1235,8 +1288,15 @@ module ForemanHyperv
 
       role = roles[vm.id.to_s.downcase] || roles["#{ROLE_NAME_PREFIX}#{vm.name}"]
       if role
+        # PLG-30: the failback word is asked of the role only when the fog
+        # answers the failback contract AND this role model actually carries
+        # the field; either absence answers nil, which the label renders as
+        # silence — never as off. This stays a display join: nothing on the
+        # destructive side reads it.
+        reported = cluster_failback_supported? && role.respond_to?(:auto_failback)
+        failback = reported ? role.auto_failback : nil
         return Registration.new(state: :clustered, owner_node: role.owner_node,
-                                cluster_name: endpoint_cluster&.name)
+                                cluster_name: endpoint_cluster&.name, auto_failback: failback)
       end
 
       if vm.path.to_s.include?('\\ClusterStorage\\')
@@ -2396,6 +2456,24 @@ module ForemanHyperv
     # (API and hammer) says so.
     def clusterize?(attr)
       attr[:ha_enabled].to_s != '0'
+    end
+
+    # PLG-30: does the installed fog answer the cluster role failback
+    # contract? The same two-part shape the enablement check uses — the
+    # capability constant (a fog too old to define it answers "nothing") and
+    # a vocabulary probe on the client itself (a fog with the list but not
+    # the request is not this build's partner, and vice versa). A raise is an
+    # unanswered question, same rule as client_answers?. This gates the
+    # failback write and the failback word in the Registration column; it
+    # deliberately does NOT join the enablement six — enablement is the era
+    # partnership every unlocked operation runs on, and failback is one
+    # opt-in setting riding on top of it.
+    def cluster_failback_supported?
+      list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
+      list.include?(:cluster_role_failback) &&
+        client.respond_to?(:set_cluster_virtual_machine_role_auto_failback)
+    rescue StandardError
+      false
     end
 
     # PLG-21a. Put the machine into the cluster and PROVE it: fog writes over

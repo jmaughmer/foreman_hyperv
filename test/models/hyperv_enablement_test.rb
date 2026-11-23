@@ -226,8 +226,15 @@ class HypervEnablementTest < ActiveSupport::TestCase
 
   # ---- the runtime capability check ------------------------------------------
 
-  def test_the_capability_list_is_exactly_fogs_capability_set
-    assert_equal Fog::Hyperv::CAPABILITIES.sort, ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.keys.sort
+  def test_the_capability_list_is_fogs_set_split_between_enablement_and_opt_in
+    # Fog's CAPABILITIES is the union of two plugin-side kinds: the enablement
+    # six — the era partnership every unlocked operation runs on — and, since
+    # PLG-30, one opt-in entry (:cluster_role_failback) that gates a single
+    # setting and its column word, not the era. The equality is pinned whole:
+    # a new fog behaviour has to join one side of this line on purpose, never
+    # by accident (this is that line moving for PLG-30).
+    assert_equal Fog::Hyperv::CAPABILITIES.sort,
+                 (ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.keys + [:cluster_role_failback]).sort
   end
 
   def test_enablement_stands_when_the_fog_answers_all_six
