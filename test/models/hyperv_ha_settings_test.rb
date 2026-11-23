@@ -30,6 +30,15 @@ require 'test_helper'
 #      column already owns those answers;
 #   6. the rows cost the page EXACTLY ONE role read, shared with the
 #      Registration column's join.
+#
+# PLG-31b adds the fourth row the same listing already carries: the cluster's
+# preferred owners for this role. Measured on HV-CL01 (evidence §76), the
+# three arrived states are three different claims — a list of node names is a
+# restricted preference, [] is the cluster's own positive "no restricted list,
+# any node may own" answer, and nil means the group's owner read FAILED, which
+# must never render as "no restriction". A fog without the owner-node contract
+# says NOTHING about owners: the PLG-30 silence rule again, because "any node"
+# would be a claim the read never made.
 class HypervHaSettingsTest < ActiveSupport::TestCase
   HOST = 'hv-node1'
   CR_URL = "http://#{HOST}:5985/wsman".freeze
@@ -38,17 +47,32 @@ class HypervHaSettingsTest < ActiveSupport::TestCase
   SENTINEL = 4_294_967_295
 
   # A role as the installed fog's ClusterVirtualMachineRole answers it: the
-  # attributes hash carrying the three HA knobs verbatim, plus the
-  # auto_failback_type method the plugin gates the failback rows on.
+  # attributes hash carrying the HA knobs verbatim, plus the
+  # auto_failback_type method the plugin gates the failback rows on and the
+  # preferred_node_names method the PLG-31b owner row is gated on.
   HaRoleDouble = Struct.new(:name, :virtual_machine_id, :owner_node, :attributes, keyword_init: true) do
     def auto_failback_type
       attributes[:auto_failback_type]
+    end
+
+    def preferred_node_names
+      attributes[:preferred_node_names]
     end
   end
 
   # A role from a fog whose model predates the failback contract: the
   # methods themselves are absent, which is not the same as nil.
   LegacyHaRoleDouble = Struct.new(:name, :virtual_machine_id, :owner_node, :attributes, keyword_init: true)
+
+  # PLG-31b's gate-relevant shape: a fog WITH the failback contract whose
+  # role model predates the owner-node contract. The capability constant can
+  # say yes (the installed gem carries it) while the role in hand cannot
+  # answer — respond_to? is the part of the gate that catches this partner.
+  OwnerlessHaRoleDouble = Struct.new(:name, :virtual_machine_id, :owner_node, :attributes, keyword_init: true) do
+    def auto_failback_type
+      attributes[:auto_failback_type]
+    end
+  end
 
   class RolesDouble
     attr_reader :calls
@@ -113,11 +137,15 @@ class HypervHaSettingsTest < ActiveSupport::TestCase
     VmDouble.new(id: LEAH, name: 'leah-navia.maughmer.net', path: 'http://hyperv/scim/v2/Machines/leah')
   end
 
-  def ha_role(priority:, auto_failback_type:, window_start:, window_end:, id: LEAH)
+  # The default preferred: [] is the state the lab cluster answers for every
+  # group today (evidence §76: unset reads []), so the pre-existing rows keep
+  # facing exactly what the page faces.
+  def ha_role(priority:, auto_failback_type:, window_start:, window_end:, id: LEAH, preferred: [])
     HaRoleDouble.new(name: 'leah-navia.maughmer.net', virtual_machine_id: id, owner_node: 'HV-NODE1',
                      attributes: { name: 'leah-navia.maughmer.net', owner_node: 'HV-NODE1',
                                    priority: priority, auto_failback_type: auto_failback_type,
-                                   failback_window_start: window_start, failback_window_end: window_end })
+                                   failback_window_start: window_start, failback_window_end: window_end,
+                                   preferred_node_names: preferred })
   end
 
   def build_cr(fog)
@@ -140,6 +168,8 @@ class HypervHaSettingsTest < ActiveSupport::TestCase
     assert_equal 'On (1)', ha.auto_failback_label
     assert_equal 'None', ha.failback_window_label,
                  'the measured 4294967295 sentinel means no window, not minute 4294967295'
+    assert_equal 'Any node (no restriction)', ha.preferred_owners_label,
+                 'the [] leah-navia answers today is the cluster\'s own "no restricted list" state (§76)'
   end
 
   def test_the_rest_of_the_documented_map_renders_with_its_raw_alongside
@@ -174,7 +204,7 @@ class HypervHaSettingsTest < ActiveSupport::TestCase
   end
 
   def test_a_cluster_that_answered_nothing_answers_unknown_not_a_word
-    role = ha_role(priority: nil, auto_failback_type: nil, window_start: nil, window_end: nil)
+    role = ha_role(priority: nil, auto_failback_type: nil, window_start: nil, window_end: nil, preferred: nil)
     cr = build_cr(ContractFogDouble.new(RolesDouble.new([role])))
 
     ha = cr.cluster_ha_settings(leah)
@@ -184,6 +214,8 @@ class HypervHaSettingsTest < ActiveSupport::TestCase
     assert_equal 'Unknown', ha.auto_failback_label
     assert_equal 'Unknown', ha.failback_window_label,
                  'missing attributes are not the sentinel: an unread window is not "no window"'
+    assert_equal 'Unknown', ha.preferred_owners_label,
+                 'a failed owner read is not the unset []: §76 keeps the two answers apart'
   end
 
   def test_a_fog_without_the_failback_contract_stays_silent_about_failback
@@ -200,6 +232,69 @@ class HypervHaSettingsTest < ActiveSupport::TestCase
     assert_equal 'Medium (2000)', ha.priority_label
     assert_nil ha.auto_failback_label, 'no contract, no word — silence, never "Off"'
     assert_nil ha.failback_window_label
+  end
+
+  # -- PLG-31b: the preferred-owners row ---------------------------------------
+
+  # The restricted shape: the cluster keeps this machine on the named nodes
+  # when it can. The row is the names exactly as the cluster answered them —
+  # there is no documented word to ride beside them, the names ARE the value.
+  def test_a_restricted_owner_list_shows_the_node_names_the_cluster_named
+    role = ha_role(priority: 2_000, auto_failback_type: 1, window_start: SENTINEL, window_end: SENTINEL,
+                   preferred: %w[hv-node1 hv-node3])
+    cr = build_cr(ContractFogDouble.new(RolesDouble.new([role])))
+
+    ha = cr.cluster_ha_settings(leah)
+
+    assert_equal 'hv-node1, hv-node3', ha.preferred_owners_label
+  end
+
+  # A one-node preference is the shape Set-ClusterOwnerNode -Owners hv-node1
+  # leaves behind (§76's write proof) — the row must read it without padding.
+  def test_a_single_preferred_node_shows_alone
+    role = ha_role(priority: 2_000, auto_failback_type: 1, window_start: SENTINEL, window_end: SENTINEL,
+                   preferred: ['hv-node2'])
+    cr = build_cr(ContractFogDouble.new(RolesDouble.new([role])))
+
+    assert_equal 'hv-node2', cr.cluster_ha_settings(leah).preferred_owners_label
+  end
+
+  # PLG-30's silence rule again, one contract later: the capability constant
+  # says yes (the installed gem carries it) but the role model in hand has no
+  # preferred_node_names to ask — respond_to? is the gate that catches the
+  # mismatched partner. "Any node" would be a claim this read never made, so
+  # the row prints nothing while failback, this role's own contract, survives.
+  def test_a_fog_without_the_owner_nodes_contract_stays_silent_about_owners
+    role = OwnerlessHaRoleDouble.new(name: 'leah-navia.maughmer.net', virtual_machine_id: LEAH,
+                                     owner_node: 'HV-NODE1',
+                                     attributes: { priority: 2_000, auto_failback_type: 1,
+                                                   failback_window_start: SENTINEL, failback_window_end: SENTINEL })
+    cr = build_cr(ContractFogDouble.new(RolesDouble.new([role])))
+
+    ha = cr.cluster_ha_settings(leah)
+
+    assert_predicate ha, :found?
+    assert_equal 'Medium (2000)', ha.priority_label
+    assert_equal 'On (1)', ha.auto_failback_label
+    assert_nil ha.preferred_owners_label, 'no owner contract, no word — silence, never "Any node"'
+  end
+
+  # The owners row rides the listing the page already pays for: the role read
+  # now carries Get-ClusterOwnerNode answers per group inside its ONE shell,
+  # so a fourth HA row costs zero additional cluster round trips.
+  def test_the_owner_row_rides_the_same_single_role_read
+    role = ha_role(priority: 2_000, auto_failback_type: 1, window_start: SENTINEL, window_end: SENTINEL,
+                   preferred: ['hv-node1'])
+    roles = RolesDouble.new([role])
+    cr = build_cr(ContractFogDouble.new(roles))
+
+    registration = cr.vm_registration(leah)
+    ha = cr.cluster_ha_settings(leah)
+
+    assert_equal :clustered, registration.state
+    assert_equal 'hv-node1', ha.preferred_owners_label
+    assert_equal 1, roles.calls,
+                 'the owner row adds a field to the read the page already makes, not a read of its own'
   end
 
   def test_a_machine_the_cluster_does_not_own_gets_no_ha_section
