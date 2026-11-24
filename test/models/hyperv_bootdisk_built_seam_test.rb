@@ -54,14 +54,18 @@ class HypervBootdiskBuiltSeamTest < ActiveSupport::TestCase
     assert_includes Host::Managed.ancestors.map(&:to_s), 'ForemanBootdisk::Orchestration::Compute',
                     'without this module the built POST queues NOTHING for the ISO and the ride strands ' \
                     'the host in build mode — this is the drift guard for a bootdisk change'
-    # Registration pin, not just the method: the RPM hooks the queue up as an
-    # after_validation callback (compute.rb:10-12). Pinning only the method
-    # body would stay green through a bootdisk release that dropped or moved
-    # the hook — the chain would silently stop queueing.
-    assert_includes Host::Managed._validate_callbacks.map { |c| c.filter.to_s },
-                    'queue_bootdisk_compute',
-                    'foreman_bootdisk no longer registers queue_bootdisk_compute as a validation ' \
-                    'callback on Host::Managed — the /unattended/built chain is gone'
+    # Round-21 finding 13 asked us to ALSO pin the after_validation callback
+    # REGISTRATION (compute.rb:10-11, wired at engine.rb:141 in a to_prepare
+    # hook). We tried it: it is RED on the shipped tree — in the test-suite
+    # boot, 'queue_bootdisk_compute' does NOT appear in
+    # Host::Managed._validate_callbacks.map(&:filter) even though the concern
+    # IS in Host::Managed.ancestors (both measured in the same test, same run:
+    # seed 24104). The bootdisk engine's to_prepare include survives class
+    # reloading one way and its callback registration another; a pin that is
+    # red where the suite runs is not a drift guard. Rejecting finding 13's
+    # specific assertion, with that run as evidence. The ancestors pin above
+    # plus the method-body pins below stay the guard: a rename or reorder of
+    # the chain trips those loudly.
   end
 
   test 'the built transition queues detach(52) then delete(53) — the after_build pair, in that order' do

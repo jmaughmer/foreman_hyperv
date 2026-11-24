@@ -245,22 +245,30 @@ module ForemanHyperv
       def ensure_root!(root, mode)
         return if File.directory?(root)
 
-        # Creation errors (ENOTDIR, EACCES) travel THROUGH untouched — the
-        # ensure creates, honest failure is a real failure. No chown: the
-        # creation runs as the foreman worker, so everything made here is
-        # already foreman:foreman.
-        created = []
-        FileUtils.mkdir_p(root) { |dir| created << dir }
-        # chmod EVERY component mkdir_p created: with a 0077 dynflow umask a
-        # root configured deeper than its parent (say /srv/bootdisk/pull)
-        # would otherwise leave /srv/bootdisk at 0700 and the served root
-        # permanently unreachable (403) while the snippet check stays green.
-        # Existing components keep operator modes — create, not police. A
-        # chmod racing a concurrent ensure (or an operator fix landing
-        # mid-call) is not worth failing an otherwise-successful creation
-        # over, so ONLY these metadata calls tolerate SystemCallError; the
-        # mkdir above deliberately does not.
-        created.each do |dir|
+        # Collect the components we are ABOUT to create by walking up to the
+        # first existing ancestor (FileUtils.mkdir_p silently ignores a block,
+        # measured — the array cannot come from it). Creation errors (ENOTDIR,
+        # EACCES) travel THROUGH: the ensure creates, honest failure is a real
+        # failure. No chown: the creation runs as the foreman worker, so
+        # everything made here is already foreman:foreman.
+        missing = []
+        node = root
+        while !File.directory?(node)
+          missing << node
+          parent = File.dirname(node)
+          break if parent == node # reached the filesystem root
+          node = parent
+        end
+        FileUtils.mkdir_p(root)
+        # chmod EVERY component we created: with a 0077 dynflow umask a root
+        # configured deeper than its parent (say /srv/bootdisk/pull) would
+        # otherwise leave /srv/bootdisk at 0700 and the served root permanently
+        # unreachable (403) while the snippet check stays green. Existing
+        # components keep operator modes — create, not police. A chmod racing a
+        # concurrent ensure (or an operator fix landing mid-call) is not worth
+        # failing an otherwise-successful creation over, so ONLY these metadata
+        # calls tolerate SystemCallError; the mkdir above deliberately does not.
+        missing.each do |dir|
           begin
             File.chmod(mode, dir)
           rescue SystemCallError
@@ -270,7 +278,7 @@ module ForemanHyperv
       end
 
       def served_root!
-        root = served_root.presence || Setting[:hyperv_bootdisk_pull_root].to_s.strip
+        root = (served_root.presence || Setting[:hyperv_bootdisk_pull_root].to_s).strip
         raise ConfiguredRootError, 'hyperv_bootdisk_pull_root is not configured' if root.blank?
 
         # chomp ONE trailing slash (the common misconfiguration) without
@@ -279,7 +287,7 @@ module ForemanHyperv
       end
 
       def staging_root!
-        root = staging_root.presence || Setting[:hyperv_bootdisk_staging_root].to_s.strip
+        root = (staging_root.presence || Setting[:hyperv_bootdisk_staging_root].to_s).strip
         raise ConfiguredRootError, 'hyperv_bootdisk_staging_root is not configured' if root.blank?
 
         root.length > 1 ? root.chomp('/') : root

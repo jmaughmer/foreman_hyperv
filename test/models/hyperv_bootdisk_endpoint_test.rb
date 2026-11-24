@@ -327,6 +327,7 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
 
   test 'an http unattended URL does NOT require the ssl-side twin — the scheme rule is a rule, not a mood' do
     FileUtils.mkdir_p([@served, @staging])
+    stub_unattended
     src = make_iso(@root)
     stub_snippet(ForemanHyperv::BootdiskTransfer::HTTPS_SNIPPET_PATH, false)
 
