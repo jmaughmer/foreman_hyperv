@@ -196,10 +196,12 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   end
 
   test 'discard removes the served ISO and its sidecar, and is an answer-free no-op when they are gone' do
-    staged = ForemanHyperv::BootdiskTransfer.stage(make_iso(@staging))
+    src = make_iso(Dir.mktmpdir('bd-src'))
+    staged = ForemanHyperv::BootdiskTransfer.stage(src)
     ForemanHyperv::BootdiskTransfer.discard(staged.nonce)
     assert_empty Dir.children(@served)
     assert_empty Dir.children(@staging)
+    assert File.file?(src), 'discard takes the shelf, never the worker\u2019s own copy'
     assert_nothing_raised { ForemanHyperv::BootdiskTransfer.discard(staged.nonce) }
   end
 
