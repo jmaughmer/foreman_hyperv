@@ -814,8 +814,8 @@ module ForemanHyperv
         raise ForemanHyperv::OperationRefused, BOOTDISK_ATTACH_RUNNING_REFUSAL
       end
 
-      drives = client.get_vm_dvd_drive(vm_id: uuid)
-      drive = Array(drives).first || client.add_vm_dvd_drive(vm_id: uuid)&.first
+      drive = dvd_drive_list(client.get_vm_dvd_drive(vm_id: uuid)).first ||
+              dvd_drive_list(client.add_vm_dvd_drive(vm_id: uuid)).first
       if drive.nil? || drive[:id].blank?
         raise ForemanHyperv::OperationRefused,
               "The machine #{uuid} answered no DVD drive to attach #{name} to. Nothing was attached."
@@ -836,7 +836,7 @@ module ForemanHyperv
 
       refuse_without_enablement!
       require_fog_requests!(:get_vm_dvd_drive, :eject_vm_dvd_drive)
-      attached = Array(client.get_vm_dvd_drive(vm_id: uuid)).find { |drive| drive[:path].present? }
+      attached = dvd_drive_list(client.get_vm_dvd_drive(vm_id: uuid)).find { |drive| drive[:path].present? }
       return false if attached.nil?
 
       client.eject_vm_dvd_drive(id: attached[:id], vm_id: uuid)
@@ -3125,6 +3125,18 @@ module ForemanHyperv
 
       raise ForemanHyperv::OperationRefused,
             format(BOOTDISK_CAPABILITY_REFUSAL, capability: :file_pull, request: 'fetch_url_to_path')
+    end
+
+    # fog's drive reads answer in three shapes — nil when the VM has no DVD drive, ONE
+    # bare Hash when it has one, an Array of Hashes when it has several (all three measured
+    # on the lab host 2026-11-24). Array() turns the Hash into [key, value] pairs and
+    # Hash#first is one pair, so both would lie; normalizing once here is the honest fix.
+    def dvd_drive_list(answer)
+      case answer
+      when nil then []
+      when Array then answer
+      else [answer]
+      end
     end
 
     # iso_attach's boot-order composition: the DVD first, named by drive id
