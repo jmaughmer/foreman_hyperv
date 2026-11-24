@@ -213,6 +213,11 @@ module ForemanHyperv
           raise unsafe(key) if context == :generic && !key.to_s.match?(GENERIC_KEY)
 
           check_key!(key, value, context: context)
+          # Identity keys own their shape above (GUID, row id, WMI device
+          # path); the generic character allowlist would refuse the path's
+          # backslashes, and a second opinion there buys nothing.
+          next if GUID_KEYS.include?(key) || DEVICE_ID_KEYS.include?(key)
+
           check_value!(key, value, context: context)
         end
       end

@@ -182,30 +182,29 @@ class InputValidationTest < ActiveSupport::TestCase
 
   # PLG-37: the edit form round-trips identifiers the MACHINE is not addressed
   # by — a NIC identity and a disk id are WMI device paths exactly as the host's
-  # WMI layer reports them, and the row `id` is the DB row id Rails' form builder
-  # re-emits. The bare-GUID rule applied to these keys wherever they appeared,
-  # so the first host-edit POST since the rule (2026-11-24, PLG-36 acceptance)
+  # WMI layer reports them (the NIC's is the two-segment adapter path, the
+  # disk's carries controller, target, and drive letter). The bare-GUID rule
+  # applied to these keys wherever they appeared, so the first host-edit POST
+  # since the rule (2026-11-24, PLG-36 acceptance, production.log b4391aed)
   # died in validate_hash! before fog was asked anything; create never carried
   # these keys, so create could not see it. The machine is still addressed by
   # the bare GUID demanded up front, an unmatched device id simply matches
   # nothing, and the injection sinks these values can reach stay gated by the
-  # endpoint's own shapes: GUIDs, numeric row ids, and `Microsoft:` WMI paths
-  # whose segments are GUIDs, controller numbers, or drive letters.
+  # endpoint's own shapes: GUIDs, numeric form row ids, and `Microsoft:` WMI
+  # paths whose segments are GUIDs, controller numbers, or drive letters.
   def test_edit_roundtrip_device_ids_pass
-    wmi_disk = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D07B9966-E6F1-4C58-9F4B-C420EBE2A804\\0\\0\\D'
+    # The measured save_vm shapes: core rebuilds interfaces_attributes from
+    # each NIC's compute_attributes JSON (host_interfaces_attrs) and the VM
+    # form submits volumes_attributes straight from the disk list.
+    wmi_nic = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D07B9966-E6F1-4C58-9F4B-C420EBE2A804'
+    wmi_disk = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D0D76B44-1269-4F42-8150-8D9261FFD283\\0\\0\\D'
     wmi_dvd = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D07B9966-E6F1-4C58-9F4B-C420EBE2A804\\0\\1\\E'
-    # The measured POST shape (PLG-36 acceptance, production.log b4391aed).
     IV.validate_hash!(
       interfaces_attributes: {
-        '0' => {
-          id: '6',
-          identity: wmi_disk,
-          managed: '1',
-          compute_attributes: { identity: wmi_disk, switch_id: GUID, vlan_operation_mode: 'Untagged' }
-        }
+        '0' => { identity: wmi_nic, switch_id: GUID, vlan_operation_mode: 'Untagged', ip: '', ip6: '' }
       },
       volumes_attributes: {
-        '0' => { id: wmi_disk, controller_number: 0, controller_type: 'IDE' },
+        '0' => { id: wmi_disk, basename: 'Disk', size_bytes: '1073741824' },
         '1' => { id: wmi_dvd }
       }
     )
