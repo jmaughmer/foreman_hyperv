@@ -43,9 +43,9 @@
   -%>
   <% unless preferred_owners.nil? || owner_node_choices.nil? -%>
     <%= select_f f, :preferred_owners, owner_node_choices, :to_s, :to_s,
-                 { :selected => preferred_owners, :multiple => true },
-                 label: _('Preferred owners'), label_size: 'col-md-2',
-                 help_inline: _('Nodes the cluster may run this machine on. Leave the list empty to allow any node; the instance list shows what the cluster reports.') -%>
+                 { :selected => preferred_owners },
+                 { :multiple => true, label: _('Preferred owners'), label_size: 'col-md-2',
+                   help_inline: _('Nodes the cluster may run this machine on. Leave the list empty to allow any node; the instance list shows what the cluster reports.') } -%>
   <% end -%>
 <% end -%>
 <% cluster_errors.each do |err| -%>
