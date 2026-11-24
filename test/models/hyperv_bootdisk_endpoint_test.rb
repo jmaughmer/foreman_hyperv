@@ -136,6 +136,13 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     Setting.stubs(:[]).with(:unattended_url).returns(url)
   end
 
+  # Answer the drop-in check for one path (later definitions win over the
+  # broad setup stub for their own path — mocha matches the newest matching
+  # expectation, proven in the PR-2 suite).
+  def stub_snippet(path, present)
+    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).with(path).returns(present)
+  end
+
   # ---- the settings -------------------------------------------------------------
 
   test 'the two roots are registered settings and ship BLANK — the dormant state is the default' do
@@ -216,7 +223,7 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     assert_equal 0o700, File.stat(@staging).mode & 0o777
     assert_empty Dir.children(@served), 'the ensure creates the shelf; the ensure-deletion still empties it'
     assert_empty Dir.children(@staging)
-    assert_equal 1, fog.calls.count { |c| c.first == :fetch_url_to_path }
+    assert_equal 1, (fog.calls.count { |c| c.first == :fetch_url_to_path })
   end
 
   # ---- the snippet the URL rides (F4, post-purge) ---------------------------------
@@ -224,9 +231,8 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
   test 'the pull refuses BEFORE staging when the Apache drop-in the URL rides is not installed' do
     FileUtils.mkdir_p([@served, @staging])
     src = make_iso(@root)
-    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?)
-                                    .with(ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH)
-                                    .returns(false)
+    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).returns(true)
+    stub_snippet(ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH, false)
 
     error = assert_raises(ForemanHyperv::OperationRefused) do
       ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
@@ -243,9 +249,8 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     FileUtils.mkdir_p([@served, @staging])
     stub_unattended('https://foreman.test')
     src = make_iso(@root)
-    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?)
-                                    .with(ForemanHyperv::BootdiskTransfer::HTTPS_SNIPPET_PATH)
-                                    .returns(false)
+    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).returns(true)
+    stub_snippet(ForemanHyperv::BootdiskTransfer::HTTPS_SNIPPET_PATH, false)
 
     error = assert_raises(ForemanHyperv::OperationRefused) do
       ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)

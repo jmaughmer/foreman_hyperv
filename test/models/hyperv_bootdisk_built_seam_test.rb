@@ -63,7 +63,7 @@ class HypervBootdiskBuiltSeamTest < ActiveSupport::TestCase
 
     assert host.queue_bootdisk_compute, 'queue_bootdisk_compute answers true or the save itself fails'
 
-    assert_equal [52, 53], queued.map { |entry| entry[:priority] },
+    assert_equal [52, 53], queued.pluck(:priority),
                  'delete must run AFTER detach: eject nulls the drive Path (measured), and the delete ' \
                  'contract reads nothing off the drive but must still run after the eject it depends on'
     assert_equal [host, :setDetachIsoImage], queued[0][:action]
@@ -77,9 +77,9 @@ class HypervBootdiskBuiltSeamTest < ActiveSupport::TestCase
 
     assert host.queue_bootdisk_compute
 
-    assert_equal [5, 6, 900], queued.map { |entry| entry[:priority] },
+    assert_equal [5, 6, 900], queued.pluck(:priority),
                  'generate(5), upload(6), attach(900): the before_build trio (the RPM verbatim)'
-    assert queued.none? { |entry| entry[:action][1].in?([:setDetachIsoImage, :setDeleteIsoImage]) },
+    assert queued.none? { |entry| entry[:action][1].in?(%i[setDetachIsoImage setDeleteIsoImage]) },
            'detach/delete belong to the built transition ONLY — firing them here ejects a disc the ' \
            'installer has not even booted from'
   end
