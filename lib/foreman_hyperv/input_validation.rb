@@ -44,12 +44,26 @@ module ForemanHyperv
     # payload does not slip the anchor the way a $ anchor would.
     GUID_PATTERN = /\A#{Fog::Hyperv::GUID}\z/i
 
-    # Keys whose value is an identity and is accepted only GUID-shaped, wherever
-    # it appears. The NIC and disk forms round-trip their real Hyper-V GUIDs
-    # (compute_attributes carries id and switch_id), and every fog by-id lookup
-    # is GUID-only — so legitimate edits keep working while an id forged as
-    # script text dies here.
-    GUID_KEYS = %i[id identity vm_id switch_id].freeze
+    # Keys whose value addresses a MACHINE or a SWITCH on the wire and is
+    # accepted only GUID-shaped, wherever it appears: every fog by-id lookup
+    # is GUID-only — fog takes its by-id branch on exactly this shape, so
+    # "the plugin accepts this id" and "fog looks it up by id" cannot drift,
+    # and an id forged as script text dies here.
+    GUID_KEYS = %i[vm_id switch_id].freeze
+
+    # Keys whose value identifies a DEVICE INSIDE an already-GUID-addressed
+    # machine, which the edit form round-trips from what the endpoint and the
+    # DB reported (PLG-37, measured 2026-11-24: identity and volume ids arrive
+    # as WMI device paths like Microsoft:1C51C4EE-...\\D07B9966-...\\0\\0\\D,
+    # and the NIC row carries its DB row id). These values select nothing on
+    # the wire — an unmatched one matches no device — but they still ride to
+    # interpolation sinks, so the endpoint's own shapes are what is accepted:
+    # a GUID, a numeric row id, or a Microsoft:-prefixed WMI path whose
+    # segments are GUIDs, controller numbers, or drive letters. Names, script
+    # text, and path traversal stay refused.
+    DEVICE_ID_KEYS = %i[id identity].freeze
+    WMI_DEVICE_PATH = /\AMicrosoft:#{Fog::Hyperv::GUID}(?:\\(?:#{Fog::Hyperv::GUID}|\d+|[A-Z]))*\z/i
+    DB_ROW_ID = /\A\d+\z/
 
     # Keys a machine hash must never carry at all. path is fog's own create
     # target and only this resource sets it (from a cluster shared volume);
@@ -207,6 +221,19 @@ module ForemanHyperv
         if GUID_KEYS.include?(key)
           validate_id!(value) if value.present?
           return
+        end
+
+        # Device identities round-tripped from the endpoint's or the DB's own
+        # answers: GUID-shaped, numeric row id, or Microsoft: WMI path — and
+        # nothing else. The refusal class is the same as for a bad machine id:
+        # the value could not have come from the shapes Hyper-V reports.
+        if DEVICE_ID_KEYS.include?(key) && value.present?
+          text = value.to_s
+          return if text.match?(GUID_PATTERN) || text.match?(WMI_DEVICE_PATH) || text.match?(DB_ROW_ID)
+
+          raise ForemanHyperv::UnsafeIdentifier,
+                'A device identifier must be the GUID, the Microsoft: device path, or the form row ' \
+                'id the endpoint reported; nothing was asked of the machine with this identifier'
         end
 
         if context == :vm
