@@ -1027,8 +1027,13 @@ module ForemanHyperv
 
       update_interfaces(vm, attr)
       update_volumes(vm, attr)
-
       vm.save if vm.dirty?
+      # PLG-36: the Preferred owners list the edit form submitted, applied
+      # after the machine's own save and with its own honest silences and
+      # refusals (see apply_preferred_owners). It rides AFTER vm.save so a
+      # refused setting fails the save carrying the cluster's words, never
+      # leaving the CPU/memory edit half-written on the machine.
+      apply_preferred_owners(vm, attr[:preferred_owners]) if attr.key?(:preferred_owners)
       vm
     end
 
@@ -1230,6 +1235,13 @@ module ForemanHyperv
       )
       attr[:foreman_firmware] = vm.foreman_firmware_type
       attr[:tpm_enabled] = vm.tpm_enabled
+      # PLG-36: the current preferred-owners list, when the control could be
+      # honestly offered (see cluster_preferred_owners_for for the refuses).
+      # This is what makes core's change-detect SEE an owners-only edit at
+      # all: it compares this fresh read against the submitted form, and a
+      # key missing here on both sides round-trips as "not submitted".
+      owners = cluster_preferred_owners_for(vm)
+      attr[:preferred_owners] = owners if owners
 
       attr
     end
@@ -1452,6 +1464,100 @@ module ForemanHyperv
                      failback_window_start: reported ? attrs[:failback_window_start] : :unreported,
                      failback_window_end: reported ? attrs[:failback_window_end] : :unreported,
                      preferred_node_names: owner_reported ? attrs[:preferred_node_names] : :unreported)
+    end
+
+    # PLG-36: set the machine's preferred owners — the nodes the cluster may
+    # run it on — through fog's measured write (evidence §76: the cmdlet is
+    # Set-ClusterOwnerNode -Owners and the write sticks; [] clears through the
+    # one measured clear spelling). Every name is membership-checked against
+    # the cluster's OWN node list first: a name this side cannot point at in
+    # the cluster's answer has no business being dialled, and a node list that
+    # cannot be read is unknown, not permission. Accepted names are replaced by
+    # the cluster's own spelling of them, so the stored value, the read-back,
+    # and the form's option list are the same strings (the cluster is measured
+    # not to preserve case).
+    #
+    # computer_name is deliberately nil: preferred owners are pure cluster
+    # state — any node's cluster service answers for the whole cluster, which
+    # is how the role read already reaches machines owned by other nodes —
+    # while a node-routed name on the endpoint client walks straight into the
+    # PLG-27 trap (the endpoint's set never registered that name).
+    #
+    # fog answers true only when its own read-back proved the setting landed;
+    # its refusals (RolePropertyWriteRefused carrying the cluster's words,
+    # ClusterRoleNotFound for a machine with no role) are re-raised as the
+    # plugin's own OperationRefused, unchanged in what they say, so every
+    # caller — the edit save above all — fails on a refused setting rather
+    # than half-applying an edit.
+    def set_cluster_vm_preferred_owners(vm, owner_nodes)
+      names = Array(owner_nodes).map { |node| node.to_s.strip }.reject(&:empty?)
+      doubled = names.map(&:downcase).tally.select { |_node, count| count > 1 }.keys
+      if doubled.any?
+        raise ForemanHyperv::OperationRefused,
+              "preferred owners name the same node more than once (#{doubled.join(', ')} matched " \
+              'case-insensitively); the cluster keeps one entry per node, so list each node once'
+      end
+
+      # An empty list names no node, so membership has nothing to check —
+      # and a node read that fails must not refuse the one state (§76) that
+      # carries no names at all.
+      canonical =
+        if names.empty?
+          []
+        else
+          nodes = cluster_node_names
+          if nodes.nil?
+            raise ForemanHyperv::OperationRefused,
+                  'the cluster node list could not be read, so no owner name could be checked against it; ' \
+                  'unknown nodes are not permission to write'
+          end
+
+          names.map do |node|
+            nodes.find { |known| known.casecmp(node).zero? } ||
+              raise(ForemanHyperv::OperationRefused,
+                    "the cluster has no node named #{node}: preferred owners must be nodes this " \
+                    'compute resource reports')
+          end
+        end
+
+      client.set_cluster_virtual_machine_role_owner_nodes(id: vm.id, owner_nodes: canonical, computer_name: nil)
+    rescue Fog::Hyperv::Errors::RolePropertyWriteRefused, Fog::Hyperv::Errors::ClusterRoleNotFound => e
+      raise ForemanHyperv::OperationRefused, e.message.to_s
+    end
+
+    # PLG-36: the edit form's honest answer to "may I offer the Preferred
+    # owners control, and with what selection". nil is the refuse — a
+    # stand-alone endpoint (asked BEFORE any role read, the gate's own
+    # answer), a fog whose write gate is closed, a machine the cluster
+    # carries no role for, and an owner read that failed all render no
+    # control, because each of them would offer a selection the form cannot
+    # claim to show. The names come back SORTED: the option DOM order is what
+    # the browser submits and what core's change-detect compares against the
+    # fresh read, so both sides must be canonical without the cluster having
+    # preserved anything (§76 measured it does not).
+    def cluster_preferred_owners_for(vm)
+      return nil unless cluster_endpoint? && cluster_owner_nodes_write_supported?
+
+      ha = cluster_ha_settings(vm)
+      return nil unless ha.found?
+
+      names = ha.preferred_node_names
+      return nil unless names.is_a?(Array)
+
+      names.sort
+    end
+
+    # PLG-36: the cluster's node names, sorted for the edit form's options.
+    # A list that cannot be read answers nil — the control offers nothing
+    # rather than a guess, and the page does not die (the listing's own node
+    # read degrades the same way).
+    def cluster_node_names
+      nodes = Array(client.cluster_nodes).map { |node| node.name.to_s.strip }.reject(&:empty?).sort
+      nodes.presence
+    rescue StandardError => e
+      Rails.logger.warn "Hyper-V cluster node list for #{name} could not be read: " \
+                        "#{e.class}: #{e.message.to_s.lines.first.to_s.strip}"
+      nil
     end
 
     # PLG-29b: on a cluster, the instance list is the CLUSTER's inventory.
@@ -2789,6 +2895,56 @@ module ForemanHyperv
       list.include?(:cluster_role_owner_nodes)
     rescue StandardError
       false
+    end
+
+    # PLG-36: the write gate. Unlike the read's field, the write IS a request
+    # with a client method, so this gate probes both halves the fork's gating
+    # rule asks for — the constant (a partner that never promised the contract
+    # must not be blessed by a method name alone) AND the client method (a
+    # constant alone would bless a mismatched partner whose client cannot send
+    # the request). A raise is an unanswered question: closed.
+    def cluster_owner_nodes_write_supported?
+      list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
+      list.include?(:cluster_role_owner_nodes_write) &&
+        client.respond_to?(:set_cluster_virtual_machine_role_owner_nodes)
+    rescue StandardError
+      false
+    end
+
+    # PLG-36: the edit form's Preferred owners list, applied by save_vm.
+    # The silences and the one early refusal:
+    #   * a fog that cannot write owners refuses a key that did arrive (the
+    #     PLG-30 rule beside the failback checkbox: never silently drop what
+    #     the operator sent) — the form would not have offered the control,
+    #     so an arriving key came from an API-shaped compute_attributes;
+    #   * a machine the cluster carries no role for is left alone, not
+    #     refused: the control renders only on a clustered machine, so a key
+    #     with no role behind it is an attribute that outlived a role removed
+    #     outside Foreman, and every later save must not brick on it;
+    #   * a selection EQUAL to the cluster's answer spends no write — names
+    #     compared case-insensitively because the cluster is measured (§76)
+    #     not to preserve the case it was handed; a current state that is
+    #     unknown (nil) or unreported cannot disprove change, so the write is
+    #     attempted and fog's own read-back decides whether it landed.
+    # The write itself carries every remaining decision (membership,
+    # canonicalisation, the cluster's refusals) — see
+    # set_cluster_vm_preferred_owners.
+    def apply_preferred_owners(vm, submitted)
+      unless cluster_owner_nodes_write_supported?
+        raise ForemanHyperv::OperationRefused,
+              'this fog build cannot write cluster preferred owners; the compute resource refuses ' \
+              'the setting rather than dropping it'
+      end
+
+      ha = cluster_ha_settings(vm)
+      return unless ha.found?
+
+      names = Array(submitted).map { |node| node.to_s.strip }.reject(&:empty?)
+      current = ha.preferred_node_names
+      return if current.is_a?(Array) &&
+                names.map(&:downcase).sort == current.map { |node| node.to_s.downcase }.sort
+
+      set_cluster_vm_preferred_owners(vm, names)
     end
 
     # PLG-21a. Put the machine into the cluster and PROVE it: fog writes over
