@@ -158,6 +158,18 @@ module FogExtensions
       # the fog Server has no such attribute of its own.
       attr_accessor :auto_failback
 
+      # PLG-36: the same trick for the OTHER owner-list surface. The edit
+      # form's Preferred owners control is answered through the compute
+      # attributes hash (the CLUSTER's current list arrives separately, from
+      # the role read — this accessor never claims to hold it), and a host
+      # whose stored compute_attributes round-trip the key (import, rebuild)
+      # must survive servers.new: without this accessor Fog's merge_attributes
+      # would raise UnknownAttribute on a key the machine has no property for.
+      # The write itself rides the cluster-role request
+      # (set_cluster_virtual_machine_role_owner_nodes), never this model —
+      # exactly the rule the accessor above records for failback.
+      attr_accessor :preferred_owners
+
       def select_nic(fog_nics, nic)
         nic_attrs = nic.compute_attributes
 
