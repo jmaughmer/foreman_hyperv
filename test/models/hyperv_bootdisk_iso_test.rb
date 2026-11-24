@@ -266,7 +266,18 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     cr, fog = build_cr(FogBootdisk.new)
 
     error = assert_raises(ArgumentError) { cr.iso_upload(iso, UUID, storage_id: 'D:\SomewhereElse') }
-    assert_includes error.message, 'D:\SomewhereElse'
+    # Cite the storage_id exactly as the message renders it (inspect doubles the backslash).
+    assert_includes error.message, 'D:\SomewhereElse'.inspect
+    assert_includes error.message, 'Nothing was transferred.'
+    assert_empty fog.calls
+  end
+
+  test 'iso_attach refuses a storage the host never reported before any fog call' do
+    cr, fog = build_cr(FogBootdisk.new)
+
+    error = assert_raises(ArgumentError) { cr.iso_attach('host.example.com.iso', UUID, storage_id: 'D:\SomewhereElse') }
+    assert_includes error.message, 'D:\SomewhereElse'.inspect
+    assert_includes error.message, 'Nothing was attached.'
     assert_empty fog.calls
   end
 
