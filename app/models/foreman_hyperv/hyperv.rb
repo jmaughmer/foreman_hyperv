@@ -695,6 +695,245 @@ module ForemanHyperv
               .detect { |domain| domain.id == name || domain.name == name }
     end
 
+    # --- bootdisk PR-2: the iso_* quartet --------------------------------------
+    #
+    # foreman_bootdisk's Orchestration::Compute calls exactly these four on the
+    # COMPUTE RESOURCE (contract verbatim from the installed 24.1.0):
+    #
+    #   iso_upload(isofile, uuid, storage_id:)                    before_build 6
+    #   iso_attach(File.basename(isofile), uuid, storage_id:)     before_build 900
+    #   iso_detach(uuid)                                          after_build 52
+    #   iso_delete(isofile, uuid)                                 after_build 53
+    #
+    # The bytes move by the host's own HTTP pull (Decision 2): iso_upload puts
+    # the file on BootdiskTransfer's shelf and hands the host fog's
+    # fetch_url_to_path, which refuses anything whose size or host-side sha256
+    # disagrees BEFORE the file takes its final name. The host-side file is
+    # named for the ISO's basename — attach and delete receive that basename
+    # and no nonce, so the nonce guards the URL, never the path. Attach sets
+    # the drive's media and moves the DVD to the front of the UEFI boot order
+    # in one VM-off step (both Add/Set-VMDvdDrive and Set-VMFirmware fail on a
+    # running machine — measured, spike 0.4); detach ejects; delete sweeps the
+    # basename out of every root the host itself reported, fog's scoped
+    # remove_file answering absence as false so a repeated cleanup is an
+    # answer, not a failure.
+    #
+    # The gates (the fork's rule: capabilities, never versions): the pull
+    # requires the enablement era AND :file_pull/fetch_url_to_path; attach
+    # requires the era and its five drive/order requests; the scoped delete
+    # checks the era AND :contained_file_removal/remove_file too, but every
+    # refusal there is a LOGGED SKIP, never a raise (round-17 finding 3) —
+    # cleanup rides destroy and must never fail a build. The
+    # two bootdisk words sit on the plugin's opt-in side (the enablement
+    # entries are predicate-paired and fog pairs no predicate with these;
+    # see the pin in HypervEnablementTest).
+
+    BOOTDISK_CAPABILITY_REFUSAL = 'This bootdisk operation is refused: the fog-hyperv this plugin runs ' \
+                                  'against does not carry the %<capability>s behaviour (no %<request>s). ' \
+                                  'Nothing was transferred, attached, detached or deleted. Upgrade ' \
+                                  'fog-hyperv to the build the bootdisk flow declares.'
+
+    BOOTDISK_REQUEST_REFUSAL = 'This bootdisk operation is refused: the fog-hyperv this plugin runs ' \
+                               'against cannot send %<requests>s. Nothing was changed on the machine.'
+
+    BOOTDISK_POWER_REFUSAL = 'The boot disk cannot be attached while the machine is %<state>s: ' \
+                             'setting a DVD image and moving the boot order both require the ' \
+                             'machine powered off (measured). Nothing was changed.'
+
+    BOOTDISK_GEN1_REFUSAL = 'The boot disk is refused for a generation %<generation>s machine: this ride ends ' \
+                            'in a UEFI boot-order write (fog reads and writes the preferred boot order ' \
+                            'through the VMM V2 root, a generation 2 surface), and a BIOS machine boots a ' \
+                            'bootdisk ISO through its legacy DVD path with no write needed. Nothing was changed.'
+
+    BOOTDISK_NO_MACHINE_REFUSAL = 'The boot disk ride is refused: no virtual machine %<vm_id>s answers on this ' \
+                                  'resource (the catalog does not hold it and the cluster-owner lookup found ' \
+                                  'nothing). Nothing was transferred or changed.'
+
+    BOOTDISK_NODE_REFUSAL = 'The boot disk ride is refused: the machine lives on cluster node %<node>s, which ' \
+                            'this endpoint cannot write (the cluster role names no owner, or an owner whose ' \
+                            'endpoint is not this one). The cluster shared volume the ISO lands on is only ' \
+                            'reachable from the owning side. Nothing was transferred or changed.'
+
+    BOOTDISK_NO_ROOTS_WARNING = 'The boot disk file cannot be deleted: the host reported no storage ' \
+                                'roots, so the sweep had nowhere to look. The file is left in place and ' \
+                                'the build proceeds.'
+
+    BOOTDISK_TRANSFER_FAILED = 'The boot disk ISO did not reach the host: the host reported receiving ' \
+                               '%<received>s bytes of the %<requested>s it was asked to fetch. Nothing ' \
+                               'was attached; the build is aborted rather than left to hang on a missing ' \
+                               'disc (measured failure mode).'
+
+    # foreman_bootdisk before_build prio 6 (Orchestration::Compute#setBuild):
+    # move the generated bootdisk ISO onto the Hyper-V host's storage so the
+    # attach step can mount it. The file RIDES, it is not pushed: Decision 2
+    # measured the WinRM push at 0.54-0.75 MB/s against the host's own HTTP
+    # pull at 148.9 MB/s, so the plugin stages the ISO under a one-shot nonce
+    # and fog's fetch_url_to_path has the HOST pull it — verifying status,
+    # byte count and sha256 on the host BEFORE the file takes its final name,
+    # and refusing to overwrite one that exists. The staged copy is deleted in
+    # the ensure either way: a leaked served ISO holds disk and host keys.
+    # Answers the transferred byte count; raises on any failure, because a
+    # build that proceeds without its media installs from the network instead.
+    def iso_upload(isofile, vm_id, options = {})
+      storage_id = options.is_a?(Hash) ? options[:storage_id] : nil
+      raise ArgumentError, 'iso_upload requires the generated ISO file' if isofile.blank? || !File.file?(isofile)
+      raise ArgumentError, 'iso_upload requires a virtual machine id' if vm_id.blank?
+      raise ArgumentError, 'iso_upload requires a storage id' if storage_id.blank?
+
+      # Gates first — every one of them, before a single read (round 17). A
+      # refused ride must refuse before 245 MB stages and before any WinRM.
+      refuse_without_enablement!
+      require_bootdisk_pull!
+      bootdisk_ride_check!(vm_id)
+      root = bootdisk_storage_root!(storage_id, 'iso_upload', 'transferred', storage_roots)
+
+      nonce = nil
+      begin
+        staged = ForemanHyperv::BootdiskTransfer.stage(isofile, machine: vm_id)
+        nonce = staged.nonce
+        # The host-side name is the ISO's basename, never the nonce: iso_attach
+        # and iso_delete receive only the basename (core hands them
+        # File.basename(isofile)), and fetch_url_to_path's no-overwrite rule
+        # turns a stale file here into a refusal that reaches a human.
+        target = bootdisk_host_path(root, File.basename(isofile))
+        received = client.fetch_url_to_path(url: staged.url, path: target,
+                                            sha256: staged.sha256, size: staged.bytes)
+        unless received == staged.bytes
+          raise ForemanHyperv::OperationRefused,
+                format(BOOTDISK_TRANSFER_FAILED, requested: staged.bytes, received: received.inspect)
+        end
+        staged.bytes
+      ensure
+        ForemanHyperv::BootdiskTransfer.discard(nonce) if nonce
+      end
+    end
+
+    # foreman_bootdisk before_build prio 900 (Orchestration::Compute#setBuild):
+    # mount the transferred ISO and put the DVD first in the boot order. The
+    # machine must be Off (measured: Set-VMDvdDrive refuses a running machine)
+    # and generation 2 (this ride ends in the UEFI boot-order write). fog's
+    # drive reads answer nil, ONE bare Hash, or an Array (measured) —
+    # dvd_drive_list normalizes all three. Fog's write requests take the
+    # computer_name of the node whose Get-VM printed the row (fog's own
+    # Servers#get answers it, including through the cluster-owner fallback);
+    # every drive call and both boot-order calls ride it, which is also what
+    # keeps a clustered machine's writes on the node that holds it.
+    def iso_attach(filename, vm_id, options = {})
+      storage_id = options.is_a?(Hash) ? options[:storage_id] : nil
+      name = bootdisk_filename!(filename, 'iso_attach')
+      raise ArgumentError, 'iso_attach requires a virtual machine id' if vm_id.blank?
+      raise ArgumentError, 'iso_attach requires a storage id' if storage_id.blank?
+
+      refuse_without_enablement!
+      require_fog_requests!(:get_vm_dvd_drive, :add_vm_dvd_drive, :set_vm_dvd_drive,
+                            :get_vm_boot_order, :set_vm_boot_order)
+      server = bootdisk_ride_check!(vm_id)
+      root = bootdisk_storage_root!(storage_id, 'iso_attach', 'attached', storage_roots)
+      node = reading_node(server)
+
+      drives = dvd_drive_list(client.get_vm_dvd_drive(vm_id: vm_id, computer_name: node))
+      drive = drives.first || client.add_vm_dvd_drive(vm_id: vm_id, computer_name: node)
+      drive_id = drive.is_a?(Hash) ? drive['id'] || drive[:id] : drive
+      if drive_id.blank?
+        raise ForemanHyperv::OperationRefused,
+              'The boot disk cannot be attached: the host answered no DVD-drive id. Nothing was changed.'
+      end
+      client.set_vm_dvd_drive(id: drive_id, vm_id: vm_id, computer_name: node,
+                              path: bootdisk_host_path(root, name))
+      boot = boot_order_with_dvd_first(drive_id, client.get_vm_boot_order(vm_id: vm_id, computer_name: node))
+      client.set_vm_boot_order(vm_id: vm_id, order: boot, computer_name: node)
+      true
+    end
+
+    # foreman_bootdisk after_build prio 52 (Orchestration::Compute#built):
+    # eject the media, and ALWAYS answer true (round 17, finding 3). The
+    # answer runs inside the /unattended/built save, and core fails the whole
+    # save on a falsy step answer (evidence/core-orchestration.rb:149) — which
+    # would leave the host in build mode with a live token forever. "Nothing
+    # to do" is this step's normal answer; a host refusal too is logged, never
+    # raised. The signature carries no filename (prio 52 is uuid-only), so
+    # every drive still REPORTING media is ejected — by contract, not accident.
+    # The machine read is best-effort: whatever node fog's fallback can reach
+    # gets the eject.
+    def iso_detach(vm_id)
+      raise ArgumentError, 'iso_detach requires a virtual machine id' if vm_id.blank?
+
+      begin
+        refuse_without_enablement!
+        require_fog_requests!(:get_vm_dvd_drive, :eject_vm_dvd_drive)
+        server = find_vm_by_uuid(vm_id)
+        node = reading_node(server)
+        drives = dvd_drive_list(client.get_vm_dvd_drive(vm_id: vm_id, computer_name: node))
+        loaded = drives.select { |drive| drive.is_a?(Hash) && (drive['path'] || drive[:path]).present? }
+        if loaded.empty?
+          logger.debug "Hyperv #{name}: bootdisk iso_detach: no drive holds media for #{vm_id}, nothing to eject"
+        else
+          loaded.each do |drive|
+            drive_id = drive['id'] || drive[:id]
+            next if drive_id.blank?
+
+            path = drive['path'] || drive[:path]
+            begin
+              client.eject_vm_dvd_drive(id: drive_id, vm_id: vm_id, computer_name: node)
+              logger.info "Hyperv #{name}: bootdisk iso_detach ejected #{path} from #{vm_id}"
+            rescue StandardError => e
+              logger.warn "Hyperv #{name}: bootdisk iso_detach could not eject #{path} from #{vm_id} " \
+                          "(#{e.message}); the machine stays as it is and the build proceeds"
+            end
+          end
+        end
+      rescue StandardError => e
+        logger.warn "Hyperv #{name}: bootdisk iso_detach for #{vm_id} refused (#{e.message}); the build proceeds"
+      end
+      true
+    end
+
+    # foreman_bootdisk after_build prio 53 (Orchestration::Compute#built):
+    # delete the transferred ISO, and ALWAYS answer true — same built-save
+    # arithmetic as detach, and worse here: delete runs AFTER detach already
+    # ejected, so the path cannot be read from the drive any more and the step
+    # sweeps the host-reported roots for the basename instead. A raise would
+    # make every later built retry fail at detach with nothing left to eject,
+    # wedging the machine in build mode forever. Absence is the common answer
+    # (every non-bootdisk build sweeps nothing), so each root answers quietly
+    # and only a real host error is logged.
+    def iso_delete(isofile, vm_id)
+      name = bootdisk_filename!(isofile.nil? ? nil : File.basename(isofile.to_s), 'iso_delete')
+      raise ArgumentError, 'iso_delete requires a virtual machine id' if vm_id.blank?
+
+      begin
+        refuse_without_enablement!
+        require_fog_requests!(:remove_file)
+        unless bootdisk_contained_file_removal_supported?
+          logger.warn "Hyperv #{name}: bootdisk iso_delete: this fog partner cannot scope a delete, " \
+                      'the transferred file is left in place and the build proceeds'
+          return true
+        end
+        roots = storage_roots
+        if roots.blank?
+          logger.warn "Hyperv #{name}: bootdisk iso_delete: #{BOOTDISK_NO_ROOTS_WARNING}"
+          return true
+        end
+        roots.each do |root|
+          path = bootdisk_host_path(root, name)
+          begin
+            removed = client.remove_file(path: path, root: root)
+            if removed
+              logger.info "Hyperv #{name}: bootdisk iso_delete removed #{path}"
+            else
+              logger.debug "Hyperv #{name}: bootdisk iso_delete: #{path} was not there"
+            end
+          rescue StandardError => e
+            logger.warn "Hyperv #{name}: bootdisk iso_delete could not sweep #{path} (#{e.message}); " \
+                        'the remaining roots are swept anyway'
+          end
+        end
+      rescue StandardError => e
+        logger.warn "Hyperv #{name}: bootdisk iso_delete for #{name} failed (#{e.message}); the build proceeds"
+      end
+      true
+    end
+
     # Hyper-V has no zones — the word names another provider's layout (core aliases
     # it to EC2 availability zones) — and core's base raises "Not implemented for
     # Hyper-V", which the API serves as a 500 for a question whose honest answer is
@@ -2909,6 +3148,157 @@ module ForemanHyperv
         client.respond_to?(:set_cluster_virtual_machine_role_owner_nodes)
     rescue StandardError
       false
+    end
+
+    # bootdisk PR-2: the pull gate — constant AND request method, exactly the
+    # cluster-role rule. :file_pull sits on the plugin's opt-in side and is
+    # deliberately NOT an enablement entry: the enablement map pairs each word
+    # with a supports_*? predicate, fog defines no predicate for the bootdisk
+    # pair, and a predicate-less entry on the enablement side would answer
+    # "missing" against the deployed fog and refuse every unlocked operation.
+    def bootdisk_file_pull_supported?
+      list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
+      list.include?(:file_pull) && client.respond_to?(:fetch_url_to_path)
+    rescue StandardError
+      false
+    end
+
+    # bootdisk PR-2: the scoped-delete gate, same rule and same reasons.
+    def bootdisk_contained_file_removal_supported?
+      list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
+      list.include?(:contained_file_removal) && client.respond_to?(:remove_file)
+    rescue StandardError
+      false
+    end
+
+    # bootdisk PR-2: the operations fog grew for the bootdisk ride requests
+    # with no capability word of their own (the eject, the DVD reads/writes,
+    # the boot-order pair); the constant cannot bless a partner whose client
+    # cannot send them, so the methods are probed directly. A fog that cannot
+    # answer the probe gets a refusal naming what it lacks.
+    def require_fog_requests!(*requests)
+      missing = requests.reject { |request| client.respond_to?(request) }
+      return if missing.empty?
+
+      raise ForemanHyperv::OperationRefused, format(BOOTDISK_REQUEST_REFUSAL, requests: missing.join(', '))
+    end
+
+    # bootdisk PR-2: the era gate plus the pull gate, in that order — the era
+    # first because the pull rides the same hardened transport every unlocked
+    # operation rides, and an era mismatch is the older, larger fact.
+    def require_bootdisk_pull!
+      refuse_without_enablement!
+      return if bootdisk_file_pull_supported?
+
+      raise ForemanHyperv::OperationRefused,
+            format(BOOTDISK_CAPABILITY_REFUSAL, capability: :file_pull, request: 'fetch_url_to_path')
+    end
+
+    # The ride's machine gates, shared by iso_upload and iso_attach, reading
+    # fog's OWN shapes (round 17, finding 4): server.state is the hypervenum
+    # (:Off/:Running/...), server.generation is :BIOS/:UEFI, and
+    # computer_name is the node whose Get-VM printed the row. The
+    # endpoint-node rule is the fail-closed one every other cluster write
+    # rides: on a clustered CR the ISO lands on the cluster shared volume, so
+    # the ride may only run when the node that owns the machine is the node
+    # this endpoint is. A stand-alone host answers no cluster and passes.
+    def bootdisk_ride_check!(vm_id)
+      server = find_vm_by_uuid(vm_id)
+      raise ForemanHyperv::OperationRefused, format(BOOTDISK_NO_MACHINE_REFUSAL, vm_id: vm_id) unless server
+
+      state = server.state
+      raise ForemanHyperv::OperationRefused, format(BOOTDISK_POWER_REFUSAL, state: state.inspect) if state != :Off
+
+      generation = server.generation
+      unless generation == :UEFI
+        raise ForemanHyperv::OperationRefused, format(BOOTDISK_GEN1_REFUSAL, generation: generation.inspect)
+      end
+
+      node = reading_node(server)
+      if endpoint_cluster && node.present? && !endpoint_serves_node?(node)
+        raise ForemanHyperv::OperationRefused, format(BOOTDISK_NODE_REFUSAL, node: node)
+      end
+
+      server
+    end
+
+    # The storage_id must be a root the HOST reported — the same fail-closed
+    # rule as the provision path's storage_root guard — matched case- and
+    # trailing-separator-insensitively, and the host's own spelling is what
+    # downstream joins use. The caller reads storage_roots exactly once.
+    def bootdisk_storage_root!(storage_id, step, phase, roots)
+      asked = storage_id.to_s.strip.chomp('\\')
+      match = roots.to_a.find { |root| root.to_s.chomp('\\').casecmp(asked).zero? }
+      unless match
+        raise ArgumentError, "#{step}: storage_id #{storage_id.inspect} is not a storage root the host " \
+                             "reported (#{roots.to_a.inspect}). Nothing was #{phase}."
+      end
+      match.to_s.chomp('\\')
+    end
+
+    # The host-side path for a bootdisk file: the root the HOST reported
+    # joined to a name validated bare by bootdisk_filename! (no separators,
+    # no traversal), so the single backslash here is the whole join. The
+    # plugin does not reach for Fog::Hyperv::PathJoin — the installed gem
+    # loads it only with the request files, and re-implementing a guard whose
+    # inputs are already validated is honest at four lines.
+    def bootdisk_host_path(root, name)
+      "#{root.to_s.chomp('\\')}\\#{name}"
+    end
+
+    # iso_attach and iso_delete receive a bare filename (core hands
+    # iso_attach File.basename(isofile)). A path-shaped or traversing name
+    # would die in PathJoin's separator guard anyway; refusing here names the
+    # step that received it.
+    def bootdisk_filename!(value, step)
+      name = value.to_s.strip
+      raise ArgumentError, "#{step} requires a filename" if name.blank?
+      if name.include?('\\') || name.include?('/') || name == '.' || name == '..'
+        raise ArgumentError, "#{step} received #{name.inspect}, which is not a bare filename"
+      end
+
+      name
+    end
+
+    # fog's drive reads answer in three shapes — nil when the VM has no DVD drive, ONE
+    # bare Hash when it has one, an Array of Hashes when it has several (all three measured
+    # on the lab host 2026-11-24). Array() turns the Hash into [key, value] pairs and
+    # Hash#first is one pair, so both would lie; normalizing once here is the honest fix.
+    def dvd_drive_list(answer)
+      case answer
+      when nil then []
+      when Array then answer
+      else [answer]
+      end
+    end
+
+    # iso_attach's boot-order composition: the DVD first, named by drive id
+    # (the one class fog's request contract lets a caller name), then every
+    # requestable class the read showed in read order, deduplicated, DvdDrive
+    # removed — a File boot entry has no requestable class (its Device is
+    # null, the F5 measurement) and fog's write script keeps unrequested
+    # entries' positions, so dropping it here preserves it rather than
+    # deleting it.
+    def boot_order_with_dvd_first(dvd_id, rows)
+      classes = Array(rows).filter_map do |entry|
+        case entry[:boot_type].to_s
+        when 'Network' then 'VMNetworkAdapter'
+        when 'Drive' then entry[:device_text].to_s[/\A\s*([A-Za-z]+(?:Drive|Adapter))/, 1]
+        end
+      end
+      [{ 'DvdDrive' => dvd_id }, *classes.uniq.reject { |klass| klass == 'DvdDrive' }]
+    end
+
+    # iso_upload/iso_attach storage scope: the storage_id arrives from the
+    # build form, and it is honoured ONLY where it names a path the host
+    # itself reported (a reported CSV mount path, a reported config/disk
+    # root) — case and separator spelling are folded for the comparison, and
+    # the ANSWER is the host's own spelling, so what travels to fog is what
+    # the host would print. Anything else is nil: a path nobody reported has
+    # no business receiving the ISO.
+    def reported_root(storage_id)
+      wanted = normalize_windows_path(storage_id).downcase
+      storage_roots.detect { |root| normalize_windows_path(root).downcase == wanted }
     end
 
     # PLG-36: the edit form's Preferred owners list, applied by save_vm.
