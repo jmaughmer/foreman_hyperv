@@ -5,7 +5,7 @@ require 'digest'
 require 'fileutils'
 require 'json'
 
-class ForemanHyperv
+module ForemanHyperv
   # The bootdisk transfer store: the plugin's staging handoff between the
   # worker that GENERATES an ISO and the Hyper-V host that PULLS it (Decision
   # 2 — spike 0.1 measured the WinRM push at 0.54-0.75 MB/s against the host's
