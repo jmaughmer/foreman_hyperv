@@ -44,12 +44,26 @@ module ForemanHyperv
     # payload does not slip the anchor the way a $ anchor would.
     GUID_PATTERN = /\A#{Fog::Hyperv::GUID}\z/i
 
-    # Keys whose value is an identity and is accepted only GUID-shaped, wherever
-    # it appears. The NIC and disk forms round-trip their real Hyper-V GUIDs
-    # (compute_attributes carries id and switch_id), and every fog by-id lookup
-    # is GUID-only — so legitimate edits keep working while an id forged as
-    # script text dies here.
-    GUID_KEYS = %i[id identity vm_id switch_id].freeze
+    # Keys whose value addresses a MACHINE or a SWITCH on the wire and is
+    # accepted only GUID-shaped, wherever it appears: every fog by-id lookup
+    # is GUID-only — fog takes its by-id branch on exactly this shape, so
+    # "the plugin accepts this id" and "fog looks it up by id" cannot drift,
+    # and an id forged as script text dies here.
+    GUID_KEYS = %i[vm_id switch_id].freeze
+
+    # Keys whose value identifies a DEVICE INSIDE an already-GUID-addressed
+    # machine, which the edit form round-trips from what the endpoint and the
+    # DB reported (PLG-37, measured 2026-11-24: identity and volume ids arrive
+    # as WMI device paths like Microsoft:1C51C4EE-...\\D07B9966-...\\0\\0\\D,
+    # and the NIC row carries its DB row id). These values select nothing on
+    # the wire — an unmatched one matches no device — but they still ride to
+    # interpolation sinks, so the endpoint's own shapes are what is accepted:
+    # a GUID, a numeric row id, or a Microsoft:-prefixed WMI path whose
+    # segments are GUIDs, controller numbers, or drive letters. Names, script
+    # text, and path traversal stay refused.
+    DEVICE_ID_KEYS = %i[id identity].freeze
+    WMI_DEVICE_PATH = /\AMicrosoft:#{Fog::Hyperv::GUID}(?:\\(?:#{Fog::Hyperv::GUID}|\d+|[A-Z]))*\z/i
+    DB_ROW_ID = /\A\d+\z/
 
     # Keys a machine hash must never carry at all. path is fog's own create
     # target and only this resource sets it (from a cluster shared volume);
@@ -66,15 +80,23 @@ module ForemanHyperv
     # create/update interface loops dispatch these hashes with
     # nic.send(:"#{k}=", v) — send reaches every setter that exists on the
     # model, so the key must be on a fixed list, not merely non-empty.
-    # ip/ip6 are core's pass-through keys, not fog's: host_interfaces_attrs
-    # merges them onto every physical NIC's compute_attributes on create, and
-    # create_interfaces excepts them (with identity) before fog's setters —
-    # they ride to this validator and no further, their characters still
-    # checked. PLG-24: the host form carries them, and before this line the
-    # first clustered machine died on the IPv4 its operator typed.
+    # The off-model keys on this list are legitimate form traffic that names
+    # nothing Hyper-V is asked to do, and each rides to this validator and no
+    # further, its characters still checked: ip/ip6 are core's pass-through
+    # (PLG-24: host_interfaces_attrs merges them onto every physical NIC, and
+    # the first clustered machine died on the IPv4 its operator typed), and
+    # PLG-37 adds the interface-row columns — a host-form EDIT submits each
+    # NIC's full row (identifier/domain_id/subnet_id/managed/primary/
+    # provision/execution/tag/attached_to, measured refusing as 'identifier'
+    # and 'execution' in production.log 881036ec) because
+    # hyperv_add_attributes copies the form's interfaces_attributes wholesale
+    # into the compute hash; update_interfaces picks its own keys, so these
+    # reach no fog setter.
     NIC_KEYS = %i[
       _destroy _delete id identity mac mac_address name switch_name switch_id
       ip ip6
+      identifier domain_id subnet_id managed primary provision execution
+      tag attached_to
       is_legacy is_management_os connected dynamic_mac_address_enabled
       mac_address_spoofing dhcp_guard router_guard allow_teaming
       compute_attributes
@@ -199,6 +221,11 @@ module ForemanHyperv
           raise unsafe(key) if context == :generic && !key.to_s.match?(GENERIC_KEY)
 
           check_key!(key, value, context: context)
+          # Identity keys own their shape above (GUID, row id, WMI device
+          # path); the generic character allowlist would refuse the path's
+          # backslashes, and a second opinion there buys nothing.
+          next if GUID_KEYS.include?(key) || DEVICE_ID_KEYS.include?(key)
+
           check_value!(key, value, context: context)
         end
       end
@@ -207,6 +234,19 @@ module ForemanHyperv
         if GUID_KEYS.include?(key)
           validate_id!(value) if value.present?
           return
+        end
+
+        # Device identities round-tripped from the endpoint's or the DB's own
+        # answers: GUID-shaped, numeric row id, or Microsoft: WMI path — and
+        # nothing else. The refusal class is the same as for a bad machine id:
+        # the value could not have come from the shapes Hyper-V reports.
+        if DEVICE_ID_KEYS.include?(key) && value.present?
+          text = value.to_s
+          return if text.match?(GUID_PATTERN) || text.match?(WMI_DEVICE_PATH) || text.match?(DB_ROW_ID)
+
+          raise ForemanHyperv::UnsafeIdentifier,
+                'A device identifier must be the GUID, the Microsoft: device path, or the form row ' \
+                'id the endpoint reported; nothing was asked of the machine with this identifier'
         end
 
         if context == :vm
