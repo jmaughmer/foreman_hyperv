@@ -82,7 +82,9 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     attr_reader :calls
     attr_accessor :dvd_rows, :fetch_answer, :remove_answers, :boot_rows
 
-    def initialize(dvd_rows: [{ id: 'dvd-1', vm_id: HypervBootdiskIsoTest::UUID, path: nil }],
+    # dvd_rows carries fog's MEASURED live answers: nil (no drive), ONE bare
+    # Hash (the VM has one drive), an Array of Hashes (several).
+    def initialize(dvd_rows: { id: 'dvd-1', vm_id: HypervBootdiskIsoTest::UUID, path: nil },
                    fetch_answer: nil, remove_answers: {}, boot_rows: HypervBootdiskIsoTest::BOOT_ORDER_ROWS)
       @calls = []
       @dvd_rows = dvd_rows
@@ -105,9 +107,10 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       @dvd_rows
     end
 
+
     def add_vm_dvd_drive(vm_id:, **options)
       @calls << [:add_vm_dvd_drive, vm_id, options]
-      [{ id: 'dvd-new', vm_id: vm_id, path: nil }]
+      { id: 'dvd-new', vm_id: vm_id, path: nil }
     end
 
     def set_vm_dvd_drive(id:, vm_id:, path:)
@@ -305,6 +308,16 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   # ---- iso_attach --------------------------------------------------------------
 
+  test 'iso_attach reads every shape fog answers and takes the first drive of a list' do
+    fog = FogBootdisk.new(dvd_rows: [{ id: 'dvd-a', vm_id: UUID, path: nil },
+                                     { id: 'dvd-b', vm_id: UUID, path: nil }])
+    cr, = build_cr(fog)
+
+    cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
+
+    assert_includes fog.calls, [:set_vm_dvd_drive, 'dvd-a', UUID, 'C:\VMs\host.example.com.iso']
+  end
+
   test 'iso_attach sets the media on the drive the VM has and puts the DVD first, existing classes behind it' do
     cr, fog = build_cr(FogBootdisk.new)
 
@@ -320,7 +333,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   end
 
   test 'iso_attach adds the drive when the VM has none and drives the whole sequence off the new drive id' do
-    fog = FogBootdisk.new(dvd_rows: [])
+    fog = FogBootdisk.new(dvd_rows: nil)
     cr, = build_cr(fog)
 
     cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
@@ -351,7 +364,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   # ---- iso_detach --------------------------------------------------------------
 
   test 'iso_detach ejects the media the drive is holding and answers that it did' do
-    fog = FogBootdisk.new(dvd_rows: [{ id: 'dvd-1', vm_id: UUID, path: 'C:\VMs\host.example.com.iso' }])
+    fog = FogBootdisk.new(dvd_rows: { id: 'dvd-1', vm_id: UUID, path: 'C:\VMs\host.example.com.iso' })
     cr, = build_cr(fog)
 
     assert_equal true, cr.iso_detach(UUID)
