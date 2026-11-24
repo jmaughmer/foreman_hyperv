@@ -179,4 +179,68 @@ class InputValidationTest < ActiveSupport::TestCase
     assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.refuse_text!(:cluster_name, "x';whoami;'") }
     IV.refuse_text!(:cluster_name, 'HVCLUSTER')
   end
+
+  # PLG-37: the edit form round-trips identifiers the MACHINE is not addressed
+  # by — a NIC identity and a disk id are WMI device paths exactly as the host's
+  # WMI layer reports them, and the row `id` is the DB row id Rails' form builder
+  # re-emits. The bare-GUID rule applied to these keys wherever they appeared,
+  # so the first host-edit POST since the rule (2026-11-24, PLG-36 acceptance)
+  # died in validate_hash! before fog was asked anything; create never carried
+  # these keys, so create could not see it. The machine is still addressed by
+  # the bare GUID demanded up front, an unmatched device id simply matches
+  # nothing, and the injection sinks these values can reach stay gated by the
+  # endpoint's own shapes: GUIDs, numeric row ids, and `Microsoft:` WMI paths
+  # whose segments are GUIDs, controller numbers, or drive letters.
+  def test_edit_roundtrip_device_ids_pass
+    wmi_disk = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D07B9966-E6F1-4C58-9F4B-C420EBE2A804\\0\\0\\D'
+    wmi_dvd = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D07B9966-E6F1-4C58-9F4B-C420EBE2A804\\0\\1\\E'
+    # The measured POST shape (PLG-36 acceptance, production.log b4391aed).
+    IV.validate_hash!(
+      interfaces_attributes: {
+        '0' => {
+          id: '6',
+          identity: wmi_disk,
+          managed: '1',
+          compute_attributes: { identity: wmi_disk, switch_id: GUID, vlan_operation_mode: 'Untagged' }
+        }
+      },
+      volumes_attributes: {
+        '0' => { id: wmi_disk, controller_number: 0, controller_type: 'IDE' },
+        '1' => { id: wmi_dvd }
+      }
+    )
+    # The bare shapes that already passed keep passing.
+    IV.validate_hash!({ id: GUID }, context: :nic)
+    IV.validate_hash!({ identity: GUID }, context: :nic)
+    IV.validate_hash!({ id: '6' }, context: :nic)
+  end
+
+  def test_machine_addressing_keys_stay_bare_guid
+    # switch_id and vm_id name machines and switches on the wire — fog takes
+    # its by-id branch on exactly the GUID shape, so a device path or a row id
+    # there is a bug, not round-trip traffic.
+    assert_raises(ForemanHyperv::UnsafeIdentifier) do
+      IV.validate_hash!({ vm_id: 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248' })
+    end
+    assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.validate_hash!({ vm_id: '6' }) }
+    assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.validate_hash!({ switch_id: '6' }) }
+    assert_raises(ForemanHyperv::UnsafeIdentifier) { IV.validate_hash!({ switch_id: 'hv-node1' }) }
+  end
+
+  def test_device_id_keys_still_refuse_script_text_and_forged_paths
+    bad = [
+      "6';whoami;'", 'x$(whoami)', '6;id', 'C:\\ClusterStorage\\Volume1',
+      "Microsoft:#{GUID}';whoami;'", "Microsoft:#{GUID}\\..\\..\\windows",
+      'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\../../x', 'Microsoft:',
+      "Microsoft:#{GUID}\\hv-node1", 'hv-node1', 'x[1]'
+    ]
+    bad.each do |value|
+      assert_raises(ForemanHyperv::UnsafeIdentifier, "id accepted #{value.inspect}") do
+        IV.validate_hash!({ id: value })
+      end
+      assert_raises(ForemanHyperv::UnsafeIdentifier, "identity accepted #{value.inspect}") do
+        IV.validate_hash!({ identity: value })
+      end
+    end
+  end
 end
