@@ -58,6 +58,18 @@ module ForemanHyperv
                                'removes this drop-in (measured), so re-apply it after every installer run. ' \
                                'Nothing was staged.'
 
+    # The Apache drop-ins the pull URL rides. Measured (2026-11-24,
+    # evidence/bd-pr3-apache-2026-11-24.log): foreman-installer PURGES the
+    # vhost drop-in dirs, so the installed snippet is a state that can
+    # vanish silently — hence the pre-staging check below, and the shipped
+    # source file config/apache/foreman-bootdisk-pull.conf whose basename
+    # these paths pin (the endpoint test asserts the shared name). Module
+    # scope, NOT class << self: constants inside a singleton-class block live
+    # on the singleton, and BootdiskTransfer::HTTP_SNIPPET_PATH would not
+    # resolve from the outside (measured as a NameError, 2026-11-24).
+    HTTP_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman.d/foreman-bootdisk-pull.conf'
+    HTTPS_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman-ssl.d/foreman-bootdisk-pull.conf'
+
     # Where the pull's files live. Production NEVER sets the accessors: the
     # readers resolve override-first (tests set them directly), else the
     # settings, PER OPERATION — nothing reads a Setting at boot, because a
@@ -66,15 +78,6 @@ module ForemanHyperv
     # documented dormant state: stage() refuses before writing a byte.
     class << self
       attr_accessor :served_root, :staging_root
-
-      # The Apache drop-ins the pull URL rides. Measured (2026-11-24,
-      # evidence/bd-pr3-apache-2026-11-24.log): foreman-installer PURGES the
-      # vhost drop-in dirs, so the installed snippet is a state that can
-      # vanish silently — hence the pre-staging check below, and the shipped
-      # source file config/apache/foreman-bootdisk-pull.conf whose basename
-      # these paths pin (the endpoint test asserts the shared name).
-      HTTP_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman.d/foreman-bootdisk-pull.conf'
-      HTTPS_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman-ssl.d/foreman-bootdisk-pull.conf'
 
       # Create the two roots if missing, at the modes measured to work: the
       # served root 0711 (Apache traverses in, local users cannot list — the

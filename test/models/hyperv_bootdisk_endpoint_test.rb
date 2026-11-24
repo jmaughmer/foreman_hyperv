@@ -46,7 +46,19 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 class HypervBootdiskEndpointTest < ActiveSupport::TestCase
   UUID = '1c51c4ee-df90-4cee-a9f7-218888711248'
   CR_URL = 'https://hyperv.example.com:5985'
-  SNIPPET_SOURCE = File.expand_path('../../config/apache/foreman-bootdisk-pull.conf', __dir__)
+  # The shipped snippet, resolved both ways it runs: from the repo tree in
+  # development, and from the INSTALLED gem on the CI box (the suite stages
+  # only test/, so a repo-relative path cannot exist there — and "the plugin
+  # ships it" is a claim about the GEM, so the gem path is the honest one).
+  REPO_SNIPPET = File.expand_path('../../config/apache/foreman-bootdisk-pull.conf', __dir__)
+  SNIPPET_SOURCE =
+    if File.file?(REPO_SNIPPET)
+      REPO_SNIPPET
+    else
+      require 'rubygems'
+      File.join(Gem::Specification.find_by_name('foreman_hyperv').gem_dir,
+                'config', 'apache', 'foreman-bootdisk-pull.conf')
+    end
 
   # Answers what Fog::Hyperv::Compute::Server really exposes (see the PR-2
   # suite for why each field looks like this); iso_upload reads only the
