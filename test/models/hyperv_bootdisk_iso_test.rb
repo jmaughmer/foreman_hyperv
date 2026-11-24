@@ -269,6 +269,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     # Cite the storage_id exactly as the message renders it (inspect doubles the backslash).
     assert_includes error.message, 'D:\SomewhereElse'.inspect
     assert_includes error.message, 'Nothing was transferred.'
+    assert_includes error.message, 'C:\VMs'.inspect, 'roots render the way the refusal cites storage_id'
     assert_empty fog.calls
   end
 
@@ -278,6 +279,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     error = assert_raises(ArgumentError) { cr.iso_attach('host.example.com.iso', UUID, storage_id: 'D:\SomewhereElse') }
     assert_includes error.message, 'D:\SomewhereElse'.inspect
     assert_includes error.message, 'Nothing was attached.'
+    assert_includes error.message, 'C:\ClusterStorage\Volume1'.inspect
     assert_empty fog.calls
   end
 

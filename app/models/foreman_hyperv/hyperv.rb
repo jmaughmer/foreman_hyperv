@@ -763,7 +763,8 @@ module ForemanHyperv
       root = reported_root(storage_id)
       if root.nil?
         raise ArgumentError, "iso_upload storage_id #{storage_id.inspect} is not a path this host reported " \
-                             "(the host reports: #{storage_roots.join(', ')}). Nothing was transferred."
+                             "(the host reports: #{storage_roots.map(&:inspect).join(', ')}). " \
+                             'Nothing was transferred.'
       end
 
       require_bootdisk_pull!
@@ -801,7 +802,8 @@ module ForemanHyperv
       root = reported_root(storage_id)
       if root.nil?
         raise ArgumentError, "iso_attach storage_id #{storage_id.inspect} is not a path this host reported " \
-                             "(the host reports: #{storage_roots.join(', ')}). Nothing was attached."
+                             "(the host reports: #{storage_roots.map(&:inspect).join(', ')}). " \
+                             'Nothing was attached.'
       end
 
       refuse_without_enablement!
