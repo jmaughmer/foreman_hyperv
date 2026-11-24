@@ -45,6 +45,34 @@ module ForemanHyperv
                                       'across all Foreman processes (a Postgres advisory-lock ' \
                                       'election). A tick replays one page load of endpoint ' \
                                       'reads so the next human load is warm.'))
+              # bootdisk PR-3: the two roots the pull endpoint rides (plan v10
+              # Decision 2). DEFAULT BLANK — an unset pair is the documented
+              # dormant state the store refuses with (iso_* steps answer
+              # before writing a byte), so enabling the shelf is a deliberate
+              # operator act: set both roots AND install the shipped Apache
+              # snippet (config/apache/foreman-bootdisk-pull.conf; the
+              # installer purges the drop-in dirs — measured 2026-11-24 — so
+              # the copy is an explicit act, re-applied after every installer
+              # run). Nothing reads these at boot: the store resolves them
+              # per operation, so a fresh install boots and migrates before
+              # any of this exists (the PLG-34 initializer lesson).
+              setting(:bootdisk_pull_root,
+                      type: :string,
+                      default: '',
+                      full_name: N_('Boot disk pull root'),
+                      description: N_('Directory Apache serves at /bootdisk-pull for Hyper-V hosts ' \
+                                      'to pull generated boot disk ISOs over HTTP (created 0711, ' \
+                                      'owner foreman, when missing). Must match the Alias target of ' \
+                                      'the foreman-bootdisk-pull.conf snippet. Blank keeps boot disk ' \
+                                      'transfers dormant: iso_upload refuses before staging.'))
+              setting(:bootdisk_staging_root,
+                      type: :string,
+                      default: '',
+                      full_name: N_('Boot disk staging root'),
+                      description: N_('Private directory beside the pull root holding in-flight ' \
+                                      'copies and sidecars (created 0700, owner foreman, when ' \
+                                      'missing; never served by Apache). Blank keeps boot disk ' \
+                                      'transfers dormant: iso_upload refuses before staging.'))
             end
           end
         end

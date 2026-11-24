@@ -45,12 +45,51 @@ module ForemanHyperv
 
     class ConfiguredRootError < StandardError; end
 
-    # Set by the plugin initializer from settings (bootdisk_pull_root /
-    # bootdisk_pull_url — spike 0.2 measured these as REQUIRED configuration,
-    # not derived), never by user input per operation. Nil until configured;
-    # tests set them directly.
+    # The refusal when the pull URL would be a lie: the setting says a root,
+    # the shelf may even exist, but Apache does not serve it — every built
+    # host would then hang waiting for media the host fetches as a 404. The
+    # message carries only this file's own paths (no remote text) and the
+    # remediation the measurement says is load-bearing: the installer PURGES
+    # the drop-in dirs, so the copy is a state that must be re-applied.
+    BOOTDISK_SNIPPET_REFUSAL = 'The boot disk file cannot be staged for the host to pull: the Apache ' \
+                               'configuration serving /bootdisk-pull is not installed (%<paths>s). The gem ' \
+                               'ships the snippet as config/apache/foreman-bootdisk-pull.conf — copy it to ' \
+                               'the path named and reload httpd (systemctl reload httpd). foreman-installer ' \
+                               'removes this drop-in (measured), so re-apply it after every installer run. ' \
+                               'Nothing was staged.'
+
+    # Where the pull's files live. Production NEVER sets the accessors: the
+    # readers resolve override-first (tests set them directly), else the
+    # settings, PER OPERATION — nothing reads a Setting at boot, because a
+    # fresh install boots and migrates before plugin settings exist, and a
+    # Setting read is an in-memory cache hit anyway. Blank answers stay the
+    # documented dormant state: stage() refuses before writing a byte.
     class << self
       attr_accessor :served_root, :staging_root
+
+      # The Apache drop-ins the pull URL rides. Measured (2026-11-24,
+      # evidence/bd-pr3-apache-2026-11-24.log): foreman-installer PURGES the
+      # vhost drop-in dirs, so the installed snippet is a state that can
+      # vanish silently — hence the pre-staging check below, and the shipped
+      # source file config/apache/foreman-bootdisk-pull.conf whose basename
+      # these paths pin (the endpoint test asserts the shared name).
+      HTTP_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman.d/foreman-bootdisk-pull.conf'
+      HTTPS_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman-ssl.d/foreman-bootdisk-pull.conf'
+
+      # Create the two roots if missing, at the modes measured to work: the
+      # served root 0711 (Apache traverses in, local users cannot list — the
+      # nonce is the whole URL secret) and the staging root 0700 (unserved,
+      # ungroupable). An EXISTING root keeps whatever mode the operator set —
+      # the ensure creates, it does not police — and a root that cannot be
+      # created raises through: that is a broken deployment, not a dormant
+      # one. mkdir applies the umask (a worker at 0077 would hide the served
+      # root from Apache), so the mode is set explicitly after creation.
+      # iso_upload calls this on its pre-flight line; the store's own write
+      # contract stays pure: it writes INSIDE roots that exist.
+      def ensure_roots!
+        ensure_root!(served_root!, 0o711)
+        ensure_root!(staging_root!, 0o700)
+      end
 
       # Copy the source into the served root under a fresh nonce. COPIES,
       # never renames: the source lives in the worker's PrivateTmp, which is
@@ -71,6 +110,11 @@ module ForemanHyperv
         sha256 = Digest::SHA256.file(src).hexdigest
         nonce = SecureRandom.hex(16)
         url = "#{transfer_url!}/#{nonce}.iso"
+        # The URL is only a promise Apache can keep if the drop-in is
+        # installed — and it can vanish silently with the next installer run.
+        # Checked here, before a byte is copied: staging into an unserved
+        # root would strand the ride as a host-side 404 minutes later.
+        require_served_snippet!(url)
         tmp = File.join(staging, "staging-#{nonce}.iso.part")
         sidecar = File.join(staging, "staging-#{nonce}.json")
         final = File.join(served, "#{nonce}.iso")
@@ -121,17 +165,51 @@ module ForemanHyperv
         end
       end
 
+      # Is the Apache drop-in at this path installed? A plain file check on
+      # purpose, not a live HTTP probe: the probe would add failure modes
+      # (the endpoint must resolve its own unattended_url from inside the
+      # worker) for an answer the file already gives, and the end-to-end
+      # proof of the served endpoint is the real ride, not this check. Named
+      # and public because it is the seam tests answer through.
+      def apache_snippet_present?(path)
+        File.file?(path.to_s)
+      end
+
       private
 
+      # Which drop-ins the URL about to be handed to the host requires: the
+      # HTTP vhost always; the TLS vhost additionally when the unattended URL
+      # is https — the two vhosts Include only their own drop-in dir
+      # (measured), so an https URL served without the ssl-side copy answers
+      # 404 on the very request the host makes.
+      def require_served_snippet!(url)
+        wanted = [HTTP_SNIPPET_PATH]
+        wanted << HTTPS_SNIPPET_PATH if url.start_with?('https://')
+        missing = wanted.reject { |path| apache_snippet_present?(path) }
+        return if missing.empty?
+
+        raise ForemanHyperv::OperationRefused, format(BOOTDISK_SNIPPET_REFUSAL, paths: missing.join(' and '))
+      end
+
+      def ensure_root!(root, mode)
+        return if File.directory?(root)
+
+        FileUtils.mkdir_p(root)
+        # mkdir applies the process umask (a 0077 dynflow worker would hide
+        # even the served root from Apache); the mode is the measured one, so
+        # it is set explicitly after creation, and only for what we created.
+        File.chmod(mode, root)
+      end
+
       def served_root!
-        root = served_root.to_s
+        root = served_root.presence || Setting[:bootdisk_pull_root].to_s
         raise ConfiguredRootError, 'bootdisk_pull_root is not configured' if root.blank?
 
         root.chomp('/')
       end
 
       def staging_root!
-        root = staging_root.to_s
+        root = staging_root.presence || Setting[:bootdisk_staging_root].to_s
         raise ConfiguredRootError, 'bootdisk_staging_root is not configured' if root.blank?
 
         root.chomp('/')
