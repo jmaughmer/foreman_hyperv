@@ -276,7 +276,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
     assert_raises(Errno::EACCES) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
     assert_empty Dir.children(@staging), 'a sidecar whose ISO never landed is a sidecar the janitor would chase forever'
-    assert_empty Dir.children(@served), 'the served root holds ONLY complete files: a half-written flip target is removed too'
+    assert_empty Dir.children(@served), 'nothing reached the root Apache serves'
   end
 
   test 'a cross-filesystem flip that fails mid-copy leaves NO partial file in the served root' do
@@ -292,7 +292,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     end
 
     assert_raises(Errno::EACCES) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
-    assert_empty Dir.children(@served), 'the served root holds ONLY complete files: a half-written flip target is swept too'
+    assert_empty Dir.children(@served),
+                 'the served root holds ONLY complete files: a half-written flip target is swept too'
     assert_empty Dir.children(@staging)
   ensure
     FileUtils.define_singleton_method(:mv, original)
@@ -477,7 +478,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
     cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
 
-    assert_includes fog.calls, [:set_vm_dvd_drive, 'dvd-a', UUID, 'C:\VMs\host.example.com.iso', { computer_name: 'HV-NODE1' }]
+    written = [:set_vm_dvd_drive, 'dvd-a', UUID, 'C:\VMs\host.example.com.iso', { computer_name: 'HV-NODE1' }]
+    assert_includes fog.calls, written
   end
 
   test 'iso_attach sets the media on the drive the VM has and puts the DVD first, existing classes behind it' do
@@ -486,7 +488,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     cr.expects(:storage_roots).once.returns(['C:\VMs'])
     cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
 
-    assert_includes fog.calls, [:set_vm_dvd_drive, 'dvd-1', UUID, 'C:\VMs\host.example.com.iso', { computer_name: 'HV-NODE1' }],
+    written = [:set_vm_dvd_drive, 'dvd-1', UUID, 'C:\VMs\host.example.com.iso', { computer_name: 'HV-NODE1' }]
+    assert_includes fog.calls, written,
                     'the ride threads the machine-owning node into every drive write (round 19, finding 4)'
     assert_not(fog.calls.any? { |c| c.first == :add_vm_dvd_drive }, 'the VM already has a DVD drive; one more is a bug')
     set = fog.calls.find { |c| c.first == :set_vm_boot_order }
@@ -503,7 +506,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
 
     assert(fog.calls.any? { |c| c.first == :add_vm_dvd_drive })
-    assert_includes fog.calls, [:set_vm_dvd_drive, 'dvd-new', UUID, 'C:\VMs\host.example.com.iso', { computer_name: 'HV-NODE1' }]
+    written = [:set_vm_dvd_drive, 'dvd-new', UUID, 'C:\VMs\host.example.com.iso', { computer_name: 'HV-NODE1' }]
+    assert_includes fog.calls, written
     set = fog.calls.find { |c| c.first == :set_vm_boot_order }
     assert_equal 'dvd-new', set[2].first['DvdDrive']
   end
