@@ -234,12 +234,19 @@ class HypervEnablementTest < ActiveSupport::TestCase
     # :cluster_role_owner_nodes (the preferred-owners read and its row) joins
     # the same side, and PLG-36's :cluster_role_owner_nodes_write (the
     # preferred-owners WRITE and its edit-form control) joins beside it, for
-    # the same reason. The equality is pinned whole: a new fog behaviour has
-    # to join one side of this line on purpose, never by accident (this is
-    # that line moving again).
+    # the same reason. The bootdisk pair joins now too, and ON THIS SIDE:
+    # fog pairs no supports_*? predicate with :file_pull or
+    # :contained_file_removal (the enablement side is predicate-paired, so a
+    # predicate-less entry there would answer "missing" against the deployed
+    # fog and refuse every unlocked operation), and each gates exactly one
+    # operation pair — constant AND request method, the same rule the cluster
+    # words gate by (see HypervBootdiskIsoTest). The equality is pinned whole:
+    # a new fog behaviour has to join one side of this line on purpose, never
+    # by accident (this is that line moving again).
     assert_equal Fog::Hyperv::CAPABILITIES.sort,
                  (ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.keys +
-                   %i[cluster_role_failback cluster_role_owner_nodes cluster_role_owner_nodes_write]).sort
+                   %i[cluster_role_failback cluster_role_owner_nodes cluster_role_owner_nodes_write
+                      contained_file_removal file_pull]).sort
   end
 
   def test_enablement_stands_when_the_fog_answers_all_six
