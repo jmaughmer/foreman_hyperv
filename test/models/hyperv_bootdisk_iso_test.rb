@@ -272,16 +272,30 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   test 'a failed flip cleans the temp AND the sidecar, not just the temp' do
     src = make_iso(Dir.mktmpdir('bd-src'))
-    # A cross-filesystem FileUtils.mv copies into the REAL target name before
-    # it can fail (round 19, finding N1) — the rescue must sweep that partial.
-    FileUtils.stubs(:mv) do |_src, dest|
-      FileUtils.touch(dest)
-      raise Errno::EACCES
-    end
+    FileUtils.stubs(:mv).raises(Errno::EACCES)
 
     assert_raises(Errno::EACCES) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
     assert_empty Dir.children(@staging), 'a sidecar whose ISO never landed is a sidecar the janitor would chase forever'
     assert_empty Dir.children(@served), 'the served root holds ONLY complete files: a half-written flip target is removed too'
+  end
+
+  test 'a cross-filesystem flip that fails mid-copy leaves NO partial file in the served root' do
+    src = make_iso(Dir.mktmpdir('bd-src'))
+    # A cross-device FileUtils.mv is copy-then-unlink: it writes into the REAL
+    # target name and can fail partway (round 19, finding N1). Mocha's stub
+    # block is not an implementation hook, so the real method is replaced for
+    # the duration of the test and restored after.
+    original = FileUtils.method(:mv)
+    FileUtils.define_singleton_method(:mv) do |_from, to|
+      FileUtils.touch(to)
+      raise Errno::EACCES
+    end
+
+    assert_raises(Errno::EACCES) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
+    assert_empty Dir.children(@served), 'the served root holds ONLY complete files: a half-written flip target is swept too'
+    assert_empty Dir.children(@staging)
+  ensure
+    FileUtils.define_singleton_method(:mv, original)
   end
 
   test 'the stage url is the unattended URL plus the nonce path' do
