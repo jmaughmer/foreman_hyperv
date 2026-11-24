@@ -35,24 +35,37 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 # iso_attach and iso_delete receive that basename and no nonce, so the nonce
 # protects the URL, never the path.
 #
+# Round 17 (REQUEST_CHANGES) folded three semantics back in, all of them
+# proven by core code, not taste: (1) the after_build steps run INSIDE the
+# /unattended/built save and core fails the whole save on a falsy step answer
+# (evidence/core-orchestration.rb:149), so detach and delete — cleanup steps
+# that run on EVERY build and are legitimately "nothing to do" most times —
+# answer true always and log what they skipped; attach and upload keep
+# raising, because a bootdisk that did not mount is a build that must not
+# complete. (2) The machine is read through fog's own shape (state/generation
+# enums, computer_name) and the ride refuses a machine that is not Off, not
+# UEFI, or hosted on a cluster node this endpoint cannot write — the same
+# fail-closed node rule every other cluster operation rides. (3) The staged
+# file is chmod 0644 + fsynced BEFORE the flip into the served root, and the
+# URL is computed BEFORE anything is written, so a blank unattended URL cannot
+# orphan a served ISO.
+#
 # Capability gates, never versions (the fork's rule): the pull is refused when
 # the fog answers neither the :file_pull constant nor fetch_url_to_path, and
 # the scoped delete likewise for :contained_file_removal/remove_file — the
 # gate copies the cluster-role style, and these words sit on the plugin's
 # opt-in side, never the enablement six (fog pairs no supports_*? predicate
 # with them, and a predicate-less entry on the enablement side would answer
-# "missing" and refuse every unlocked operation). The pull and the attach
-# still ride the enablement era (they send through the same hardened WinRM
-# transport); the scoped delete does not — fog's own request carries its own
-# scope guard, and a destroy path that cannot clean up must not be gated on
-# the create era's partnership.
+# "missing" and refuse every unlocked operation).
 #
-# fog is a recording stub here (the fork's mutating-request rule: no
-# Fog.mock!); every refusal is asserted to happen BEFORE any fog call.
+# fog is a recording stub here (the fork's Fog.mock! ban); every refusal is
+# asserted to happen BEFORE any fog call. The machine stub answers in the
+# shapes fog's server model MEASURES (state/generation are hypervenum symbols,
+# computer_name is the node that answered) — round 17's point #2 was that the
+# previous stub answered a power_state no Hyper-V server has.
 class HypervBootdiskIsoTest < ActiveSupport::TestCase
   UUID = '1c51c4ee-df90-4cee-a9f7-218888711248'
   CR_URL = 'https://hyperv.example.com:5985'
-  VmStub = Struct.new(:id, :power_state)
   BOOT_ORDER_ROWS = [
     { position: 1, boot_type: 'Network', device_text: 'VMNetworkAdapter (Name =  Ethernet 0)',
       device_id: 'Microsoft:1', firmware_path: '' },
@@ -60,6 +73,21 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       device_id: 'Microsoft:2', firmware_path: '' },
     { position: 3, boot_type: 'File', device_text: '', device_id: '', firmware_path: '\EFI\BOOT\BOOTX64.EFI' }
   ].freeze
+
+  # Answers what Fog::Hyperv::Compute::Server really exposes (server.rb): the
+  # hypervenum symbols for state and generation, and the computer_name of the
+  # node that printed the row — the same reading_node input every other
+  # cluster decision in this plugin uses.
+  class MachineStub
+    attr_reader :id, :state, :generation, :computer_name
+
+    def initialize(id = HypervBootdiskIsoTest::UUID, state: :Off, generation: :UEFI, computer_name: 'HV-NODE1')
+      @id = id
+      @state = state
+      @generation = generation
+      @computer_name = computer_name
+    end
+  end
 
   setup do
     @served = Dir.mktmpdir('bd-served')
@@ -80,7 +108,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   class FogBootdisk
     attr_reader :calls
-    attr_accessor :dvd_rows, :fetch_answer, :remove_answers, :boot_rows
+    attr_accessor :dvd_rows, :fetch_answer, :remove_answers, :boot_rows,
+                  :raise_eject, :raise_remove_paths
 
     # dvd_rows carries fog's MEASURED live answers: nil (no drive), ONE bare
     # Hash (the VM has one drive), an Array of Hashes (several).
@@ -91,6 +120,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       @fetch_answer = fetch_answer
       @remove_answers = remove_answers
       @boot_rows = boot_rows
+      @raise_eject = false
+      @raise_remove_paths = []
     end
 
     # The enablement six, answered true (the era partnership the pull and the
@@ -119,6 +150,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
     def eject_vm_dvd_drive(id:, vm_id:)
       @calls << [:eject_vm_dvd_drive, id, vm_id]
+      raise Fog::Hyperv::Errors::PSError, 'eject failed (test)' if @raise_eject
+
       true
     end
 
@@ -139,6 +172,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
     def remove_file(path:, root:)
       @calls << [:remove_file, path, root]
+      raise Fog::Hyperv::Errors::PSError, 'remove failed (test)' if @raise_remove_paths.include?(path)
+
       !!remove_answers[path.downcase]
     end
   end
@@ -153,16 +188,24 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     undef_method :remove_file if method_defined?(:remove_file)
   end
 
+  class FogNoBootOrder < FogBootdisk
+    undef_method :set_vm_boot_order if method_defined?(:set_vm_boot_order)
+  end
+
   # An era fog missing one enablement predicate: the pull and attach refuse.
   class FogNoEra < FogBootdisk
     def supports_input_hardening? = false
   end
 
-  def build_cr(fog, roots: ['C:\VMs', 'C:\ClusterStorage\Volume1'], power: 'Off')
+  def build_cr(fog, roots: ['C:\VMs', 'C:\ClusterStorage\Volume1'], state: :Off,
+               generation: :UEFI, machine: MachineStub.new(UUID, state: state, generation: generation),
+               cluster: nil, serves: true)
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.stubs(:client).returns(fog)
     cr.stubs(:storage_roots).returns(roots)
-    cr.stubs(:find_vm_by_uuid).returns(VmStub.new(UUID, power))
+    cr.stubs(:find_vm_by_uuid).returns(machine)
+    cr.stubs(:endpoint_cluster).returns(cluster)
+    cr.stubs(:endpoint_serves_node?).returns(serves)
     [cr, fog]
   end
 
@@ -176,7 +219,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   test 'stage copies under an unguessable nonce, never renames the source away, and places atomically' do
     src = make_iso(@staging)
-    staged = ForemanHyperv::BootdiskTransfer.stage(src)
+    staged = ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
 
     assert_match(/\A[0-9a-f]{32}\z/, staged.nonce)
     assert File.file?(src), 'stage COPIES: the worker still owns its ISO (EXDEV across PrivateTmp forbids the rename)'
@@ -184,13 +227,56 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert File.file?(final), 'the served placement is <nonce>.iso under the served root'
     assert_equal File.binread(src), File.binread(final)
     assert Dir.children(@staging).none? { |f| f.end_with?('.part') }, 'no temp survivor in the staging root'
-    sidecar = File.join(@staging, "#{staged.nonce}.json")
-    assert File.file?(sidecar), 'the sidecar lives in the UNSERVED staging root beside the temp, not in the served one'
+  end
+
+  test 'the sidecar follows the janitor contract: staging- name in the unserved root, host and verifiers inside' do
+    src = make_iso(@staging)
+    staged = ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
+
+    sidecar = File.join(@staging, "staging-#{staged.nonce}.json")
+    assert File.file?(sidecar),
+           'sidecars match the staging-* pattern PR-4 janitor will sweep, in the root Apache cannot serve'
     meta = JSON.parse(File.read(sidecar))
-    assert_equal Digest::SHA256.file(src).hexdigest, meta['sha256']
-    assert_equal File.size(src), meta['size']
+    assert_equal staged.nonce, meta['nonce']
+    assert_equal UUID, meta['machine'], 'the sidecar names the machine the ride is for (plan v10 Decision 4)'
     assert_equal staged.sha256, meta['sha256']
-    assert_equal staged.bytes, meta['size']
+    assert_equal staged.bytes, meta['bytes']
+    assert_equal File.basename(src), meta['source']
+    # The janitor's age decision reads MTIME, never this field — but it is
+    # recorded, and an unparseable value here must not be a timestamp at all.
+    assert_kind_of String, meta['staged_at']
+    # The digest describes the bytes that were SERVED, not the worker's file:
+    # equal here because the copy is byte-identical, pinned because the
+    # verifier fog checks is THIS value.
+    assert_equal Digest::SHA256.file(File.join(@served, "#{staged.nonce}.iso")).hexdigest, staged.sha256
+  end
+
+  test 'the served copy is world-readable 0644 and fsynced before the flip, whatever the source mode was' do
+    src = make_iso(@staging)
+    File.chmod(0o600, src) # a PrivateTmp worker under a 077 umask generates exactly this
+
+    staged = ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
+    mode = File.stat(File.join(@served, "#{staged.nonce}.iso")).mode & 0o777
+
+    assert_equal 0o644, mode, 'Apache (PR-3 Alias) must be able to read the shelf file whatever the worker umask was'
+  end
+
+  test 'a blank unattended URL refuses BEFORE anything is staged — no orphan can enter the served root' do
+    Setting.stubs(:[]).with(:unattended_url).returns('')
+    src = make_iso(@staging)
+
+    assert_raises(ForemanHyperv::OperationRefused) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
+    assert_empty Dir.children(@served), 'the URL is computed before the first write: a refused stage leaves no orphan'
+    assert_empty Dir.children(@staging)
+  end
+
+  test 'a failed flip cleans the temp AND the sidecar, not just the temp' do
+    src = make_iso(@staging)
+    FileUtils.stubs(:mv).raises(Errno::EACCES)
+
+    assert_raises(Errno::EACCES) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
+    assert_empty Dir.children(@staging), 'a sidecar whose ISO never landed is a sidecar the janitor would chase forever'
+    assert_empty Dir.children(@served)
   end
 
   test 'the stage url is the unattended URL plus the nonce path' do
@@ -200,11 +286,11 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   test 'discard removes the served ISO and its sidecar, and is an answer-free no-op when they are gone' do
     src = make_iso(Dir.mktmpdir('bd-src'))
-    staged = ForemanHyperv::BootdiskTransfer.stage(src)
+    staged = ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
     ForemanHyperv::BootdiskTransfer.discard(staged.nonce)
     assert_empty Dir.children(@served)
     assert_empty Dir.children(@staging)
-    assert File.file?(src), 'discard takes the shelf, never the worker\u2019s own copy'
+    assert File.file?(src), 'discard takes the shelf, never the copy the worker still owns'
     assert_nothing_raised { ForemanHyperv::BootdiskTransfer.discard(staged.nonce) }
   end
 
@@ -263,6 +349,66 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_empty fog.calls
   end
 
+  test 'iso_upload answers the gate refusals before reading roots or the machine at all' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, fog = build_cr(FogNoPull.new)
+    # Both reads would CRASH if attempted: the refusal must be decided by the
+    # gates alone (round 17 verified storage_roots used to make WinRM reads
+    # before the era gate — the tests only saw "no fog calls" because it was
+    # stubbed to answer politely).
+    cr.stubs(:storage_roots).raises(StandardError, 'roots must not be read before the gates')
+    cr.stubs(:find_vm_by_uuid).raises(StandardError, 'the machine must not be read before the gates')
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_upload(iso, UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, 'file_pull'
+    assert_empty fog.calls
+  end
+
+  test 'iso_upload refuses a machine that is not Off before staging anything — a refused rebuild pulls no 245 MB' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, fog = build_cr(FogBootdisk.new, state: :Running)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_upload(iso, UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, :Running.inspect
+    assert_empty fog.calls
+    assert_empty Dir.children(@served)
+  end
+
+  test 'iso_upload refuses a Gen1 (BIOS) machine: the boot-order write this ride ends in is UEFI-only' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, fog = build_cr(FogBootdisk.new, generation: :BIOS)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_upload(iso, UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, :BIOS.inspect
+    assert_empty fog.calls
+  end
+
+  test 'iso_upload refuses when the machine answers no server at all, naming the uuid' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, = build_cr(FogBootdisk.new, machine: nil)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_upload(iso, UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, UUID
+  end
+
+  test 'iso_upload on a clustered CR refuses a machine hosted on a node this endpoint cannot write' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, fog = build_cr(FogBootdisk.new, cluster: Object.new, serves: false)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_upload(iso, UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, 'HV-NODE1', 'the refusal names the node the machine answered from'
+    assert_empty fog.calls
+    assert_empty Dir.children(@served)
+  end
+
+  test 'iso_upload works on a clustered CR when the endpoint node itself hosts the machine' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, fog = build_cr(FogBootdisk.new, cluster: Object.new, serves: true)
+
+    assert_equal File.size(iso), cr.iso_upload(iso, UUID, storage_id: 'C:\VMs')
+    assert(fog.calls.any? { |c| c.first == :fetch_url_to_path })
+  end
+
   test 'iso_upload refuses a storage the host never reported before any fog call' do
     iso = make_iso(Dir.mktmpdir('bd-iso'))
     cr, fog = build_cr(FogBootdisk.new)
@@ -275,14 +421,12 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_empty fog.calls
   end
 
-  test 'iso_attach refuses a storage the host never reported before any fog call' do
-    cr, fog = build_cr(FogBootdisk.new)
+  test 'iso_upload reads the reported roots exactly once even when it refuses' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, = build_cr(FogBootdisk.new)
+    cr.expects(:storage_roots).once.returns(['C:\VMs'])
 
-    error = assert_raises(ArgumentError) { cr.iso_attach('host.example.com.iso', UUID, storage_id: 'D:\SomewhereElse') }
-    assert_includes error.message, 'D:\SomewhereElse'.inspect
-    assert_includes error.message, 'Nothing was attached.'
-    assert_includes error.message, 'C:\ClusterStorage\Volume1'.inspect
-    assert_empty fog.calls
+    assert_raises(ArgumentError) { cr.iso_upload(iso, UUID, storage_id: 'D:\Elsewhere') }
   end
 
   test 'iso_upload accepts a storage the host reported spelled differently, and writes with the host spelling' do
@@ -343,10 +487,57 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_equal 'dvd-new', set[2].first['DvdDrive']
   end
 
-  test 'iso_attach refuses a machine that is not powered off — the file cannot take the drive into a running guest' do
-    cr, fog = build_cr(FogBootdisk.new, power: 'Running')
+  test 'iso_attach refuses a machine that is not powered off, rendering the state fog answered' do
+    cr, fog = build_cr(FogBootdisk.new, state: :Running)
 
-    assert_raises(ForemanHyperv::OperationRefused) { cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs') }
+    error = assert_raises(ForemanHyperv::OperationRefused) do
+      cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
+    end
+    # server.state is the fog enum that decided it; Hyper-V servers have no power_state.
+    assert_includes error.message, :Running.inspect
+    assert_empty fog.calls
+  end
+
+  test 'iso_attach refuses a Gen1 (BIOS) machine: fog boot-order writes are the UEFI surface' do
+    cr, fog = build_cr(FogBootdisk.new, generation: :BIOS)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_attach('x.iso', UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, :BIOS.inspect
+    assert_empty fog.calls
+  end
+
+  test 'iso_attach refuses a clustered machine the endpoint node does not host, naming its node' do
+    cr, fog = build_cr(FogBootdisk.new, cluster: Object.new, serves: false)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_attach('x.iso', UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, 'HV-NODE1'
+    assert_empty fog.calls
+  end
+
+  test 'iso_attach refuses a fog that cannot send the boot-order write, naming what is missing' do
+    cr, fog = build_cr(FogNoBootOrder.new)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_attach('x.iso', UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, 'set_vm_boot_order'
+    assert_empty fog.calls
+  end
+
+  test 'iso_attach refuses a path-shaped or traversing name with ArgumentError' do
+    cr, fog = build_cr(FogBootdisk.new)
+
+    assert_raises(ArgumentError) { cr.iso_attach('sub\host.iso', UUID, storage_id: 'C:\VMs') }
+    assert_raises(ArgumentError) { cr.iso_attach('sub/host.iso', UUID, storage_id: 'C:\VMs') }
+    assert_raises(ArgumentError) { cr.iso_attach('..', UUID, storage_id: 'C:\VMs') }
+    assert_empty fog.calls
+  end
+
+  test 'iso_attach refuses a storage the host never reported before any fog call' do
+    cr, fog = build_cr(FogBootdisk.new)
+
+    error = assert_raises(ArgumentError) { cr.iso_attach('host.example.com.iso', UUID, storage_id: 'D:\SomewhereElse') }
+    assert_includes error.message, 'D:\SomewhereElse'.inspect
+    assert_includes error.message, 'Nothing was attached.'
+    assert_includes error.message, 'C:\ClusterStorage\Volume1'.inspect
     assert_empty fog.calls
   end
 
@@ -356,13 +547,18 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_raises(ArgumentError) { cr.iso_attach('', UUID, storage_id: 'C:\VMs') }
     assert_raises(ArgumentError) { cr.iso_attach('x.iso', '', storage_id: 'C:\VMs') }
     assert_raises(ArgumentError) { cr.iso_attach('x.iso', UUID, storage_id: nil) }
-    assert_raises(ArgumentError) { cr.iso_attach('x.iso', UUID, storage_id: 'D:\Elsewhere') }
     assert_empty fog.calls
   end
 
-  # ---- iso_detach --------------------------------------------------------------
+  # ---- iso_detach ---------------------------------------------------------------
+  #
+  # after_build semantics (round 17, finding 3): the answer runs INSIDE the
+  # /unattended/built save and core fails the whole save on false — the host
+  # would sit in build mode with a live token forever. Detach runs for EVERY
+  # build, bootdisk or not, so "nothing to do" and "the host refused" are both
+  # logged, never a failed save.
 
-  test 'iso_detach ejects the media the drive is holding and answers that it did' do
+  test 'iso_detach ejects the media the drive is holding and answers true' do
     fog = FogBootdisk.new(dvd_rows: { id: 'dvd-1', vm_id: UUID, path: 'C:\VMs\host.example.com.iso' })
     cr, = build_cr(fog)
 
@@ -370,11 +566,28 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_includes fog.calls, [:eject_vm_dvd_drive, 'dvd-1', UUID]
   end
 
-  test 'iso_detach is an idempotent no-op when nothing is in any drive' do
+  test 'iso_detach answers TRUE (not false) when nothing is in any drive — false would fail the built save' do
     cr, fog = build_cr(FogBootdisk.new)
 
-    assert_equal false, cr.iso_detach(UUID)
+    assert_equal true, cr.iso_detach(UUID)
     assert_not(fog.calls.any? { |c| c.first == :eject_vm_dvd_drive })
+  end
+
+  test 'iso_detach answers TRUE when the host refuses the eject, and the refusal is logged not raised' do
+    fog = FogBootdisk.new(dvd_rows: { id: 'dvd-1', vm_id: UUID, path: 'C:\VMs\host.example.com.iso' })
+    fog.raise_eject = true
+    cr, = build_cr(fog)
+    cr.stubs(:logger).returns(stub(warn: nil, info: nil, debug: nil, error: nil))
+
+    assert_nothing_raised { assert_equal true, cr.iso_detach(UUID) }
+  end
+
+  test 'iso_detach answers TRUE on a fog too old to send the eject: cleanup never wedges a build in build mode' do
+    cr, fog = build_cr(FogNoEra.new)
+    cr.stubs(:logger).returns(stub(warn: nil, info: nil, debug: nil, error: nil))
+
+    assert_equal true, cr.iso_detach(UUID)
+    assert_empty fog.calls
   end
 
   test 'iso_detach refuses a blank uuid before any fog call' do
@@ -384,9 +597,14 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_empty fog.calls
   end
 
-  # ---- iso_delete --------------------------------------------------------------
+  # ---- iso_delete ---------------------------------------------------------------
+  #
+  # Same after_build rule as detach, plus the permanent-wedge case: delete(53)
+  # runs AFTER detach(52) already ejected, so it cannot read a path and must
+  # sweep the reported roots — and any raise here makes every later built
+  # retry fail at 52 with nothing left to eject.
 
-  test 'iso_delete removes the host-side file from every root the host reported and answers whether anything went' do
+  test 'iso_delete sweeps the basename out of every root the host reported and answers true' do
     fog = FogBootdisk.new(remove_answers: { 'c:\vms\host.example.com.iso' => true })
     cr, = build_cr(fog)
 
@@ -397,24 +615,36 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
                   ['C:\ClusterStorage\Volume1\host.example.com.iso', 'C:\ClusterStorage\Volume1']], swept
   end
 
-  test 'iso_delete answers false — not a raise — when every root was already clean' do
+  test 'iso_delete answers TRUE when every root was already clean — absence is the common answer, not a failure' do
     cr, = build_cr(FogBootdisk.new)
 
-    assert_equal false, cr.iso_delete('/tmp/foreman-d0x/host.example.com.iso', UUID)
+    assert_equal true, cr.iso_delete('/tmp/foreman-d0x/host.example.com.iso', UUID)
   end
 
-  test 'iso_delete refuses naming :contained_file_removal when the fog cannot scope a delete' do
-    cr, fog = build_cr(FogNoRemove.new)
+  test 'iso_delete keeps sweeping when one root raises, and the whole step still answers true' do
+    fog = FogBootdisk.new
+    fog.raise_remove_paths = ['C:\VMs\host.example.com.iso']
+    cr, = build_cr(fog)
+    cr.stubs(:logger).returns(stub(warn: nil, info: nil, debug: nil, error: nil))
 
-    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_delete('/tmp/x/host.example.com.iso', UUID) }
-    assert_includes error.message, 'contained_file_removal'
+    assert_equal true, cr.iso_delete('/tmp/foreman-d0x/host.example.com.iso', UUID)
+    assert(fog.calls.any? { |c| c.first == :remove_file && c[2] == 'C:\ClusterStorage\Volume1' },
+           'one root refusing must not stop the sweep of the rest')
+  end
+
+  test 'iso_delete answers TRUE and logs when the fog cannot scope a delete' do
+    cr, fog = build_cr(FogNoRemove.new)
+    cr.stubs(:logger).returns(stub(warn: nil, info: nil, debug: nil, error: nil))
+
+    assert_equal true, cr.iso_delete('/tmp/x/host.example.com.iso', UUID)
     assert_empty fog.calls
   end
 
-  test 'iso_delete refuses when the host reports no roots at all rather than deleting nowhere' do
+  test 'iso_delete answers TRUE and logs when the host reports no roots rather than failing the save' do
     cr, = build_cr(FogBootdisk.new, roots: [])
+    cr.stubs(:logger).returns(stub(warn: nil, info: nil, debug: nil, error: nil))
 
-    assert_raises(ForemanHyperv::OperationRefused) { cr.iso_delete('/tmp/x/host.example.com.iso', UUID) }
+    assert_equal true, cr.iso_delete('/tmp/x/host.example.com.iso', UUID)
   end
 
   test 'iso_delete refuses a blank uuid or an empty basename with ArgumentError' do
