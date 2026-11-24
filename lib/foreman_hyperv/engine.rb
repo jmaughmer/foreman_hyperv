@@ -61,10 +61,12 @@ module ForemanHyperv
                       default: '',
                       full_name: N_('Boot disk pull root'),
                       description: N_('Directory Apache serves at /bootdisk-pull for Hyper-V hosts ' \
-                                      'to pull generated boot disk ISOs over HTTP (created 0711, ' \
-                                      'owner foreman, when missing). Must match the Alias target of ' \
-                                      'the foreman-bootdisk-pull.conf snippet. Blank keeps boot disk ' \
-                                      'transfers dormant: iso_upload refuses before staging.'))
+                                      'to pull generated boot disk ISOs over HTTP (created when ' \
+                                      'missing, owner foreman). Must match the Alias target of the ' \
+                                      'foreman-bootdisk-pull.conf snippet — which foreman-installer ' \
+                                      'removes, so re-copy it after every installer run. Blank keeps ' \
+                                      'boot disk transfers dormant: iso_upload refuses before ' \
+                                      'staging.'))
               setting(:bootdisk_staging_root,
                       type: :string,
                       default: '',

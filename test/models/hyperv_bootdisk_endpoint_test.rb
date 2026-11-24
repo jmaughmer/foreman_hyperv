@@ -136,9 +136,12 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     Setting.stubs(:[]).with(:unattended_url).returns(url)
   end
 
-  # Answer the drop-in check for one path (later definitions win over the
-  # broad setup stub for their own path — mocha matches the newest matching
-  # expectation, proven in the PR-2 suite).
+  # Answer the drop-in check for one path. The precedence this relies on is
+  # MEASURED, not assumed: probed on the CI box with the suite's own mocha
+  # 2.8.2, a later `with`-constrained stub wins for ITS argument while other
+  # arguments still fall through to the broad setup stub (m(:x)=:constrained,
+  # m(:y)=:broad). The https-twin test needs both halves of that behavior at
+  # once, so any mocha that changed it would fail the battery, not hide it.
   def stub_snippet(path, present)
     ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).with(path).returns(present)
   end
@@ -284,6 +287,11 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     assert_includes shipped, 'Options -Indexes -FollowSymLinks'
     assert_includes shipped, 'AllowOverride None'
     assert_includes shipped, 'Require all granted'
+    # The Directory block must target the SAME root the store serves (plan
+    # Decision 2 verbatim): an unasserted target could drift from the Alias
+    # with every option silently applied to the wrong tree.
+    assert_includes shipped, '<Directory /var/lib/foreman/bootdisk-transfer>'
+    assert_includes shipped, '</Directory>'
     assert_equal File.basename(ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH), File.basename(SNIPPET_SOURCE),
                  'shipped name, http-side check name and https-twin check name must never drift apart'
     assert_equal File.basename(ForemanHyperv::BootdiskTransfer::HTTPS_SNIPPET_PATH), File.basename(SNIPPET_SOURCE)

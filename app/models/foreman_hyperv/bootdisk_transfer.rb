@@ -94,7 +94,13 @@ module ForemanHyperv
         ensure_root!(staging_root!, 0o700)
       end
 
-      # Copy the source into the served root under a fresh nonce. COPIES,
+      # Copy the source into the served root under a fresh nonce. PRECONDITION:
+      # both roots EXIST — iso_upload calls ensure_roots! before staging, and
+      # the write path stays deliberately pure here (a stage that silently
+      # created a missing root would hide a broken deployment inside an
+      # otherwise-successful ride). Calling stage against roots that do not
+      # exist raises through (Errno::ENOENT), which is the honest answer.
+      # COPIES,
       # never renames: the source lives in the worker's PrivateTmp, which is
       # a different filesystem (measured EXDEV), and the worker's ensure
       # removes it anyway. Returns the Staged handoff. Raises on any real
