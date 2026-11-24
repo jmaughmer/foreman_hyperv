@@ -257,6 +257,7 @@ module ForemanHyperv
           missing << node
           parent = File.dirname(node)
           break if parent == node # reached the filesystem root
+
           node = parent
         end
         FileUtils.mkdir_p(root)
