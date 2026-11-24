@@ -762,9 +762,8 @@ module ForemanHyperv
 
       root = reported_root(storage_id)
       if root.nil?
-        raise ArgumentError, format('iso_upload storage_id %{wanted} is not a path this host reported ' \
-                                    '(the host reports: %{roots}). Nothing was transferred.',
-                                    wanted: storage_id, roots: storage_roots.join(', '))
+        raise ArgumentError, "iso_upload storage_id #{storage_id.inspect} is not a path this host reported " \
+                             "(the host reports: #{storage_roots.join(', ')}). Nothing was transferred."
       end
 
       require_bootdisk_pull!
@@ -773,12 +772,11 @@ module ForemanHyperv
         pulled = client.fetch_url_to_path(url: staged.url,
                                           path: "#{root}\\#{File.basename(isofile)}",
                                           sha256: staged.sha256,
-                                          size: staged.size)
-        unless pulled == staged.size
+                                          size: staged.bytes)
+        unless pulled == staged.bytes
           raise ForemanHyperv::OperationRefused,
-                format('The host pulled %{pulled} bytes for %{name}; the staged ISO is %{staged} bytes. ' \
-                       'The pull is not trusted and nothing was attached.',
-                       pulled: pulled, name: File.basename(isofile), staged: staged.size)
+                "The host pulled #{pulled} bytes for #{File.basename(isofile)}; the staged ISO is " \
+                "#{staged.bytes} bytes. The pull is not trusted and nothing was attached."
         end
         pulled
       ensure
@@ -802,14 +800,13 @@ module ForemanHyperv
 
       root = reported_root(storage_id)
       if root.nil?
-        raise ArgumentError, format('iso_attach storage_id %{wanted} is not a path this host reported ' \
-                                    '(the host reports: %{roots}). Nothing was attached.',
-                                    wanted: storage_id, roots: storage_roots.join(', '))
+        raise ArgumentError, "iso_attach storage_id #{storage_id.inspect} is not a path this host reported " \
+                             "(the host reports: #{storage_roots.join(', ')}). Nothing was attached."
       end
 
       refuse_without_enablement!
       require_fog_requests!(:get_vm_dvd_drive, :add_vm_dvd_drive, :set_vm_dvd_drive,
-                        :get_vm_boot_order, :set_vm_boot_order)
+                            :get_vm_boot_order, :set_vm_boot_order)
       server = find_vm_by_uuid(uuid)
       unless server&.power_state.to_s.casecmp('off').zero?
         raise ForemanHyperv::OperationRefused, BOOTDISK_ATTACH_RUNNING_REFUSAL
@@ -819,8 +816,7 @@ module ForemanHyperv
       drive = Array(drives).first || client.add_vm_dvd_drive(vm_id: uuid)&.first
       if drive.nil? || drive[:id].blank?
         raise ForemanHyperv::OperationRefused,
-              format('The machine %{uuid} answered no DVD drive to attach %{name} to. Nothing was attached.',
-                     uuid: uuid, name: name)
+              "The machine #{uuid} answered no DVD drive to attach #{name} to. Nothing was attached."
       end
 
       path = "#{root}\\#{name}"
@@ -833,7 +829,7 @@ module ForemanHyperv
     # Eject whatever media a drive is holding. The after_build step runs for
     # every build whether or not a bootdisk was ever in the drive, so "no
     # media in it" is an answer (false), never a failure.
-    def iso_detach(uuid, options = {})
+    def iso_detach(uuid, _options = {})
       raise ArgumentError, "iso_detach needs a machine id: got #{uuid.inspect}" if uuid.blank?
 
       refuse_without_enablement!
@@ -850,7 +846,7 @@ module ForemanHyperv
     # drive path either — the reported roots are the only honest scope left,
     # and fog's remove_file answers "was already gone" as false, so the whole
     # sweep is safe to repeat. Answers whether anything was deleted.
-    def iso_delete(isofile, uuid, options = {})
+    def iso_delete(isofile, uuid, _options = {})
       raise ArgumentError, "iso_delete needs a machine id: got #{uuid.inspect}" if uuid.blank?
 
       name = File.basename(isofile.to_s)
@@ -3142,8 +3138,8 @@ module ForemanHyperv
         when 'Network' then 'VMNetworkAdapter'
         when 'Drive' then entry[:device_text].to_s[/\A\s*([A-Za-z]+(?:Drive|Adapter))/, 1]
         end
-      end.uniq.reject { |klass| klass == 'DvdDrive' }
-      [{ 'DvdDrive' => dvd_id }, *classes]
+      end
+      [{ 'DvdDrive' => dvd_id }, *classes.uniq.reject { |klass| klass == 'DvdDrive' }]
     end
 
     # iso_upload/iso_attach storage scope: the storage_id arrives from the

@@ -40,7 +40,7 @@ module ForemanHyperv
     # What stage answers: everything iso_upload needs to hand the host, in
     # one object, so a caller cannot half-use the contract (the URL without
     # the digest that verifies it, say).
-    Staged = Struct.new(:nonce, :path, :url, :sha256, :size, keyword_init: true)
+    Staged = Struct.new(:nonce, :path, :url, :sha256, :bytes, keyword_init: true)
 
     class << self
       # The roots, overridable where a test (or an operator with a layout of
@@ -81,7 +81,7 @@ module ForemanHyperv
           raise
         end
 
-        Staged.new(nonce: nonce, path: final, url: url_for(nonce), sha256: sha256, size: size)
+        Staged.new(nonce: nonce, path: final, url: url_for(nonce), sha256: sha256, bytes: size)
       end
 
       # Take one ISO off the shelf. Anything not a full nonce addresses

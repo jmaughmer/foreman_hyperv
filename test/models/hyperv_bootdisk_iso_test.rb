@@ -50,8 +50,9 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 # fog is a recording stub here (the fork's mutating-request rule: no
 # Fog.mock!); every refusal is asserted to happen BEFORE any fog call.
 class HypervBootdiskIsoTest < ActiveSupport::TestCase
-  UUID = '1c51c4ee-df90-4cee-a9f7-218888711248'.freeze
-  CR_URL = 'https://hyperv.example.com:5985'.freeze
+  UUID = '1c51c4ee-df90-4cee-a9f7-218888711248'
+  CR_URL = 'https://hyperv.example.com:5985'
+  VmStub = Struct.new(:id, :power_state)
   BOOT_ORDER_ROWS = [
     { position: 1, boot_type: 'Network', device_text: 'VMNetworkAdapter (Name =  Ethernet 0)',
       device_id: 'Microsoft:1', firmware_path: '' },
@@ -159,7 +160,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.stubs(:client).returns(fog)
     cr.stubs(:storage_roots).returns(roots)
-    cr.stubs(:find_vm_by_uuid).returns(OpenStruct.new(id: UUID, power_state: power))
+    cr.stubs(:find_vm_by_uuid).returns(VmStub.new(UUID, power))
     [cr, fog]
   end
 
@@ -187,7 +188,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_equal Digest::SHA256.file(src).hexdigest, meta['sha256']
     assert_equal File.size(src), meta['size']
     assert_equal staged.sha256, meta['sha256']
-    assert_equal staged.size, meta['size']
+    assert_equal staged.bytes, meta['size']
   end
 
   test 'the stage url is the unattended URL plus the nonce path' do
@@ -221,7 +222,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
     assert_equal File.size(iso), answer
     pull = fog.calls.find { |c| c.first == :fetch_url_to_path }
-    refute_nil pull, 'the host must be told to pull'
+    assert_not_nil pull, 'the host must be told to pull'
     _tag, url, path, sha256, size = pull
     assert_match(%r{\Ahttp://foreman\.test/bootdisk-pull/[0-9a-f]{32}\.iso\z}, url)
     assert_equal "C:\\ClusterStorage\\Volume1\\#{File.basename(iso)}", path,
@@ -297,9 +298,9 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
 
     assert_includes fog.calls, [:set_vm_dvd_drive, 'dvd-1', UUID, 'C:\VMs\host.example.com.iso']
-    refute fog.calls.any? { |c| c.first == :add_vm_dvd_drive }, 'the VM already has a DVD drive; a second one is a bug'
+    assert_not(fog.calls.any? { |c| c.first == :add_vm_dvd_drive }, 'the VM already has a DVD drive; one more is a bug')
     set = fog.calls.find { |c| c.first == :set_vm_boot_order }
-    refute_nil set
+    assert_not_nil set
     # DVD first; then the read classes in read order. File entries are not requestable and
     # fog's write script keeps unrequested entries' positions — dropping one preserves it.
     assert_equal [{ 'DvdDrive' => 'dvd-1' }, 'VMNetworkAdapter', 'HardDiskDrive'], set[2]
@@ -311,7 +312,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
     cr.iso_attach('host.example.com.iso', UUID, storage_id: 'C:\VMs')
 
-    assert fog.calls.any? { |c| c.first == :add_vm_dvd_drive }
+    assert(fog.calls.any? { |c| c.first == :add_vm_dvd_drive })
     assert_includes fog.calls, [:set_vm_dvd_drive, 'dvd-new', UUID, 'C:\VMs\host.example.com.iso']
     set = fog.calls.find { |c| c.first == :set_vm_boot_order }
     assert_equal 'dvd-new', set[2].first['DvdDrive']
@@ -348,7 +349,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     cr, fog = build_cr(FogBootdisk.new)
 
     assert_equal false, cr.iso_detach(UUID)
-    refute fog.calls.any? { |c| c.first == :eject_vm_dvd_drive }
+    assert_not(fog.calls.any? { |c| c.first == :eject_vm_dvd_drive })
   end
 
   test 'iso_detach refuses a blank uuid before any fog call' do
@@ -366,9 +367,9 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
     assert_equal true, cr.iso_delete('/tmp/foreman-d0x/host.example.com.iso', UUID)
     removes = fog.calls.select { |c| c.first == :remove_file }
+    swept = removes.map { |c| [c[1], c[2]] }
     assert_equal [['C:\VMs\host.example.com.iso', 'C:\VMs'],
-                  ['C:\ClusterStorage\Volume1\host.example.com.iso', 'C:\ClusterStorage\Volume1']],
-                 removes.map { |c| [c[1], c[2]] }
+                  ['C:\ClusterStorage\Volume1\host.example.com.iso', 'C:\ClusterStorage\Volume1']], swept
   end
 
   test 'iso_delete answers false — not a raise — when every root was already clean' do
@@ -407,9 +408,9 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     # predicate anywhere (the enablement side is predicate-paired — putting
     # these there would refuse every unlocked operation against the deployed
     # fog, which defines neither predicate).
-    refute Fog::Hyperv::Compute::Real.method_defined?(:supports_file_pull?),
-         'fog pairs no predicate with :file_pull (checked against the deployed gem)'
-    refute Fog::Hyperv::Compute::Real.method_defined?(:supports_contained_file_removal?)
+    # fog pairs no predicate with the bootdisk words (checked against the deployed gem).
+    assert_not Fog::Hyperv::Compute::Real.method_defined?(:supports_file_pull?)
+    assert_not Fog::Hyperv::Compute::Real.method_defined?(:supports_contained_file_removal?)
     assert_includes Fog::Hyperv::CAPABILITIES, :file_pull
     assert_includes Fog::Hyperv::CAPABILITIES, :contained_file_removal
   end
