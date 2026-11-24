@@ -33,8 +33,12 @@ module ForemanHyperv
   # the sidecar with it — a sidecar whose ISO never landed is one the janitor
   # would chase forever.
   #
-  # This class touches NOTHING outside the two roots: no fog, no DB. It is
-  # used inside the orchestration (iso_upload) and the plugin's own paths.
+  # This class stays out of fog, and touches the DB only through the Setting
+  # store at OPERATION time (the roots, the unattended URL — never at load).
+  # Its only reach outside the two roots is reading the Apache drop-ins the
+  # pull URL rides (existence and Alias target — the installer-purge
+  # measurement, above). It is used inside
+  # the orchestration (iso_upload) and the plugin's own paths.
   module BootdiskTransfer
     # What stage() answers: everything fog's fetch_url_to_path needs to pull
     # and verify (url + sha256 + exact byte count), plus the nonce the caller
@@ -57,6 +61,18 @@ module ForemanHyperv
                                'the path named and reload httpd (systemctl reload httpd). foreman-installer ' \
                                'removes this drop-in (measured), so re-apply it after every installer run. ' \
                                'Nothing was staged.'
+
+    # The drop-in exists but its Alias points somewhere else — the exact
+    # failure a copy-paste of the snippet into BOTH vhost dirs introduces when
+    # the operator set hyperv_bootdisk_pull_root to a non-default path: the check
+    # passes on file-existence, the host fetches, Apache serves the wrong
+    # (or an empty) directory, and every ride is a silent 404. Naming the
+    # root makes the fix a one-line edit.
+    BOOTDISK_SNIPPET_ALIAS_REFUSAL = 'The boot disk file cannot be staged for the host to pull: the Apache ' \
+                                     'drop-in for /bootdisk-pull is installed (%<paths>s) but does not Alias ' \
+                                     'that path at the configured pull root (%<root>s). Edit the snippet\'s ' \
+                                     'Alias and <Directory> target to %<root>s and reload httpd (systemctl ' \
+                                     'reload httpd). Nothing was staged.'
 
     # The Apache drop-ins the pull URL rides. Measured (2026-11-24,
     # evidence/bd-pr3-apache-2026-11-24.log): foreman-installer PURGES the
@@ -100,8 +116,7 @@ module ForemanHyperv
       # created a missing root would hide a broken deployment inside an
       # otherwise-successful ride). Calling stage against roots that do not
       # exist raises through (Errno::ENOENT), which is the honest answer.
-      # COPIES,
-      # never renames: the source lives in the worker's PrivateTmp, which is
+      # COPIES, never renames: the source lives in the worker's PrivateTmp, which is
       # a different filesystem (measured EXDEV), and the worker's ensure
       # removes it anyway. Returns the Staged handoff. Raises on any real
       # failure — the caller (iso_upload) deletes the staged copy in its
@@ -115,15 +130,19 @@ module ForemanHyperv
         # URL first: every failure below would otherwise orphan a file in the
         # root Apache serves, and a blank unattended_url is the one failure
         # that is ALWAYS waiting (setting unset).
+        base_url = transfer_url!
+        # The URL is only a promise Apache can keep if the drop-in is
+        # installed — and it can vanish silently with the next installer run.
+        # Checked before the hash pass, not merely before the copy: the purge
+        # refusal is the most likely operator-facing failure of this whole
+        # feature, and answering it only after a full SHA256 read of a 245 MB
+        # ISO repeats the mistake round 17 called out for the gates ("every
+        # one of them, before a single read").
+        require_served_snippet!(base_url, served)
         bytes = File.size(src)
         sha256 = Digest::SHA256.file(src).hexdigest
         nonce = SecureRandom.hex(16)
-        url = "#{transfer_url!}/#{nonce}.iso"
-        # The URL is only a promise Apache can keep if the drop-in is
-        # installed — and it can vanish silently with the next installer run.
-        # Checked here, before a byte is copied: staging into an unserved
-        # root would strand the ride as a host-side 404 minutes later.
-        require_served_snippet!(url)
+        url = "#{base_url}/#{nonce}.iso"
         tmp = File.join(staging, "staging-#{nonce}.iso.part")
         sidecar = File.join(staging, "staging-#{nonce}.json")
         final = File.join(served, "#{nonce}.iso")
@@ -174,54 +193,96 @@ module ForemanHyperv
         end
       end
 
-      # Is the Apache drop-in at this path installed? A plain file check on
-      # purpose, not a live HTTP probe: the probe would add failure modes
-      # (the endpoint must resolve its own unattended_url from inside the
-      # worker) for an answer the file already gives, and the end-to-end
-      # proof of the served endpoint is the real ride, not this check. Named
-      # and public because it is the seam tests answer through.
-      def apache_snippet_present?(path)
-        File.file?(path.to_s)
+      # Does the Apache drop-in at this path exist AND alias /bootdisk-pull at
+      # this root? Existence alone is half the answer: the installer purge
+      # teaches operators to COPY the snippet, and a copy whose Alias still
+      # points at the shipped default while the setting names another root
+      # serves a 404 on every ride — the exact failure class this check
+      # exists to catch. Deliberately a plain file read, not a live HTTP
+      # probe: the probe would add failure modes (the endpoint must resolve
+      # its own unattended_url from inside the worker) for an answer the
+      # file already gives, and the end-to-end proof of the served endpoint
+      # is the real ride, not this check. Named and public because it is the
+      # seam tests answer through.
+      def apache_snippet_serves?(path, root)
+        return false unless File.file?(path.to_s)
+
+        # Line-shaped match: leading whitespace (a hand-indented copy), one
+        # optional trailing slash on either side (both are real Apache), and
+        # anchored after the root so 'bootdisk-transfer-legacy' does not
+        # count as 'bootdisk-transfer'.
+        pattern = %r{^\s*Alias\s+/bootdisk-pull/?\s+#{Regexp.escape(root)}/?\s*$}
+        File.read(path.to_s).match?(pattern)
+      rescue SystemCallError
+        false
       end
 
       private
 
-      # Which drop-ins the URL about to be handed to the host requires: the
-      # HTTP vhost always; the TLS vhost additionally when the unattended URL
-      # is https — the two vhosts Include only their own drop-in dir
-      # (measured), so an https URL served without the ssl-side copy answers
-      # 404 on the very request the host makes.
-      def require_served_snippet!(url)
+      # Which drop-ins the URL about to be handed to the host requires, and
+      # whether each one actually serves the configured root: the HTTP vhost
+      # always; the TLS vhost additionally when the unattended URL is https —
+      # the two vhosts Include only their own drop-in dir (measured), so an
+      # https URL served without the ssl-side copy answers 404 on the very
+      # request the host makes. A drop-in that exists but Aliases a different
+      # root is as broken as one that is gone, so the check reads the target
+      # too (apache_snippet_serves?) and names the right remediation for each.
+      def require_served_snippet!(url, served)
         wanted = [HTTP_SNIPPET_PATH]
         wanted << HTTPS_SNIPPET_PATH if url.start_with?('https://')
-        missing = wanted.reject { |path| apache_snippet_present?(path) }
-        return if missing.empty?
+        unmet = wanted.reject { |path| apache_snippet_serves?(path, served) }
+        return if unmet.empty?
 
-        raise ForemanHyperv::OperationRefused, format(BOOTDISK_SNIPPET_REFUSAL, paths: missing.join(' and '))
+        absent = unmet.reject { |path| File.file?(path) }
+        if absent.any?
+          raise ForemanHyperv::OperationRefused, format(BOOTDISK_SNIPPET_REFUSAL, paths: absent.join(' and '))
+        end
+
+        raise ForemanHyperv::OperationRefused, format(BOOTDISK_SNIPPET_ALIAS_REFUSAL,
+                                                      paths: unmet.join(' and '), root: served)
       end
 
       def ensure_root!(root, mode)
         return if File.directory?(root)
 
-        FileUtils.mkdir_p(root)
-        # mkdir applies the process umask (a 0077 dynflow worker would hide
-        # even the served root from Apache); the mode is the measured one, so
-        # it is set explicitly after creation, and only for what we created.
-        File.chmod(mode, root)
+        # Creation errors (ENOTDIR, EACCES) travel THROUGH untouched — the
+        # ensure creates, honest failure is a real failure. No chown: the
+        # creation runs as the foreman worker, so everything made here is
+        # already foreman:foreman.
+        created = []
+        FileUtils.mkdir_p(root) { |dir| created << dir }
+        # chmod EVERY component mkdir_p created: with a 0077 dynflow umask a
+        # root configured deeper than its parent (say /srv/bootdisk/pull)
+        # would otherwise leave /srv/bootdisk at 0700 and the served root
+        # permanently unreachable (403) while the snippet check stays green.
+        # Existing components keep operator modes — create, not police. A
+        # chmod racing a concurrent ensure (or an operator fix landing
+        # mid-call) is not worth failing an otherwise-successful creation
+        # over, so ONLY these metadata calls tolerate SystemCallError; the
+        # mkdir above deliberately does not.
+        created.each do |dir|
+          begin
+            File.chmod(mode, dir)
+          rescue SystemCallError
+            nil
+          end
+        end
       end
 
       def served_root!
-        root = served_root.presence || Setting[:bootdisk_pull_root].to_s
-        raise ConfiguredRootError, 'bootdisk_pull_root is not configured' if root.blank?
+        root = served_root.presence || Setting[:hyperv_bootdisk_pull_root].to_s.strip
+        raise ConfiguredRootError, 'hyperv_bootdisk_pull_root is not configured' if root.blank?
 
-        root.chomp('/')
+        # chomp ONE trailing slash (the common misconfiguration) without
+        # annihilating a root configured as '/' itself.
+        root.length > 1 ? root.chomp('/') : root
       end
 
       def staging_root!
-        root = staging_root.presence || Setting[:bootdisk_staging_root].to_s
-        raise ConfiguredRootError, 'bootdisk_staging_root is not configured' if root.blank?
+        root = staging_root.presence || Setting[:hyperv_bootdisk_staging_root].to_s.strip
+        raise ConfiguredRootError, 'hyperv_bootdisk_staging_root is not configured' if root.blank?
 
-        root.chomp('/')
+        root.length > 1 ? root.chomp('/') : root
       end
 
       # The pull URL for the transfer: the setting plus the nonce path. Like

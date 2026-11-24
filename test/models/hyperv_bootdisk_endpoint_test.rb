@@ -30,7 +30,11 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 #     modes measured to serve-and-hide) before staging into it; an existing
 #     root keeps whatever mode the operator set.
 #   * the pull refuses, before staging, when the Apache drop-in the URL rides
-#     is not installed. That check is LOAD-BEARING because of a measurement:
+#     is not installed — and equally when the installed drop-in Aliases a
+#     DIFFERENT root than the configured pull root (a copy the operator never
+#     finished editing serves 404s forever, and existence alone would wave it
+#     through — round 21, finding 9). That check is LOAD-BEARING because of a
+#     measurement:
 #     `foreman-installer` PURGES the vhost drop-in dirs — a probe snippet
 #     answering 200 over HTTP was gone after the next installer run (301/404),
 #     along with an unrelated hand-written conf.d entry (evidence/
@@ -103,10 +107,11 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     @staging = File.join(@root, 'staging')
     ForemanHyperv::BootdiskTransfer.served_root = @served
     ForemanHyperv::BootdiskTransfer.staging_root = @staging
-    # The snippets EXIST here unless a test says otherwise; the file existence
-    # of /etc paths is the one read this store does outside its roots, so it
-    # rides a named predicate the tests override instead of a stubbed File.
-    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).returns(true)
+    # The snippets serve the configured root here unless a test says
+    # otherwise; reading /etc paths is the one reach this store has outside
+    # its roots, so it rides a named predicate the tests override instead of
+    # a stubbed File.
+    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_serves?).returns(true)
   end
 
   teardown do
@@ -136,21 +141,23 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     Setting.stubs(:[]).with(:unattended_url).returns(url)
   end
 
-  # Answer the drop-in check for one path. The precedence this relies on is
-  # MEASURED, not assumed: probed on the CI box with the suite's own mocha
-  # 2.8.2, a later `with`-constrained stub wins for ITS argument while other
-  # arguments still fall through to the broad setup stub (m(:x)=:constrained,
-  # m(:y)=:broad). The https-twin test needs both halves of that behavior at
-  # once, so any mocha that changed it would fail the battery, not hide it.
+  # Answer the drop-in check for one path (bound to the test's @served root,
+  # which is what stage passes to the predicate). The precedence this relies
+  # on is MEASURED, not assumed: probed on the CI box with the suite's own
+  # mocha 2.8.2, a later `with`-constrained stub wins for ITS argument while
+  # other arguments still fall through to the broad setup stub
+  # (m(:x)=:constrained, m(:y)=:broad). The https-twin test needs both halves
+  # of that behavior at once, so any mocha that changed it would fail the
+  # battery, not hide it.
   def stub_snippet(path, present)
-    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).with(path).returns(present)
+    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_serves?).with(path, @served).returns(present)
   end
 
   # ---- the settings -------------------------------------------------------------
 
   test 'the two roots are registered settings and ship BLANK — the dormant state is the default' do
-    assert_equal '', Foreman.settings[:bootdisk_pull_root]
-    assert_equal '', Foreman.settings[:bootdisk_staging_root]
+    assert_equal '', Foreman.settings[:hyperv_bootdisk_pull_root]
+    assert_equal '', Foreman.settings[:hyperv_bootdisk_staging_root]
   end
 
   test 'the store reads the settings when nothing overrides them — no initializer, no boot-time Setting read' do
@@ -158,8 +165,8 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     ForemanHyperv::BootdiskTransfer.served_root = nil
     ForemanHyperv::BootdiskTransfer.staging_root = nil
     stub_unattended
-    Setting.stubs(:[]).with(:bootdisk_pull_root).returns(@served)
-    Setting.stubs(:[]).with(:bootdisk_staging_root).returns(@staging)
+    Setting.stubs(:[]).with(:hyperv_bootdisk_pull_root).returns(@served)
+    Setting.stubs(:[]).with(:hyperv_bootdisk_staging_root).returns(@staging)
     src = make_iso(@root)
 
     staged = ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
@@ -234,7 +241,6 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
   test 'the pull refuses BEFORE staging when the Apache drop-in the URL rides is not installed' do
     FileUtils.mkdir_p([@served, @staging])
     src = make_iso(@root)
-    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).returns(true)
     stub_snippet(ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH, false)
 
     error = assert_raises(ForemanHyperv::OperationRefused) do
@@ -252,7 +258,6 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     FileUtils.mkdir_p([@served, @staging])
     stub_unattended('https://foreman.test')
     src = make_iso(@root)
-    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).returns(true)
     stub_snippet(ForemanHyperv::BootdiskTransfer::HTTPS_SNIPPET_PATH, false)
 
     error = assert_raises(ForemanHyperv::OperationRefused) do
@@ -272,6 +277,94 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     staged = ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
 
     assert_match %r{\Ahttps://foreman\.test/bootdisk-pull/[0-9a-f]{32}\.iso\z}, staged.url
+  end
+
+  # ---- what the drop-in must actually carry (round 21, finding 9) ------------------
+
+  test 'the drop-in check reads the Alias target, not just the filename — a copy pointing elsewhere is refused' do
+    ForemanHyperv::BootdiskTransfer.unstub(:apache_snippet_serves?)
+    root = '/var/lib/foreman/bootdisk-transfer'
+
+    good = File.join(@root, 'good.conf')
+    File.write(good, "  # an indented ops copy\n  Alias /bootdisk-pull #{root}\n")
+    assert ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(good, root),
+           'leading whitespace is still the same Apache directive'
+
+    trailing = File.join(@root, 'trailing.conf')
+    File.write(trailing, "Alias /bootdisk-pull/ #{root}/\n")
+    assert ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(trailing, root),
+           'one optional trailing slash either side is the same path (the store chomps the configured one)'
+
+    wrong = File.join(@root, 'wrong.conf')
+    File.write(wrong, "Alias /bootdisk-pull /srv/somewhere-else\n")
+    refute ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(wrong, root),
+           'the copy-without-editing bug this check exists for: file installed, Alias elsewhere, every ride a 404'
+
+    legacy = File.join(@root, 'legacy.conf')
+    File.write(legacy, "Alias /bootdisk-pull #{root}-legacy\n")
+    refute ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(legacy, root),
+           'a PREFIX of the root is not the root — substring matching would wave it through'
+
+    refute ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(File.join(@root, 'gone.conf'), root),
+           'no file, no service'
+  end
+
+  test 'a drop-in that EXISTS but Aliases another root refuses with the root named' do
+    FileUtils.mkdir_p([@served, @staging])
+    stub_unattended
+    src = make_iso(@root)
+    stub_snippet(ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH, false)
+    File.stubs(:file?).returns(true) # the drop-in IS installed — this is not the purge case
+
+    error = assert_raises(ForemanHyperv::OperationRefused) do
+      ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
+    end
+
+    assert_includes error.message, @served, 'the refusal names the root the Alias must be edited to'
+    assert_includes error.message, 'Alias'
+    assert_empty Dir.children(@served), 'a mis-aliased drop-in stages nothing, exactly like a missing one'
+  end
+
+  test 'an http unattended URL does NOT require the ssl-side twin — the scheme rule is a rule, not a mood' do
+    FileUtils.mkdir_p([@served, @staging])
+    src = make_iso(@root)
+    stub_snippet(ForemanHyperv::BootdiskTransfer::HTTPS_SNIPPET_PATH, false)
+
+    staged = ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
+
+    assert_match %r{\Ahttp://foreman\.test/bootdisk-pull/[0-9a-f]{32}\.iso\z}, staged.url,
+                 'round-21 finding 19: hardening the check to always demand BOTH copies must trip HERE, ' \
+                 'not pass silently — the ssl twin is required by the URL scheme and nothing else'
+  end
+
+  test 'configured roots are normalized — pasted spaces and trailing slashes cannot create phantom directories' do
+    ForemanHyperv::BootdiskTransfer.served_root = " #{@served}/ "
+    assert_equal @served, ForemanHyperv::BootdiskTransfer.send(:served_root!),
+                 'a pasted " /path " must not stage into a directory whose name starts with a space'
+    ForemanHyperv::BootdiskTransfer.served_root = '/'
+    assert_equal '/', ForemanHyperv::BootdiskTransfer.send(:served_root!),
+                 "chomping a root of '/' down to '' would hand mkdir_p an empty path (ENOENT)"
+  end
+
+  test 'ensure_roots! modes every component it CREATES — umask must not hide the served root' do
+    deep = File.join(@root, 'srv', 'bootdisk', 'served')
+    ForemanHyperv::BootdiskTransfer.served_root = deep
+    umask = File.umask(0o077) # the dynflow worker shape: fresh ancestors would land 0700 unchallenged
+    begin
+      ForemanHyperv::BootdiskTransfer.ensure_roots!
+    ensure
+      File.umask(umask)
+    end
+
+    ancestor = File.join(@root, 'srv')
+    assert File.directory?(ancestor)
+    assert_equal 0o711, File.stat(ancestor).mode & 0o777,
+                 'under a 0077 umask a fresh /…/srv sits at 0700 and httpd can never traverse to the ' \
+                 'served root — the snippet check stays green while every ride 403s (round 21, finding 11)'
+    assert_equal 0o711, File.stat(deep).mode & 0o777
+    assert_equal 0o700, File.stat(@staging).mode & 0o777, 'the fresh staging root lands its own 0700'
+    assert_equal 0o700, File.stat(@root).mode & 0o777,
+                 'the PRE-EXISTING parent (mktmpdir) is not re-moded — the ensure creates, it does not police'
   end
 
   # ---- the shipped snippet ----------------------------------------------------------

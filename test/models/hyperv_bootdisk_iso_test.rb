@@ -95,12 +95,13 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     ForemanHyperv::BootdiskTransfer.served_root = @served
     ForemanHyperv::BootdiskTransfer.staging_root = @staging
     Setting.stubs(:[]).returns('http://foreman.test')
-    # PR-3 added the drop-in existence check inside stage() (the installer
-    # purge, measured). This suite tests the STORE, not the endpoint: answer
-    # the check installed and let hyperv_bootdisk_endpoint_test own that
-    # contract. Without this the real /etc on the CI box (purged by the last
-    # foreman-installer run) refuses every stage here.
-    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_present?).returns(true)
+    # PR-3 added the drop-in check inside stage() (the installer purge,
+    # measured; PR-3 review added the Alias-target half). This suite tests the
+    # STORE, not the endpoint: answer the check satisfied and let
+    # hyperv_bootdisk_endpoint_test own that contract. Without this the real
+    # /etc on the CI box (purged by the last foreman-installer run) refuses
+    # every stage here.
+    ForemanHyperv::BootdiskTransfer.stubs(:apache_snippet_serves?).returns(true)
   end
 
   teardown do

@@ -54,6 +54,14 @@ class HypervBootdiskBuiltSeamTest < ActiveSupport::TestCase
     assert_includes Host::Managed.ancestors.map(&:to_s), 'ForemanBootdisk::Orchestration::Compute',
                     'without this module the built POST queues NOTHING for the ISO and the ride strands ' \
                     'the host in build mode — this is the drift guard for a bootdisk change'
+    # Registration pin, not just the method: the RPM hooks the queue up as an
+    # after_validation callback (compute.rb:10-12). Pinning only the method
+    # body would stay green through a bootdisk release that dropped or moved
+    # the hook — the chain would silently stop queueing.
+    assert_includes Host::Managed._validate_callbacks.map { |c| c.filter.to_s },
+                    'queue_bootdisk_compute',
+                    'foreman_bootdisk no longer registers queue_bootdisk_compute as a validation ' \
+                    'callback on Host::Managed — the /unattended/built chain is gone'
   end
 
   test 'the built transition queues detach(52) then delete(53) — the after_build pair, in that order' do

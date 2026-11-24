@@ -55,22 +55,30 @@ module ForemanHyperv
               # the copy is an explicit act, re-applied after every installer
               # run). Nothing reads these at boot: the store resolves them
               # per operation, so a fresh install boots and migrates before
-              # any of this exists (the PLG-34 initializer lesson).
-              setting(:bootdisk_pull_root,
+              # any of this exists (the PLG-34 initializer lesson). Named
+              # hyperv_bootdisk_*, not bootdisk_*: settings share ONE flat
+              # namespace, foreman_bootdisk already owns bootdisk_* (24.1.0
+              # registers bootdisk_ipxe_dir through bootdisk_allowed_types —
+              # measured), a future upstream collision would crash boot on a
+              # duplicate registration, and the plugin's own convention is the
+              # hyperv_ prefix (hyperv_keepalive_interval_seconds).
+              setting(:hyperv_bootdisk_pull_root,
                       type: :string,
                       default: '',
-                      full_name: N_('Boot disk pull root'),
+                      full_name: N_('Hyper-V boot disk pull root'),
                       description: N_('Directory Apache serves at /bootdisk-pull for Hyper-V hosts ' \
-                                      'to pull generated boot disk ISOs over HTTP (created when ' \
-                                      'missing, owner foreman). Must match the Alias target of the ' \
-                                      'foreman-bootdisk-pull.conf snippet — which foreman-installer ' \
-                                      'removes, so re-copy it after every installer run. Blank keeps ' \
+                                      'to pull generated boot disk ISOs over HTTP (created 0711, ' \
+                                      'owner foreman, when missing). Must match the Alias target of ' \
+                                      'the foreman-bootdisk-pull.conf snippet — iso_upload checks the ' \
+                                      'installed drop-in against this value and refuses before ' \
+                                      'staging on a mismatch — and the installer removes that ' \
+                                      'drop-in, so re-copy it after every installer run. Blank keeps ' \
                                       'boot disk transfers dormant: iso_upload refuses before ' \
                                       'staging.'))
-              setting(:bootdisk_staging_root,
+              setting(:hyperv_bootdisk_staging_root,
                       type: :string,
                       default: '',
-                      full_name: N_('Boot disk staging root'),
+                      full_name: N_('Hyper-V boot disk staging root'),
                       description: N_('Private directory beside the pull root holding in-flight ' \
                                       'copies and sidecars (created 0700, owner foreman, when ' \
                                       'missing; never served by Apache). Blank keeps boot disk ' \
