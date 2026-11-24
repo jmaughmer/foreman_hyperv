@@ -92,6 +92,11 @@ module ForemanHyperv
         rescue StandardError
           FileUtils.rm_f(tmp)
           FileUtils.rm_f(sidecar) if staged_written || File.file?(sidecar)
+          # A cross-filesystem mv is copy-then-unlink: a mid-copy failure can
+          # leave a PARTIAL file under the final name (round 19, finding N1).
+          # The served root must hold only complete files - fog verifies the
+          # copy host-side anyway, but the janitor should never have to.
+          FileUtils.rm_f(final)
           raise
         end
 
@@ -135,8 +140,9 @@ module ForemanHyperv
       # The pull URL for the transfer: the setting plus the nonce path. Like
       # the smart-proxy URLs, unattended_url is trusted deployment config —
       # the ONLY untrusted bytes interpolated here are the generated nonce.
-      # Chomp only the trailing slash (never rstrip — 'foreman.test//' is
-      # spike 0.2's double-slash trap).
+      # Chomp removes ONE trailing slash, the common misconfiguration; a
+      # configured double slash ('foreman.test//', spike 0.2's trap) is left
+      # as configured — this fixes the join, it does not rewrite settings.
       def transfer_url!
         base = Setting[:unattended_url].to_s.strip
         if base.empty?

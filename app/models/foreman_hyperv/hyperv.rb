@@ -721,9 +721,9 @@ module ForemanHyperv
     # The gates (the fork's rule: capabilities, never versions): the pull
     # requires the enablement era AND :file_pull/fetch_url_to_path; attach
     # requires the era and its five drive/order requests; the scoped delete
-    # requires :contained_file_removal/remove_file and deliberately NOT the
-    # era — fog's own request carries its own scope guard, and the cleanup
-    # rides a destroy path that must not be gated on the create era. The
+    # checks the era AND :contained_file_removal/remove_file too, but every
+    # refusal there is a LOGGED SKIP, never a raise (round-17 finding 3) —
+    # cleanup rides destroy and must never fail a build. The
     # two bootdisk words sit on the plugin's opt-in side (the enablement
     # entries are predicate-paired and fog pairs no predicate with these;
     # see the pin in HypervEnablementTest).
@@ -849,10 +849,12 @@ module ForemanHyperv
     # eject the media, and ALWAYS answer true (round 17, finding 3). The
     # answer runs inside the /unattended/built save, and core fails the whole
     # save on a falsy step answer (evidence/core-orchestration.rb:149) — which
-    # would leave the host in build mode with a live token forever. Detach
-    # runs for EVERY build, bootdisk or not, and "nothing to do" is its normal
-    # answer; a host refusal too is logged, never raised. The machine read is
-    # best-effort: whatever node fog's fallback can reach gets the eject.
+    # would leave the host in build mode with a live token forever. "Nothing
+    # to do" is this step's normal answer; a host refusal too is logged, never
+    # raised. The signature carries no filename (prio 52 is uuid-only), so
+    # every drive still REPORTING media is ejected — by contract, not accident.
+    # The machine read is best-effort: whatever node fog's fallback can reach
+    # gets the eject.
     def iso_detach(vm_id)
       raise ArgumentError, 'iso_detach requires a virtual machine id' if vm_id.blank?
 
