@@ -795,7 +795,7 @@ module ForemanHyperv
         # and iso_delete receive only the basename (core hands them
         # File.basename(isofile)), and fetch_url_to_path's no-overwrite rule
         # turns a stale file here into a refusal that reaches a human.
-        target = Fog::Hyperv::PathJoin.join(root, File.basename(isofile))
+        target = bootdisk_host_path(root, File.basename(isofile))
         received = client.fetch_url_to_path(url: staged.url, path: target,
                                             sha256: staged.sha256, size: staged.bytes)
         unless received == staged.bytes
@@ -839,7 +839,7 @@ module ForemanHyperv
               'The boot disk cannot be attached: the host answered no DVD-drive id. Nothing was changed.'
       end
       client.set_vm_dvd_drive(id: drive_id, vm_id: vm_id, computer_name: node,
-                              path: Fog::Hyperv::PathJoin.join(root, name))
+                              path: bootdisk_host_path(root, name))
       boot = boot_order_with_dvd_first(drive_id, client.get_vm_boot_order(vm_id: vm_id, computer_name: node))
       client.set_vm_boot_order(vm_id: vm_id, order: boot, computer_name: node)
       true
@@ -913,7 +913,7 @@ module ForemanHyperv
           return true
         end
         roots.each do |root|
-          path = Fog::Hyperv::PathJoin.join(root, name)
+          path = bootdisk_host_path(root, name)
           begin
             removed = client.remove_file(path: path, root: root)
             if removed
@@ -3236,6 +3236,16 @@ module ForemanHyperv
                              "reported (#{roots.to_a.inspect}). Nothing was #{phase}."
       end
       match.to_s.chomp('\\')
+    end
+
+    # The host-side path for a bootdisk file: the root the HOST reported
+    # joined to a name validated bare by bootdisk_filename! (no separators,
+    # no traversal), so the single backslash here is the whole join. The
+    # plugin does not reach for Fog::Hyperv::PathJoin — the installed gem
+    # loads it only with the request files, and re-implementing a guard whose
+    # inputs are already validated is honest at four lines.
+    def bootdisk_host_path(root, name)
+      "#{root.to_s.chomp('\\')}\\#{name}"
     end
 
     # iso_attach and iso_delete receive a bare filename (core hands

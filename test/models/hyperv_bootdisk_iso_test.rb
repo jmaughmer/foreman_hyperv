@@ -133,7 +133,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     def supports_input_hardening? = true
     def supports_cluster_capacity_projection? = true
 
-    def get_vm_dvd_drive(vm_id:)
+    def get_vm_dvd_drive(vm_id:, computer_name: nil)
       @calls << [:get_vm_dvd_drive, vm_id]
       @dvd_rows
     end
@@ -143,24 +143,24 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       { id: 'dvd-new', vm_id: vm_id, path: nil }
     end
 
-    def set_vm_dvd_drive(id:, vm_id:, path:)
+    def set_vm_dvd_drive(id:, vm_id:, path:, computer_name: nil)
       @calls << [:set_vm_dvd_drive, id, vm_id, path]
       true
     end
 
-    def eject_vm_dvd_drive(id:, vm_id:)
+    def eject_vm_dvd_drive(id:, vm_id:, computer_name: nil)
       @calls << [:eject_vm_dvd_drive, id, vm_id]
       raise Fog::Hyperv::Errors::PSError, 'eject failed (test)' if @raise_eject
 
       true
     end
 
-    def get_vm_boot_order(vm_id:)
+    def get_vm_boot_order(vm_id:, computer_name: nil)
       @calls << [:get_vm_boot_order, vm_id]
       @boot_rows
     end
 
-    def set_vm_boot_order(vm_id:, order:)
+    def set_vm_boot_order(vm_id:, order:, computer_name: nil)
       @calls << [:set_vm_boot_order, vm_id, order]
       order
     end
@@ -263,7 +263,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   test 'a blank unattended URL refuses BEFORE anything is staged — no orphan can enter the served root' do
     Setting.stubs(:[]).with(:unattended_url).returns('')
-    src = make_iso(@staging)
+    src = make_iso(Dir.mktmpdir('bd-src'))
 
     assert_raises(ForemanHyperv::OperationRefused) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
     assert_empty Dir.children(@served), 'the URL is computed before the first write: a refused stage leaves no orphan'
@@ -271,7 +271,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   end
 
   test 'a failed flip cleans the temp AND the sidecar, not just the temp' do
-    src = make_iso(@staging)
+    src = make_iso(Dir.mktmpdir('bd-src'))
     FileUtils.stubs(:mv).raises(Errno::EACCES)
 
     assert_raises(Errno::EACCES) { ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID) }
