@@ -233,7 +233,7 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     assert_equal 0o700, File.stat(@staging).mode & 0o777
     assert_empty Dir.children(@served), 'the ensure creates the shelf; the ensure-deletion still empties it'
     assert_empty Dir.children(@staging)
-    assert_equal 1, (fog.calls.count { |c| c.first == :fetch_url_to_path })
+    assert_equal 1, fog.calls.count { |c| c.first == :fetch_url_to_path }
   end
 
   # ---- the snippet the URL rides (F4, post-purge) ---------------------------------
@@ -297,16 +297,16 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
 
     wrong = File.join(@root, 'wrong.conf')
     File.write(wrong, "Alias /bootdisk-pull /srv/somewhere-else\n")
-    refute ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(wrong, root),
-           'the copy-without-editing bug this check exists for: file installed, Alias elsewhere, every ride a 404'
+    assert_not ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(wrong, root),
+               'the copy-without-editing bug this check exists for: file installed, Alias elsewhere, every ride a 404'
 
     legacy = File.join(@root, 'legacy.conf')
     File.write(legacy, "Alias /bootdisk-pull #{root}-legacy\n")
-    refute ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(legacy, root),
-           'a PREFIX of the root is not the root — substring matching would wave it through'
+    assert_not ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(legacy, root),
+               'a PREFIX of the root is not the root — substring matching would wave it through'
 
-    refute ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(File.join(@root, 'gone.conf'), root),
-           'no file, no service'
+    assert_not ForemanHyperv::BootdiskTransfer.apache_snippet_serves?(File.join(@root, 'gone.conf'), root),
+               'no file, no service'
   end
 
   test 'a drop-in that EXISTS but Aliases another root refuses with the root named' do

@@ -268,13 +268,16 @@ module ForemanHyperv
         # concurrent ensure (or an operator fix landing mid-call) is not worth
         # failing an otherwise-successful creation over, so ONLY these metadata
         # calls tolerate SystemCallError; the mkdir above deliberately does not.
-        missing.each do |dir|
-          begin
-            File.chmod(mode, dir)
-          rescue SystemCallError
-            nil
-          end
-        end
+        missing.each { |dir| chmod_tolerant(dir, mode) }
+      end
+
+      # chmod that survives the race with a concurrent ensure or an operator
+      # fix landing mid-call — only ever called on a directory we just
+      # created, so a vanished/changed one is not our failure to report.
+      def chmod_tolerant(dir, mode)
+        File.chmod(mode, dir)
+      rescue SystemCallError
+        nil
       end
 
       def served_root!
