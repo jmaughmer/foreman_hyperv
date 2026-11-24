@@ -193,15 +193,22 @@ class InputValidationTest < ActiveSupport::TestCase
   # endpoint's own shapes: GUIDs, numeric form row ids, and `Microsoft:` WMI
   # paths whose segments are GUIDs, controller numbers, or drive letters.
   def test_edit_roundtrip_device_ids_pass
-    # The measured save_vm shapes: core rebuilds interfaces_attributes from
-    # each NIC's compute_attributes JSON (host_interfaces_attrs) and the VM
-    # form submits volumes_attributes straight from the disk list.
+    # The measured save_vm shapes: the host form's NIC rows arrive complete
+    # (hyperv_add_attributes copies the interface columns in, PLG-24's ip/ip6
+    # precedent) carrying the device identity in nested compute_attributes;
+    # the disk rows carry the five-segment WMI device path.
     wmi_nic = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D07B9966-E6F1-4C58-9F4B-C420EBE2A804'
     wmi_disk = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D0D76B44-1269-4F42-8150-8D9261FFD283\\0\\0\\D'
     wmi_dvd = 'Microsoft:1C51C4EE-DF90-4CEE-A9F7-218888711248\\D07B9966-E6F1-4C58-9F4B-C420EBE2A804\\0\\1\\E'
     IV.validate_hash!(
       interfaces_attributes: {
-        '0' => { identity: wmi_nic, switch_id: GUID, vlan_operation_mode: 'Untagged', ip: '', ip6: '' }
+        '0' => {
+          _destroy: '0', id: '6', identifier: '', name: 'leah-navia',
+          domain_id: '1', subnet_id: '1', ip: '', ip6: '',
+          managed: '1', primary: '1', provision: '1', execution: '1',
+          tag: '', attached_to: '',
+          compute_attributes: { identity: wmi_nic, switch_id: GUID, vlan_operation_mode: 'Untagged' }
+        }
       },
       volumes_attributes: {
         '0' => { id: wmi_disk, basename: 'Disk', size_bytes: '1073741824' },

@@ -80,15 +80,23 @@ module ForemanHyperv
     # create/update interface loops dispatch these hashes with
     # nic.send(:"#{k}=", v) — send reaches every setter that exists on the
     # model, so the key must be on a fixed list, not merely non-empty.
-    # ip/ip6 are core's pass-through keys, not fog's: host_interfaces_attrs
-    # merges them onto every physical NIC's compute_attributes on create, and
-    # create_interfaces excepts them (with identity) before fog's setters —
-    # they ride to this validator and no further, their characters still
-    # checked. PLG-24: the host form carries them, and before this line the
-    # first clustered machine died on the IPv4 its operator typed.
+    # The off-model keys on this list are legitimate form traffic that names
+    # nothing Hyper-V is asked to do, and each rides to this validator and no
+    # further, its characters still checked: ip/ip6 are core's pass-through
+    # (PLG-24: host_interfaces_attrs merges them onto every physical NIC, and
+    # the first clustered machine died on the IPv4 its operator typed), and
+    # PLG-37 adds the interface-row columns — a host-form EDIT submits each
+    # NIC's full row (identifier/domain_id/subnet_id/managed/primary/
+    # provision/execution/tag/attached_to, measured refusing as 'identifier'
+    # and 'execution' in production.log 881036ec) because
+    # hyperv_add_attributes copies the form's interfaces_attributes wholesale
+    # into the compute hash; update_interfaces picks its own keys, so these
+    # reach no fog setter.
     NIC_KEYS = %i[
       _destroy _delete id identity mac mac_address name switch_name switch_id
       ip ip6
+      identifier domain_id subnet_id managed primary provision execution
+      tag attached_to
       is_legacy is_management_os connected dynamic_mac_address_enabled
       mac_address_spoofing dhcp_guard router_guard allow_teaming
       compute_attributes
