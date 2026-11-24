@@ -107,7 +107,6 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       @dvd_rows
     end
 
-
     def add_vm_dvd_drive(vm_id:, **options)
       @calls << [:add_vm_dvd_drive, vm_id, options]
       { id: 'dvd-new', vm_id: vm_id, path: nil }
