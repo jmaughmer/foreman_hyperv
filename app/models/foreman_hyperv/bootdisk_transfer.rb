@@ -18,111 +18,151 @@ module ForemanHyperv
   #     files named <32-hex-nonce>.iso. The nonce is the whole URL secret:
   #     the alias is anonymous-read by design, so an ISO carrying host keys
   #     must not be nameable by anything shorter or guessable.
-  #   * the STAGING root (0700, never served) — temps and sidecars. A file
-  #     becomes visible to the host only through the final rename into the
-  #     served root, so a half-written ISO is physically unservable, and the
-  #     janitor (PR-4) reads sidecars this Apache cannot hand out.
+  #   * the STAGING root (0700, never served) — temps and sidecars, both
+  #     named for PR-4's janitor contract (plan v10 Decision 4/F10): temps are
+  #     staging-<nonce>.iso.part, sidecars staging-<nonce>.json. Nothing else
+  #     lives here, because a differently-named temp or a served sidecar is a
+  #     file the janitor cannot find or must not touch.
   #
-  # F8 rides stage(): the source lands through COPY-then-RENAME, never one
-  # rename — the generating worker's tmpdir lives under its PrivateTmp bind
-  # mount, so a move into the served root crosses filesystems (EXDEV) and a
-  # rename would raise in the middle of a build. F10 rides the same line:
-  # the sidecar records what the janitor needs beside the temp, and because
-  # the janitor's age decision reads mtime, an unparseable sidecar can delay
-  # a sweep but cannot keep an ISO on the shelf forever.
+  # stage() ORDER IS THE CONTRACT (round 17, findings 5-6): the URL is
+  # computed FIRST (a blank unattended_url refuses before a byte is written,
+  # so no orphan can sit in the served root waiting for an Apache that will
+  # never serve it), the copy is chmod 0644 and fsynced BEFORE the rename
+  # (the PrivateTmp worker's umask is not Apache's problem, and a rename that
+  # beats the data hits disk as a zero-length ISO), and a failed rename takes
+  # the sidecar with it — a sidecar whose ISO never landed is one the janitor
+  # would chase forever.
   #
-  # discard() is the ensure every caller reaches — success, fog raise, host
-  # refusal — and it is strict about the one string that becomes a filesystem
-  # argument: only a full nonce is ever joined to a root.
-  class BootdiskTransfer
-    NONCE = /\A[0-9a-f]{32}\z/
+  # This class touches NOTHING outside the two roots: no fog, no DB. It is
+  # used inside the orchestration (iso_upload) and the plugin's own paths.
+  module BootdiskTransfer
+    # What stage() answers: everything fog's fetch_url_to_path needs to pull
+    # and verify (url + sha256 + exact byte count), plus the nonce the caller
+    # hands to discard(). The host-side NAME is not here on purpose — it is
+    # the ISO basename the attach and delete steps receive from core, never
+    # the nonce, which is only the URL secret.
+    Staged = Struct.new(:nonce, :url, :sha256, :bytes, keyword_init: true)
 
-    # What stage answers: everything iso_upload needs to hand the host, in
-    # one object, so a caller cannot half-use the contract (the URL without
-    # the digest that verifies it, say).
-    Staged = Struct.new(:nonce, :path, :url, :sha256, :bytes, keyword_init: true)
+    class ConfiguredRootError < StandardError; end
 
+    # Set by the plugin initializer from settings (bootdisk_pull_root /
+    # bootdisk_pull_url — spike 0.2 measured these as REQUIRED configuration,
+    # not derived), never by user input per operation. Nil until configured;
+    # tests set them directly.
     class << self
-      # The roots, overridable where a test (or an operator with a layout of
-      # their own) must point them; nil restores the installed defaults.
-      attr_writer :served_root, :staging_root
+      attr_accessor :served_root, :staging_root
 
-      def served_root
-        @served_root || '/var/lib/foreman/bootdisk-transfer'
-      end
+      # Copy the source into the served root under a fresh nonce. COPIES,
+      # never renames: the source lives in the worker's PrivateTmp, which is
+      # a different filesystem (measured EXDEV), and the worker's ensure
+      # removes it anyway. Returns the Staged handoff. Raises on any real
+      # failure — the caller (iso_upload) deletes the staged copy in its
+      # ensure either way.
+      def stage(src, machine: nil)
+        served = served_root!
+        staging = staging_root!
+        base = File.basename(src.to_s)
+        raise ArgumentError, "#{src} is not a regular file" if base.blank? || !File.file?(src)
 
-      def staging_root
-        @staging_root || '/var/lib/foreman/bootdisk-staging'
-      end
-
-      # Copy source onto the shelf and answer its nonce, URL and verifiers.
-      # The source STAYS: the worker still owns the file it generated.
-      def stage(source)
-        unless source.present? && File.file?(source)
-          raise ArgumentError, "the ISO to stage does not exist: #{source.inspect}"
-        end
-
+        # URL first: every failure below would otherwise orphan a file in the
+        # root Apache serves, and a blank unattended_url is the one failure
+        # that is ALWAYS waiting (setting unset).
+        bytes = File.size(src)
+        sha256 = Digest::SHA256.file(src).hexdigest
         nonce = SecureRandom.hex(16)
-        ensure_root(served_root, 0o711) # --x for the puller: it names files, it does not list the shelf
-        ensure_root(staging_root, 0o700)
-        sha256 = Digest::SHA256.file(source).hexdigest
-        size = File.size(source)
+        url = "#{transfer_url!}/#{nonce}.iso"
+        tmp = File.join(staging, "staging-#{nonce}.iso.part")
+        sidecar = File.join(staging, "staging-#{nonce}.json")
+        final = File.join(served, "#{nonce}.iso")
 
-        temp = File.join(staging_root, "#{nonce}.part")
-        final = File.join(served_root, "#{nonce}.iso")
+        staged_written = false
         begin
-          FileUtils.cp(source, temp)
-          File.write(File.join(staging_root, "#{nonce}.json"),
-                     JSON.generate('sha256' => sha256, 'size' => size, 'source' => File.basename(source)))
-          FileUtils.mv(temp, final) # same filesystem by construction: the visibility flip
+          FileUtils.cp(src, tmp)
+          # The worker generated this under its own umask (0600 under
+          # PrivateTmp is the common case); Apache runs as another user and
+          # must be able to read it.
+          File.chmod(0o644, tmp)
+          # Durability BEFORE visibility: the rename publishes the file to
+          # the host's GET, and a rename that beats the bytes serves a short
+          # file the host's verifier will (correctly) refuse.
+          File.open(tmp, 'rb') { |f| f.fsync }
+          write_sidecar(sidecar, nonce: nonce, machine: machine, source: base,
+                                   bytes: bytes, sha256: sha256)
+          staged_written = true
+          FileUtils.mv(tmp, final)
         rescue StandardError
-          FileUtils.rm_f(temp)
-          FileUtils.rm_f(final)
+          FileUtils.rm_f(tmp)
+          FileUtils.rm_f(sidecar) if staged_written || File.file?(sidecar)
           raise
         end
 
-        Staged.new(nonce: nonce, path: final, url: url_for(nonce), sha256: sha256, bytes: size)
+        Staged.new(nonce: nonce, url: url, sha256: sha256, bytes: bytes)
       end
 
-      # Take one ISO off the shelf. Anything not a full nonce addresses
-      # nothing here — a caller that lost its nonce waits for the janitor
-      # rather than handing a search string to rm.
+      # Delete the staged file for a nonce and its sidecar. Best-effort by
+      # design: the caller runs it in an ensure and a failed cleanup must not
+      # mask the real result; PR-4's janitor sweeps age-exceeded files anyway.
+      # Anything that is not a nonce is refused without touching the disk.
       def discard(nonce)
-        return false unless NONCE.match?(nonce.to_s)
+        n = nonce.to_s
+        return unless n.match?(/\A[0-9a-f]{32}\z/)
 
-        FileUtils.rm_f(File.join(served_root, "#{nonce}.iso"))
-        FileUtils.rm_f(File.join(staging_root, "#{nonce}.json"))
-        true
-      end
-
-      # The URL the host fetches: the same unattended URL a provisioned
-      # machine already trusts for its templates (the pull rides the same
-      # http(s) decision the rest of the unattended exchange makes), plus
-      # the snippet's one alias path and the nonce.
-      def url_for(nonce)
-        base = Setting[:unattended_url].to_s.strip.sub(%r{/+\z}, '')
-        if base.empty?
-          raise ForemanHyperv::OperationRefused,
-                'The bootdisk pull needs a non-blank unattended URL the host can reach.'
+        served = served_root!
+        staging = staging_root!
+        begin
+          FileUtils.rm_f(File.join(served, "#{n}.iso"))
+          FileUtils.rm_f(File.join(staging, "staging-#{n}.json"))
+        rescue StandardError
+          nil
         end
-
-        "#{base}/bootdisk-pull/#{nonce}.iso"
       end
 
       private
 
-      # Created lazily (a Foreman install has no reason to hold this until a
-      # bootdisk builds); an existing root keeps the mode it has — an
-      # operator's chmod is an answer, and rewriting it from a worker would
-      # be a surprise, not a fix.
-      def ensure_root(path, mode)
-        return if File.directory?(path)
+      def served_root!
+        root = served_root.to_s
+        raise ConfiguredRootError, 'bootdisk_pull_root is not configured' if root.blank?
 
-        FileUtils.mkdir_p(path)
-        File.chmod(mode, path)
-      rescue StandardError => e
-        raise ForemanHyperv::OperationRefused,
-              "The bootdisk transfer shelf #{path.inspect} could not be prepared: #{e.class}."
+        root.chomp('/')
+      end
+
+      def staging_root!
+        root = staging_root.to_s
+        raise ConfiguredRootError, 'bootdisk_staging_root is not configured' if root.blank?
+
+        root.chomp('/')
+      end
+
+      # The pull URL for the transfer: the setting plus the nonce path. Like
+      # the smart-proxy URLs, unattended_url is trusted deployment config —
+      # the ONLY untrusted bytes interpolated here are the generated nonce.
+      # Chomp only the trailing slash (never rstrip — 'foreman.test//' is
+      # spike 0.2's double-slash trap).
+      def transfer_url!
+        base = Setting[:unattended_url].to_s.strip
+        if base.empty?
+          raise ForemanHyperv::OperationRefused,
+                'The bootdisk transfer is refused: the unattended URL setting is blank, so the host ' \
+                'could not be told where to fetch from. Nothing was staged.'
+        end
+
+        "#{base.chomp('/')}/bootdisk-pull"
+      end
+
+      # Sidecar fields per plan v10 Decision 4 (F10): host-side identity the
+      # janitor and a human debugging a stale ride need. The janitor's AGE
+      # decision reads the file mtime, never staged_at (Decision 4), but the
+      # field is recorded, and the name matches the janitor's staging-* sweep
+      # pattern.
+      def write_sidecar(path, nonce:, machine:, source:, bytes:, sha256:)
+        File.write(path, JSON.generate(
+                          nonce: nonce,
+                          machine: machine,
+                          source: source,
+                          bytes: bytes,
+                          sha256: sha256,
+                          staged_at: Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+                        ))
       end
     end
   end
