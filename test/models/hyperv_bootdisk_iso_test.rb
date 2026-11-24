@@ -133,7 +133,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     def supports_input_hardening? = true
     def supports_cluster_capacity_projection? = true
 
-    def get_vm_dvd_drive(vm_id:, computer_name: nil)
+    def get_vm_dvd_drive(vm_id:, **_rest)
       @calls << [:get_vm_dvd_drive, vm_id]
       @dvd_rows
     end
@@ -143,24 +143,24 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       { id: 'dvd-new', vm_id: vm_id, path: nil }
     end
 
-    def set_vm_dvd_drive(id:, vm_id:, path:, computer_name: nil)
+    def set_vm_dvd_drive(id:, vm_id:, path:, **_rest)
       @calls << [:set_vm_dvd_drive, id, vm_id, path]
       true
     end
 
-    def eject_vm_dvd_drive(id:, vm_id:, computer_name: nil)
+    def eject_vm_dvd_drive(id:, vm_id:, **_rest)
       @calls << [:eject_vm_dvd_drive, id, vm_id]
       raise Fog::Hyperv::Errors::PSError, 'eject failed (test)' if @raise_eject
 
       true
     end
 
-    def get_vm_boot_order(vm_id:, computer_name: nil)
+    def get_vm_boot_order(vm_id:, **_rest)
       @calls << [:get_vm_boot_order, vm_id]
       @boot_rows
     end
 
-    def set_vm_boot_order(vm_id:, order:, computer_name: nil)
+    def set_vm_boot_order(vm_id:, order:, **_rest)
       @calls << [:set_vm_boot_order, vm_id, order]
       order
     end

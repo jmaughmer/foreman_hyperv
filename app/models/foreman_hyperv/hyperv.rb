@@ -932,7 +932,6 @@ module ForemanHyperv
       true
     end
 
-
     # Hyper-V has no zones — the word names another provider's layout (core aliases
     # it to EC2 availability zones) — and core's base raises "Not implemented for
     # Hyper-V", which the API serves as a 500 for a question whose honest answer is
@@ -3203,14 +3202,10 @@ module ForemanHyperv
     # this endpoint is. A stand-alone host answers no cluster and passes.
     def bootdisk_ride_check!(vm_id)
       server = find_vm_by_uuid(vm_id)
-      unless server
-        raise ForemanHyperv::OperationRefused, format(BOOTDISK_NO_MACHINE_REFUSAL, vm_id: vm_id)
-      end
+      raise ForemanHyperv::OperationRefused, format(BOOTDISK_NO_MACHINE_REFUSAL, vm_id: vm_id) unless server
 
       state = server.state
-      unless state == :Off
-        raise ForemanHyperv::OperationRefused, format(BOOTDISK_POWER_REFUSAL, state: state.inspect)
-      end
+      raise ForemanHyperv::OperationRefused, format(BOOTDISK_POWER_REFUSAL, state: state.inspect) if state != :Off
 
       generation = server.generation
       unless generation == :UEFI
@@ -3221,6 +3216,7 @@ module ForemanHyperv
       if endpoint_cluster && node.present? && !endpoint_serves_node?(node)
         raise ForemanHyperv::OperationRefused, format(BOOTDISK_NODE_REFUSAL, node: node)
       end
+
       server
     end
 
@@ -3258,8 +3254,10 @@ module ForemanHyperv
       if name.include?('\\') || name.include?('/') || name == '.' || name == '..'
         raise ArgumentError, "#{step} received #{name.inspect}, which is not a bare filename"
       end
+
       name
     end
+
     # fog's drive reads answer in three shapes — nil when the VM has no DVD drive, ONE
     # bare Hash when it has one, an Array of Hashes when it has several (all three measured
     # on the lab host 2026-11-24). Array() turns the Hash into [key, value] pairs and

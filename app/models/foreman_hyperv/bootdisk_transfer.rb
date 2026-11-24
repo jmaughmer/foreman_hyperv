@@ -85,9 +85,8 @@ module ForemanHyperv
           # Durability BEFORE visibility: the rename publishes the file to
           # the host's GET, and a rename that beats the bytes serves a short
           # file the host's verifier will (correctly) refuse.
-          File.open(tmp, 'rb') { |f| f.fsync }
-          write_sidecar(sidecar, nonce: nonce, machine: machine, source: base,
-                                   bytes: bytes, sha256: sha256)
+          File.open(tmp, 'rb', &:fsync)
+          write_sidecar(sidecar, nonce: nonce, machine: machine, source: base, bytes: bytes, sha256: sha256)
           staged_written = true
           FileUtils.mv(tmp, final)
         rescue StandardError
@@ -155,14 +154,15 @@ module ForemanHyperv
       # field is recorded, and the name matches the janitor's staging-* sweep
       # pattern.
       def write_sidecar(path, nonce:, machine:, source:, bytes:, sha256:)
-        File.write(path, JSON.generate(
-                          nonce: nonce,
-                          machine: machine,
-                          source: source,
-                          bytes: bytes,
-                          sha256: sha256,
-                          staged_at: Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-                        ))
+        meta = {
+          nonce: nonce,
+          machine: machine,
+          source: source,
+          bytes: bytes,
+          sha256: sha256,
+          staged_at: Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+        }
+        File.write(path, JSON.generate(meta))
       end
     end
   end
