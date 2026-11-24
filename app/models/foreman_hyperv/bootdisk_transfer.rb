@@ -253,7 +253,7 @@ module ForemanHyperv
         # everything made here is already foreman:foreman.
         missing = []
         node = root
-        while !File.directory?(node)
+        until File.directory?(node)
           missing << node
           parent = File.dirname(node)
           break if parent == node # reached the filesystem root

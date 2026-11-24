@@ -234,7 +234,7 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     assert_empty Dir.children(@served), 'the ensure creates the shelf; the ensure-deletion still empties it'
     assert_empty Dir.children(@staging)
     fetches = fog.calls.count { |c| c.first == :fetch_url_to_path }
-    assert_equal 1, fetches, 'one fetch instruction, exactly — the host-side pull is fog\\'s job'
+    assert_equal 1, fetches, 'one fetch instruction, exactly — the host-side pull is fog\'s job'
   end
 
   # ---- the snippet the URL rides (F4, post-purge) ---------------------------------
