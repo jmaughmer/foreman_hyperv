@@ -1492,9 +1492,11 @@ module ForemanHyperv
     def set_cluster_vm_preferred_owners(vm, owner_nodes)
       names = Array(owner_nodes).map { |node| node.to_s.strip }.reject(&:empty?)
       doubled = names.map(&:downcase).tally.select { |_node, count| count > 1 }.keys
-      raise ForemanHyperv::OperationRefused,
-            "preferred owners name the same node more than once (#{doubled.join(', ')} matched " \
-            'case-insensitively); the cluster keeps one entry per node, so list each node once' if doubled.any?
+      if doubled.any?
+        raise ForemanHyperv::OperationRefused,
+              "preferred owners name the same node more than once (#{doubled.join(', ')} matched " \
+              'case-insensitively); the cluster keeps one entry per node, so list each node once'
+      end
 
       # An empty list names no node, so membership has nothing to check —
       # and a node read that fails must not refuse the one state (§76) that
@@ -1504,9 +1506,11 @@ module ForemanHyperv
           []
         else
           nodes = cluster_node_names
-          raise ForemanHyperv::OperationRefused,
-                'the cluster node list could not be read, so no owner name could be checked against it; ' \
-                'unknown nodes are not permission to write' if nodes.nil?
+          if nodes.nil?
+            raise ForemanHyperv::OperationRefused,
+                  'the cluster node list could not be read, so no owner name could be checked against it; ' \
+                  'unknown nodes are not permission to write'
+          end
 
           names.map do |node|
             nodes.find { |known| known.casecmp(node).zero? } ||
@@ -2926,9 +2930,11 @@ module ForemanHyperv
     # canonicalisation, the cluster's refusals) — see
     # set_cluster_vm_preferred_owners.
     def apply_preferred_owners(vm, submitted)
-      raise ForemanHyperv::OperationRefused,
-            'this fog build cannot write cluster preferred owners; the compute resource refuses ' \
-            'the setting rather than dropping it' unless cluster_owner_nodes_write_supported?
+      unless cluster_owner_nodes_write_supported?
+        raise ForemanHyperv::OperationRefused,
+              'this fog build cannot write cluster preferred owners; the compute resource refuses ' \
+              'the setting rather than dropping it'
+      end
 
       ha = cluster_ha_settings(vm)
       return unless ha.found?

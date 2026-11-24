@@ -239,8 +239,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     # that line moving again).
     assert_equal Fog::Hyperv::CAPABILITIES.sort,
                  (ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.keys +
-                   [:cluster_role_failback, :cluster_role_owner_nodes,
-                    :cluster_role_owner_nodes_write]).sort
+                   %i[cluster_role_failback cluster_role_owner_nodes cluster_role_owner_nodes_write]).sort
   end
 
   def test_enablement_stands_when_the_fog_answers_all_six

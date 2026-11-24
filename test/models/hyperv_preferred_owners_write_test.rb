@@ -199,8 +199,8 @@ class HypervPreferredOwnersWriteTest < ActiveSupport::TestCase
 
     assert_equal 1, fog.writes.size
     assert_equal [], fog.writes.first[:owner_nodes],
-                   '[] is the explicit unrestricted state; the fog maps it to the one measured ' \
-                   'clear spelling (-Owners \'\')'
+                 '[] is the explicit unrestricted state; the fog maps it to the one measured ' \
+                 'clear spelling (-Owners \'\')'
     assert_equal 0, fog.nodes_calls, 'a list with no names cannot name a wrong node'
   end
 
@@ -266,8 +266,9 @@ class HypervPreferredOwnersWriteTest < ActiveSupport::TestCase
 
   def edit_cr(fog, roles: [owners_role])
     cr = build_cr(fog)
-    vm = stub('vm', id: VM_ID, name: VM_NAME, computer_name: 'hv-node2', generation: :BIOS,
-               dynamic_memory_enabled: false, dirty?: false)
+    vm = stub('vm',
+              id: VM_ID, name: VM_NAME, computer_name: 'hv-node2', generation: :BIOS,
+              dynamic_memory_enabled: false, dirty?: false)
     vm.stubs(:processor_count=)
     vm.stubs(:notes=)
     vm.stubs(:dynamic_memory_enabled=)
@@ -293,9 +294,9 @@ class HypervPreferredOwnersWriteTest < ActiveSupport::TestCase
     # Case is the one thing the cluster is measured not to preserve; an
     # operator who touched nothing must not spend a write on it.
     fog = OwnersFog.new(RolesDouble.new([]))
-    cr, = edit_cr(fog, roles: [owners_role(preferred: ['hv-node1', 'HV-NODE2'])])
+    cr, = edit_cr(fog, roles: [owners_role(preferred: %w[hv-node1 HV-NODE2])])
 
-    cr.save_vm(VM_ID, edit_attr(['HV-NODE1', 'hv-node2']))
+    cr.save_vm(VM_ID, edit_attr(%w[HV-NODE1 hv-node2]))
 
     assert_empty fog.writes
   end
