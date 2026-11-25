@@ -926,7 +926,17 @@ module ForemanHyperv
     # raised. The signature carries no filename (prio 52 is uuid-only), so
     # every drive still REPORTING media is ejected — by contract, not accident.
     # The machine read is best-effort: whatever node fog's fallback can reach
-    # gets the eject.
+    # gets the eject — and PLG-40 (review F4) sends the eject THROUGH that
+    # node's own client. A machine that moved off the endpoint mid-build is
+    # read through vm_from_cluster_owner, which dials the owner node; sending
+    # the DVD read and eject through the ENDPOINT client with that node's
+    # computer_name is the PLG-27 trap create_vm's comment names: fog's
+    # exact-host gate refuses another node before the cmdlet runs, the refusal
+    # folds into this method's answer-true rescue, and the bootdisk stays
+    # mounted — every later reboot boots it again. server.service is the
+    # client the machine was read through (for a machine the endpoint still
+    # sees, that is simply the endpoint's own client, so the common path does
+    # not change shape).
     def iso_detach(vm_id)
       raise ArgumentError, 'iso_detach requires a virtual machine id' if vm_id.blank?
 
@@ -935,7 +945,9 @@ module ForemanHyperv
         require_fog_requests!(:get_vm_dvd_drive, :eject_vm_dvd_drive)
         server = find_vm_by_uuid(vm_id)
         node = reading_node(server)
-        drives = dvd_drive_list(client.get_vm_dvd_drive(vm_id: vm_id, computer_name: node))
+        node_client = server.respond_to?(:service) ? server.service : nil
+        node_client ||= client
+        drives = dvd_drive_list(node_client.get_vm_dvd_drive(vm_id: vm_id, computer_name: node))
         loaded = drives.select { |drive| drive.is_a?(Hash) && (drive['path'] || drive[:path]).present? }
         if loaded.empty?
           logger.debug "Hyperv #{name}: bootdisk iso_detach: no drive holds media for #{vm_id}, nothing to eject"
@@ -946,7 +958,7 @@ module ForemanHyperv
 
             path = drive['path'] || drive[:path]
             begin
-              client.eject_vm_dvd_drive(id: drive_id, vm_id: vm_id, computer_name: node)
+              node_client.eject_vm_dvd_drive(id: drive_id, vm_id: vm_id, computer_name: node)
               logger.info "Hyperv #{name}: bootdisk iso_detach ejected #{path} from #{vm_id}"
             rescue StandardError => e
               logger.warn "Hyperv #{name}: bootdisk iso_detach could not eject #{path} from #{vm_id} " \
