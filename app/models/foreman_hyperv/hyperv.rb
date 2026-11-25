@@ -220,7 +220,11 @@ module ForemanHyperv
     # it only in 6+, PowerShell/PowerShell#621). A folder that merely holds
     # `...\vm01\iso -> D:\ISOs` therefore keeps exactly as the folder that IS
     # a junction does. PLG-41 (review F6): the sweep is in the same round
-    # trip; no nested reparse point means the names answer proceeds.
+    # trip; no nested reparse point means the names answer proceeds. The
+    # sweep rides fog's shell, which sets $ErrorActionPreference='Stop': a
+    # tree the sweep cannot enumerate aborts the script before any token
+    # prints, and the no-answer rule keeps the folder — the failure answer
+    # is keep, never NAMES over an unreadable subtree.
     FOLDER_PREFLIGHT_SCRIPT = <<~SCRIPT
       $p = %<folder>s
       if (-not (Test-Path -LiteralPath $p)) { 'ABSENT' }

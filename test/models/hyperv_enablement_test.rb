@@ -467,6 +467,8 @@ class HypervEnablementTest < ActiveSupport::TestCase
                     'the children are swept for reparse points before any names answer'
     assert_includes scripts.first, 'KEEP:NESTED-JUNCTION',
                     'a child junction answers its own refusal, not the folder-level one'
+    assert_match(/-Attributes ReparsePoint.*NAMES:/m, scripts.first,
+                 'the sweep PRE-EMPTS the names answer: NAMES means a completed child sweep')
   end
 
   def test_a_nested_junction_answer_keeps_the_folder
