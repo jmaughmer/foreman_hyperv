@@ -487,8 +487,23 @@ module ForemanHyperv
       true
     end
 
+    # bootdisk PR-5: the OPT-IN word. Appended after :build, never prepended:
+    # core's provision_method DEFAULT is capabilities.first
+    # (host/managed.rb:749), so a first-position :bootdisk would silently
+    # move every host that never set a provision_method onto the bootdisk
+    # flow. The word is derived from static facts ONLY — no setting, no fog
+    # CAPABILITIES, no endpoint read — because
+    # provision_method_in_capabilities (managed.rb:330, body :945-952)
+    # validates on EVERY managed save including /unattended/built: a dynamic
+    # word would strand in-flight hosts the moment an operator flipped its
+    # source, and an endpoint read would join that every-save hot path (plan
+    # round 7, blocking A). The old-fog case needs no gate here: the iso_*
+    # quartet below refuses the ride at build time with
+    # BOOTDISK_CAPABILITY_REFUSAL — loud and actionable at the build, never a
+    # validation that flaps. The precedent is foreman_bootdisk's own proxmox
+    # ext, verbatim: `def capabilities; super + [:bootdisk]; end`.
     def capabilities
-      [:build]
+      [:build, :bootdisk]
     end
 
     def test_connection(options = {})
@@ -754,6 +769,24 @@ module ForemanHyperv
                             'endpoint is not this one). The cluster shared volume the ISO lands on is only ' \
                             'reachable from the owning side. Nothing was transferred or changed.'
 
+    # bootdisk PR-5, Decision 5: the generated boot disk boots through a
+    # shim, and this lab has never booted that chain under Secure Boot with
+    # the default MicrosoftWindows template — the acceptance machine ran with
+    # Secure Boot OFF, which is why nothing failed there. Until one measured
+    # Secure Boot boot exists (and the bootdisk EFI-binary provenance is
+    # known), the flow refuses rather than create a forever-booting machine.
+    BOOTDISK_SECURE_BOOT_RIDE_REFUSAL = 'The boot disk is refused for a machine reporting Secure Boot ' \
+                                        'enabled: the generated boot disk boots through a shim this lab has ' \
+                                        'not booted under Secure Boot, so the media would attach to a ' \
+                                        'machine that cannot boot it. Turn Secure Boot off for this machine. ' \
+                                        'Nothing was transferred or changed.'
+
+    BOOTDISK_SECURE_BOOT_CREATE_REFUSAL = 'The boot disk create is refused: this host resolves to UEFI ' \
+                                          'firmware WITH Secure Boot, and the boot disk this create generates ' \
+                                          'boots through a shim this lab has not booted under Secure Boot. ' \
+                                          'Create this host with UEFI firmware (Secure Boot off). ' \
+                                          'Nothing was created.'
+
     BOOTDISK_NO_ROOTS_WARNING = 'The boot disk file cannot be deleted: the host reported no storage ' \
                                 'roots, so the sweep had nowhere to look. The file is left in place and ' \
                                 'the build proceeds.'
@@ -1011,6 +1044,18 @@ module ForemanHyperv
       start = Foreman::Cast.to_bool(attr.delete(:start))
 
       apply_firmware_attributes(attr)
+
+      # bootdisk PR-5, Decision 5's create seam: on a create there is no VM
+      # to read (round 10, F9), so the refusal works on the CREATE ATTRS —
+      # and it sits AFTER apply_firmware_attributes so 'automatic' firmware
+      # is refused at its RESOLVED secure-boot value, and before any fog
+      # write so a refused create has changed nothing. It keys on the
+      # bootdisk provision method only: core merges host.provision_method
+      # into the create attrs via host_compute_attrs (compute_resource.rb
+      # :143-148), which is also why every other flow keeps its Secure Boot.
+      if attr[:provision_method].to_s == 'bootdisk' && Foreman::Cast.to_bool(attr[:secure_boot_enabled])
+        raise ForemanHyperv::OperationRefused, BOOTDISK_SECURE_BOOT_CREATE_REFUSAL
+      end
 
       validate_vm(attr, new: true)
       validate_interfaces(attr)
@@ -3222,6 +3267,15 @@ module ForemanHyperv
       unless generation == :UEFI
         raise ForemanHyperv::OperationRefused, format(BOOTDISK_GEN1_REFUSAL, generation: generation.inspect)
       end
+
+      # bootdisk PR-5, Decision 5's LIVE seam: rebuilds ride a machine that
+      # was created before the opt-in (its stored attrs carry no
+      # provision_method for the create seam to see) and firmware can be
+      # flipped outside Foreman, so the ride also refuses off the live model.
+      # The read is FogExtensions::Hyperv::Server#foreman_firmware_type —
+      # the same value the edit form shows — and this gate runs inside the
+      # bootdisk flow only, so no ordinary host can meet it.
+      raise ForemanHyperv::OperationRefused, BOOTDISK_SECURE_BOOT_RIDE_REFUSAL if server.foreman_firmware_type == 'uefi_secure_boot'
 
       node = reading_node(server)
       if endpoint_cluster && node.present? && !endpoint_serves_node?(node)

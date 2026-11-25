@@ -170,6 +170,19 @@ module FogExtensions
       # exactly the rule the accessor above records for failback.
       attr_accessor :preferred_owners
 
+      # bootdisk PR-5: the ISO-upload storage the bootdisk orchestration will
+      # later hand back as iso_upload/iso_attach's storage_id (installed
+      # foreman_bootdisk orchestration/compute.rb:76-78 reads it from the
+      # HOST's compute_attributes, which 24.1.0 gives no widget for — the
+      # input path is API/hammer). The key travels inside the hash core
+      # mass-assigns onto this model in new_vm (host edit rendering, rebuild
+      # round-trips), so without this accessor Fog's merge_attributes raises
+      # UnknownAttribute on a key the machine has no property for — the
+      # PLG-30/36 rule again. fog itself never persists it: the create path
+      # builds servers.new from an explicit kwarg list, and the value reaches
+      # the ride only through bootdisk's storage_id argument.
+      attr_accessor :iso_upload_storage
+
       def select_nic(fog_nics, nic)
         nic_attrs = nic.compute_attributes
 

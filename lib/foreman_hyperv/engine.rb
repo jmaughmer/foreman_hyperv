@@ -154,6 +154,12 @@ module ForemanHyperv
       Fog::Hyperv::Compute::HardDrive.prepend ::FogExtensions::Hyperv::HardDrive
 
       Host::Managed.prepend ::ForemanHyperv::HostManagedExtensions
+      # bootdisk PR-5: the Host::Managed-side seam — Decision 1's payload-
+      # staleness guard. It rides beside HostManagedExtensions because the
+      # opt-in word (Hyperv#capabilities) is what makes provision_method
+      # 'bootdisk' savable at all, and this is the validation that protects
+      # the flow that word opens.
+      Host::Managed.prepend ::ForemanHyperv::BootdiskSeam
     end
     #
     # initializer 'foreman_hyperv.register_gettext', after: :load_config_initializers do
