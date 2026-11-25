@@ -18,7 +18,7 @@ require 'test_helper'
 # at all, sees them, and a listing backed by the pipeline's copies is not
 # made to dial a fifth serial client just to learn an identity.
 class HypervEndpointIdentityTest < ActiveSupport::TestCase
-  IP_URL = 'http://10.0.0.5:5985/wsman'.freeze
+  IP_URL = 'http://10.0.0.5:5985/wsman'
   NAMES = ['hv-node1', 'hv-node1.lab.example'].freeze
 
   # A fog from FOG-27: it carries what the endpoint reported for itself.
@@ -31,7 +31,7 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
   end
 
   # A fog before FOG-27: the self-report vocabulary does not exist on it.
-  class SilentFog; end
+  SilentFog = Class.new
 
   def build_cr(url: IP_URL)
     ForemanHyperv::Hyperv.new(name: 'lab-cr', url: url, user: 'u', password: 'p')
@@ -80,9 +80,9 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
 
     assert serves?(cr, '10.0.0.5'), 'the URL host itself keeps matching exactly as before'
     assert serves?(cr, '  hv-node1  '), 'surrounding whitespace is stripped before matching'
-    refute serves?(cr, 'HV-NODE2'), 'a node nobody reported is not the endpoint'
-    refute serves?(cr, ''), 'the blank name answers false'
-    refute serves?(cr, nil), 'nil answers false'
+    assert_not serves?(cr, 'HV-NODE2'), 'a node nobody reported is not the endpoint'
+    assert_not serves?(cr, ''), 'the blank name answers false'
+    assert_not serves?(cr, nil), 'nil answers false'
   end
 
   def test_an_old_fog_keeps_exactly_the_url_rule
@@ -91,7 +91,8 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
     cr.send(:client)
 
     assert_nil cr.instance_variable_get(:@endpoint_self_names), 'a fog with no self-report vocabulary leaves no note'
-    refute serves?(cr, 'HV-NODE1'), 'with old fog the IP miss is kept — the capability gate degrades, it does not guess'
+    assert_not serves?(cr, 'HV-NODE1'),
+               'with old fog the IP miss is kept — the capability gate degrades, it does not guess'
     assert serves?(cr, '10'), 'the first-label rule survives exactly as it was'
     assert serves?(cr, '10.0.0.5'), 'the whole URL host matches, as it did'
   end
@@ -104,7 +105,7 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
     cr.send(:client)
 
     assert_nil cr.instance_variable_get(:@endpoint_self_names), 'the empty report notes nothing'
-    refute serves?(cr, 'HV-NODE1')
+    assert_not serves?(cr, 'HV-NODE1')
   end
 
   def test_the_rule_never_dials_to_answer
@@ -118,7 +119,7 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
     end
     cr = build_cr
 
-    refute serves?(cr, 'HV-NODE1'), 'with no endpoint dialed yet the rule answers from the URL alone'
+    assert_not serves?(cr, 'HV-NODE1'), 'with no endpoint dialed yet the rule answers from the URL alone'
     assert_equal 0, compositions, 'the rule composed no client to answer'
   end
 
@@ -145,7 +146,7 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
 
     assert_equal NAMES, cr.instance_variable_get(:@endpoint_self_names),
                  'a node client’s self-report names that node, never the endpoint'
-    refute serves?(cr, 'HV-NODE2'), 'the endpoint does not serve a node only a NODE client reported'
+    assert_not serves?(cr, 'HV-NODE2'), 'the endpoint does not serve a node only a NODE client reported'
   end
 
   # --- the listing consumer (the double-dial F11 names) ---------------------
@@ -161,7 +162,7 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
       @calls = 0
     end
 
-    def all(filters = {})
+    def all(_filters = {})
       @calls += 1
       @machines
     end
@@ -207,9 +208,13 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
   # records every read.
   def build_listing_cr(endpoint_names:)
     endpoint_servers = ServersCounter.new([VmDouble.new(id: ENDPOINT_VM, name: 'a.example')])
-    node1 = EndpointCounterFog.new(ServersCounter.new([VmDouble.new(id: ENDPOINT_VM, name: 'a.example')]), [], names: nil)
-    node2 = EndpointCounterFog.new(ServersCounter.new([VmDouble.new(id: NODE2_VM, name: 'b.example')]), [], names: nil)
-    fog = EndpointCounterFog.new(endpoint_servers, ['HV-NODE1', 'HV-NODE2'], names: endpoint_names)
+    node1 = EndpointCounterFog.new(
+      ServersCounter.new([VmDouble.new(id: ENDPOINT_VM, name: 'a.example')]), [], names: nil
+    )
+    node2 = EndpointCounterFog.new(
+      ServersCounter.new([VmDouble.new(id: NODE2_VM, name: 'b.example')]), [], names: nil
+    )
+    fog = EndpointCounterFog.new(endpoint_servers, %w[HV-NODE1 HV-NODE2], names: endpoint_names)
     stage_compositions(fog)
     cr = ListingCr.new(name: 'lab-cr', url: IP_URL, user: 'u', password: 'p')
     cr.node_fogs = { 'hv-node1' => node1, 'hv-node2' => node2 }
@@ -226,7 +231,8 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
     rows = ForemanHyperv::ClusterNodeServers.new(cr).all({})
 
     assert_equal 1, endpoint_servers.calls, 'the endpoint is read exactly once'
-    assert_equal 0, node1.servers_collection.calls, 'the endpoint’s own node is not dialed a second time for the same answer'
+    assert_equal 0, node1.servers_collection.calls,
+                 'the endpoint’s own node is not dialed a second time for the same answer'
     assert_equal 1, node2.servers_collection.calls, 'the other node is still read'
     assert_equal [ENDPOINT_VM, NODE2_VM], listing_ids(rows), 'the union keeps each machine once'
   end
