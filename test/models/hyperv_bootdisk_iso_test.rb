@@ -81,11 +81,26 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   class MachineStub
     attr_reader :id, :state, :generation, :computer_name
 
-    def initialize(id = HypervBootdiskIsoTest::UUID, state: :Off, generation: :UEFI, computer_name: 'HV-NODE1')
+    def initialize(id = HypervBootdiskIsoTest::UUID, state: :Off, generation: :UEFI,
+                   computer_name: 'HV-NODE1', secure_boot: false)
       @id = id
       @state = state
       @generation = generation
       @computer_name = computer_name
+      @secure_boot = secure_boot
+    end
+
+    # PR-5: the ride refuses Secure Boot off the LIVE machine, and the live
+    # read is FogExtensions::Hyperv::Server#foreman_firmware_type
+    # (fog_extensions/hyperv/server.rb:81-85) — 'bios' for Gen1,
+    # 'uefi_secure_boot' only when the firmware reads back on. The stub
+    # answers the REAL model's shape, which is why this file changes with the
+    # implementation rather than silently passing on a model-shaped stub that
+    # never grew the method.
+    def foreman_firmware_type
+      return 'bios' if generation == :BIOS
+
+      @secure_boot ? 'uefi_secure_boot' : 'uefi'
     end
   end
 
@@ -205,7 +220,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   end
 
   def build_cr(fog, roots: ['C:\VMs', 'C:\ClusterStorage\Volume1'], state: :Off,
-               generation: :UEFI, machine: MachineStub.new(UUID, state: state, generation: generation),
+               generation: :UEFI, sb: false,
+               machine: MachineStub.new(UUID, state: state, generation: generation, secure_boot: sb),
                cluster: nil, serves: true)
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.stubs(:client).returns(fog)
@@ -536,6 +552,30 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_attach('x.iso', UUID, storage_id: 'C:\VMs') }
     assert_includes error.message, :BIOS.inspect
     assert_empty fog.calls
+  end
+
+  # PR-5's LIVE Secure-Boot seam. The create-time refusal (optin suite) reads
+  # the create attrs because there is no VM yet; rebuilds and externally-
+  # flipped firmware are exactly what that seam cannot see, so the ride also
+  # refuses off the live model's foreman_firmware_type. The attach step only
+  # ever runs inside the bootdisk flow, so this refusal cannot touch a
+  # non-bootdisk host.
+  test 'iso_attach refuses a machine whose LIVE firmware reads Secure Boot on: the shim media cannot boot under it' do
+    cr, fog = build_cr(FogBootdisk.new, sb: true)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_attach('x.iso', UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, 'Secure Boot'
+    assert_empty fog.calls
+  end
+
+  test 'iso_upload refuses the same Secure Boot machine before staging — the shared ride gate, one step earlier' do
+    iso = make_iso(Dir.mktmpdir('bd-iso'))
+    cr, fog = build_cr(FogBootdisk.new, sb: true)
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.iso_upload(iso, UUID, storage_id: 'C:\VMs') }
+    assert_includes error.message, 'Secure Boot'
+    assert_empty fog.calls
+    assert_empty Dir.children(@served), 'a refused ride stages nothing'
   end
 
   test 'iso_attach refuses a clustered machine the endpoint node does not host, naming its node' do

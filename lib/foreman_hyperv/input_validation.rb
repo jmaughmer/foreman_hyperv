@@ -144,6 +144,13 @@ module ForemanHyperv
       cluster_name: SAFE_HOST,
       datastore: SAFE_PATH,
       path: SAFE_PATH,
+      # bootdisk PR-5: the storage_id foreman_bootdisk hands to iso_upload
+      # and iso_attach. The values are Windows volume paths
+      # (C:\ClusterStorage\Volume1, \\cluster\share) — the DEFAULT_TEXT
+      # pattern has no backslash and would refuse every honest value, so the
+      # key pairs with the exact pattern datastore/path already use (plan
+      # round 7, major C). No new pattern is introduced.
+      iso_upload_storage: SAFE_PATH,
       mac: SAFE_MAC,
       mac_address: SAFE_MAC,
       notes: SAFE_TEXT,

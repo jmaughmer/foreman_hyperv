@@ -154,6 +154,15 @@ module ForemanHyperv
       Fog::Hyperv::Compute::HardDrive.prepend ::FogExtensions::Hyperv::HardDrive
 
       Host::Managed.prepend ::ForemanHyperv::HostManagedExtensions
+      # bootdisk PR-5: the Host::Managed-side seam — Decision 1's payload-
+      # staleness guard. INCLUDED, not prepended: this is an
+      # ActiveSupport::Concern whose `included do validate ... end` hook only
+      # fires through append_features (a probe against the booted app proved
+      # the prepend path left the callback UNregistered while the module sat
+      # silently in the ancestor chain). include is also the honest shape:
+      # the concern only ADDS methods — unlike HostManagedExtensions above,
+      # it overrides no core method, so it needs no precedence.
+      Host::Managed.include ::ForemanHyperv::BootdiskSeam
     end
     #
     # initializer 'foreman_hyperv.register_gettext', after: :load_config_initializers do
