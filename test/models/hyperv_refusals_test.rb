@@ -55,7 +55,7 @@ class HypervRefusalsTest < ActiveSupport::TestCase
     # old era's answers.
     PRE_ERA_FINGERPRINTS = ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.values.freeze
 
-    def respond_to?(name, include_all = false)
+    def respond_to?(name, *include_all)
       PRE_ERA_FINGERPRINTS.include?(name.to_sym) ? false : super
     end
 

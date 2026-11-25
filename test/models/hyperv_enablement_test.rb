@@ -122,7 +122,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
       @absent = ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.fetch(missing)
     end
 
-    def respond_to?(name, include_all = false)
+    def respond_to?(name, *include_all)
       name.to_sym == @absent ? false : super
     end
   end
