@@ -46,11 +46,19 @@ class HypervRefusalsTest < ActiveSupport::TestCase
       @calls = calls
     end
 
-    # PLG-22: the enablement's capability probe is an in-process exchange
-    # (respond_to?/predicate calls on the client object), not endpoint
-    # traffic, and this suite asserts that nothing was ASKED OF THE HOST. A
-    # pre-enablement fog answers false for every behaviour, so the spy stays
-    # faithful to that era by answering false here without logging a call.
+    # PLG-22: the enablement's era check is a static exchange (a respond_to?
+    # on the client object, never a call — PLG-38), not endpoint traffic, and
+    # this suite asserts that nothing was ASKED OF THE HOST. A pre-enablement
+    # fog neither lists the behaviours nor ships their fingerprints: the spy
+    # does not provide them, so respond_to? says no without logging a call,
+    # and answering false when a live reader does ask stays faithful to the
+    # old era's answers.
+    PRE_ERA_FINGERPRINTS = ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.values.freeze
+
+    def respond_to?(name, include_all = false)
+      PRE_ERA_FINGERPRINTS.include?(name.to_sym) ? false : super
+    end
+
     def supports_clusters? = false
     def supports_exact_host_connections? = false
     def supports_literal_path_destructive? = false

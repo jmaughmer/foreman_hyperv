@@ -79,18 +79,22 @@ class HypervEnablementTest < ActiveSupport::TestCase
     end
   end
 
-  # A fog that answers every behaviour the enablement stands on: the
-  # CAPABILITIES constant AND the six predicates.
+  # A fog that provides everything the enablement stands on: the CAPABILITIES
+  # constant AND the six predicates. The cluster probe answers true by default
+  # because some cluster-path suites read through it; the ANSWER is endpoint
+  # state, and the era check does not consult it (PLG-38) — the enablement
+  # tests carry both shapes (clustered and stand-alone) on purpose.
   class FogFull
     attr_reader :calls
 
-    def initialize(stdout: '', exit_code: 0)
+    def initialize(stdout: '', exit_code: 0, clustered: true)
       @calls = []
       @stdout = stdout
       @exit_code = exit_code
+      @clustered = clustered
     end
 
-    def supports_clusters? = true
+    def supports_clusters? = @clustered
     def supports_exact_host_connections? = true
     def supports_literal_path_destructive? = true
     def supports_stdout_json_hygiene? = true
@@ -107,18 +111,19 @@ class HypervEnablementTest < ActiveSupport::TestCase
     end
   end
 
-  # The full client minus one behaviour's predicate. The predicate-to-capability
-  # names come from the plugin's own frozen map, so the helper cannot drift from
-  # it: the missing capability's predicate answers false, the rest true.
+  # The full client minus one behaviour's fingerprint. The fingerprint-to-
+  # capability names come from the plugin's own frozen map, so the helper
+  # cannot drift from it. PLG-38: the era check never CALLS a predicate, so
+  # the shape that removes a behaviour is the ABSENCE of the fingerprint —
+  # a pre-era client does not provide what the era fog's build ships.
   class FogMissing < FogFull
     def initialize(missing:, **kwargs)
-      @missing = missing
       super(**kwargs)
-      ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.each do |capability, predicate|
-        next unless capability == missing
+      @absent = ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.fetch(missing)
+    end
 
-        define_singleton_method(predicate) { false }
-      end
+    def respond_to?(name, include_all = false)
+      name.to_sym == @absent ? false : super
     end
   end
 
@@ -249,14 +254,54 @@ class HypervEnablementTest < ActiveSupport::TestCase
                       contained_file_removal file_pull]).sort
   end
 
-  def test_enablement_stands_when_the_fog_answers_all_six
+  def test_enablement_stands_when_the_fog_provides_all_six
     cr, = build_cr(full_fog)
     assert cr.send(:enablement_supported?)
     assert_empty cr.send(:missing_enablement_capabilities)
     assert cr.send(:disk_removal_allowed?)
   end
 
-  def test_a_fog_missing_any_behaviour_is_pre_enablement
+  # PLG-38 (review F3): the era check is STATIC. supports_clusters? answers
+  # endpoint state — a live query of root/mscluster — so it answers false on
+  # EVERY stand-alone host, forever. When the era check called it, every
+  # stand-alone host with this fog was permanently pre-enablement: bootdisk
+  # refused ("missing: tri_state_cluster") and disk removal never unlocked,
+  # contradicting bootdisk_ride_check!'s own promise that "a stand-alone host
+  # answers no cluster and passes". Existence of the fingerprints is the era;
+  # the cluster answer is not.
+  def test_a_standalone_host_is_not_the_pre_enablement_era
+    cr, = build_cr(full_fog(clustered: false))
+    assert cr.send(:enablement_supported?),
+           'a stand-alone host running the enabled fog must carry the enablement'
+    assert_empty cr.send(:missing_enablement_capabilities)
+    assert cr.send(:disk_removal_allowed?)
+  end
+
+  # The other half of F3: a cluster host drops out of the enablement whenever
+  # the probe flaps (transport error answers false, the tri-state read answers
+  # nil). A check that never calls cannot flap.
+  def test_a_flapping_cluster_probe_does_not_drop_the_enablement
+    fog = full_fog
+    fog.define_singleton_method(:supports_clusters?) { raise 'root/mscluster unreadable' }
+    cr, = build_cr(fog)
+    assert cr.send(:enablement_supported?),
+           'a transport flap on the cluster probe must not fall out of the era'
+    assert cr.send(:disk_removal_allowed?)
+  end
+
+  # Static means NO call: every predicate is rigged to raise, and the check
+  # must still stand — respond_to? is the only question it asks the client.
+  def test_the_era_check_never_calls_a_capability_predicate
+    fog = full_fog
+    ForemanHyperv::Hyperv::ENABLEMENT_CAPABILITIES.each_value do |predicate|
+      fog.define_singleton_method(predicate) { raise "#{predicate} was called by the era check" }
+    end
+    cr, = build_cr(fog)
+    assert cr.send(:enablement_supported?),
+           'the era check asked a predicate; the check must be static (PLG-38)'
+  end
+
+  def test_a_fog_missing_any_fingerprint_is_pre_enablement
     %i[tri_state_cluster exact_host_connection literal_path_destructive
        stdout_json_hygiene input_hardening cluster_capacity_projection].each do |missing|
       cr, = build_cr(FogMissing.new(missing: missing))
@@ -264,14 +309,6 @@ class HypervEnablementTest < ActiveSupport::TestCase
       assert_equal [missing], cr.send(:missing_enablement_capabilities)
       assert_not cr.send(:disk_removal_allowed?)
     end
-  end
-
-  def test_a_predicate_that_raises_is_an_unanswered_predicate
-    fog = full_fog
-    fog.define_singleton_method(:supports_input_hardening?) { raise 'unreadable' }
-    cr, = build_cr(fog)
-    assert_not cr.send(:enablement_supported?)
-    assert_not cr.send(:disk_removal_allowed?)
   end
 
   def test_the_capability_refusal_names_the_missing_behaviours

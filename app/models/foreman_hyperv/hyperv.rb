@@ -106,9 +106,20 @@ module ForemanHyperv
     # the exact-host connection gate (FOG-11), the literal-path destructive
     # calls (FOG-14), the stdout hygiene contract (FOG-15), the input
     # hardening (FOG-9) and the cluster capacity projection (FOG-8) — and the
-    # runtime check asks the installed fog for ALL of them: the constant list
-    # AND the per-behaviour predicate every client of that build answers. A
-    # fog missing any one is the pre-enablement era again, and every
+    # runtime check asks the installed fog for ALL of them STATICALLY: the
+    # constant list AND the per-behaviour predicate every client of that build
+    # PROVIDES. PLG-38 (review F3): the check never CALLS a predicate. A
+    # predicate's ANSWER is not always a build property — supports_clusters?
+    # answers cluster membership by querying root/mscluster over the wire, so
+    # it answers false on every stand-alone host and on any transport flap.
+    # Calling it made stand-alone hosts permanently pre-enablement and flapped
+    # cluster hosts out of the enablement. Existence is the build property:
+    # a pre-era client does not define the fingerprint at all. For
+    # tri_state_cluster the fingerprint is the one the constant carries (a
+    # pre-era fog DOES define supports_clusters? — it is the old boolean WQL
+    # read), so list membership is what refuses it; the respond_to? half is
+    # vacuously true there and kept for the shape of the check.
+    # A fog missing any one is the pre-enablement era again, and every
     # operation this PR unlocks refuses exactly as it refused before. The
     # constant is FOG-9's, and the plugin gate trusts it for the rule behind
     # it (R13): the builder validator and the connection gate are ONE pure
@@ -140,7 +151,7 @@ module ForemanHyperv
     # fog is not. Names the missing behaviours so the operator knows what to
     # upgrade, and quotes no remote text.
     FOG_CAPABILITY_REFUSAL = 'This operation is refused: the fog-hyperv this plugin runs against does ' \
-                             'not answer every behaviour the enablement depends on (missing: ' \
+                             'not provide every behaviour the enablement depends on (missing: ' \
                              '%<missing>s). Nothing was stopped, deleted or created. Upgrade ' \
                              'fog-hyperv to the build the plugin declares, or use a plugin version ' \
                              'whose refusals match the fog you have.'
@@ -1038,7 +1049,7 @@ module ForemanHyperv
 
       # PLG-15b opened creates for stand-alone machines; PLG-22 enables the
       # cluster create path — with the era rule the destroy path uses too:
-      # a fog that does not answer the six behaviours gets the pre-enablement
+      # a fog that does not provide the six behaviours gets the pre-enablement
       # refusals verbatim (the cluster ask refused before any read of the
       # endpoint, the stand-alone gate refusing on every unknown), and only
       # the enablement's partner fog runs the unlocked path below.
@@ -1369,7 +1380,7 @@ module ForemanHyperv
       return true if vm.nil?
 
       unless enablement_supported?
-        # The pre-enablement gate, verbatim: a fog that does not answer the
+        # The pre-enablement gate, verbatim: a fog that does not provide the
         # six behaviours gets the refusals this plugin shipped with, word for
         # word — enablement is a property of the fog+plugin pair, and the
         # plugin does not run a decision its partner cannot keep.
@@ -2000,39 +2011,46 @@ module ForemanHyperv
 
     # --- PLG-22: the enablement and its runtime check ---------------------------
 
-    # Every behaviour the enablement stands on, asked of the fog actually
-    # installed: the CAPABILITIES constant AND the predicate every client of
-    # that build answers (a fog that has the list but not the behaviour, or
-    # the behaviour but not the list, is not this build's partner). A fog too
-    # old to even define CAPABILITIES answers "everything missing" — the
-    # pre-enablement era, refusing exactly what it refused before enablement.
-    # The whole check is a local constant read and six respond_to?/predicate
-    # calls on the client object: no wire traffic, and it is safe to ask on
-    # every operation.
-    # @return [Boolean] does the installed fog answer all six?
+    # Every behaviour the enablement stands on, checked against the fog
+    # actually installed: the CAPABILITIES constant AND the fingerprint method
+    # every client of that build provides (a fog that has the list but not the
+    # fingerprints, or the fingerprints but not the list, is not this build's
+    # partner). A fog too old to even define CAPABILITIES answers "everything
+    # missing" — the pre-enablement era, refusing exactly what it refused
+    # before enablement. The whole check is a local constant read and six
+    # respond_to? calls on the client object, and NO predicate is ever
+    # called (PLG-38, review F3): calling supports_clusters? put a live WQL
+    # query of root/mscluster into every gated operation, which answered
+    # false on every stand-alone host — permanently pre-enablement, bootdisk
+    # and disk removal unreachable — and dropped clustered hosts out of the
+    # enablement on any transport flap. Existence is the build property; the
+    # answer value is endpoint state, and endpoint state is not an era.
+    # @return [Boolean] does the installed fog carry the enablement's list
+    #   and do its clients provide all six fingerprints?
     def enablement_supported?
       missing_enablement_capabilities.empty?
     end
 
-    # The capabilities the installed fog does NOT answer, in the order of the
-    # frozen list — empty means enablement stands. A predicate that raises is
-    # an unanswered predicate, same as a missing one: the check asks the fog,
-    # and an fog that cannot answer has not answered.
+    # The capabilities the installed fog does NOT carry, in the order of the
+    # frozen list — empty means enablement stands. A capability is missing
+    # when the constant omits it or the installed client does not respond to
+    # its fingerprint; nothing is called, so a predicate that would raise
+    # (a flapping cluster probe) cannot drop the enablement.
     # @return [Array<Symbol>] the missing behaviour names, for the refusal
     def missing_enablement_capabilities
       list = Fog::Hyperv.const_defined?(:CAPABILITIES) ? Fog::Hyperv::CAPABILITIES : []
+      client = client()
       ENABLEMENT_CAPABILITIES.select do |capability, predicate|
-        list.exclude?(capability) || !client_answers?(capability, predicate)
+        list.exclude?(capability) || !client_provides?(client, predicate)
       end.keys
     rescue StandardError
       ENABLEMENT_CAPABILITIES.keys
     end
 
-    def client_answers?(capability, predicate)
-      client.respond_to?(predicate) && client.public_send(predicate) == true
-    rescue StandardError => e
-      logger.warn "The fog capability check for #{capability} did not answer: #{e.class}"
-      false
+    # Does the installed client PROVIDE the fingerprint — without asking it
+    # anything. respond_to? on any object (a nil client included) is local.
+    def client_provides?(client, predicate)
+      client.respond_to?(predicate)
     end
 
     # The refusal every unlocked operation answers with when the fog is not
@@ -3164,12 +3182,12 @@ module ForemanHyperv
       attr[:ha_enabled].to_s != '0'
     end
 
-    # PLG-30: does the installed fog answer the cluster role failback
-    # contract? The same two-part shape the enablement check uses — the
-    # capability constant (a fog too old to define it answers "nothing") and
-    # a vocabulary probe on the client itself (a fog with the list but not
-    # the request is not this build's partner, and vice versa). A raise is an
-    # unanswered question, same rule as client_answers?. This gates the
+    # PLG-30: does the installed fog provide the cluster role failback
+    # contract? The same two-part shape the enablement check uses (and PLG-38
+    # made static across the board): the capability constant (a fog too old to
+    # define it answers "nothing") and a vocabulary probe on the client itself
+    # (a fog with the list but not the request is not this build's partner,
+    # and vice versa) — a respond_to?, never a call. This gates the
     # failback write and the failback word in the Registration column; it
     # deliberately does NOT join the enablement six — enablement is the era
     # partnership every unlocked operation runs on, and failback is one
