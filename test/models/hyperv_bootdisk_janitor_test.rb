@@ -93,7 +93,7 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
   end
 
   test 'age-exceeded sidecars AND interrupted staging temps go out of the staging root' do
-    sidecar = aged(@staging, "staging-#{OLD_ISO}.json", DAY + 60, content: '{"nonce":"' + OLD_ISO + '"}')
+    sidecar = aged(@staging, "staging-#{OLD_ISO}.json", DAY + 60, content: "{\"nonce\":\"#{OLD_ISO}\"}")
     part = aged(@staging, "staging-#{OLD_ISO}.iso.part", DAY + 60)
     counts = ForemanHyperv::BootdiskTransfer.sweep(now: @now)
     assert_not alive?(sidecar)
@@ -123,7 +123,7 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     foreign_staging = [
       'notes.txt',
       'staging-.json',
-      "staging-#{OLD_ISO}.tmp",          # not json, not iso.part
+      "staging-#{OLD_ISO}.tmp", # not json, not iso.part
       'staging-readme.txt'
     ].map { |n| aged(@staging, n, DAY * 7) }
 
@@ -136,7 +136,7 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
   test 'a symlink is never followed or removed, even wearing a nonce name (Decision 4)' do
     target = File.join(@root, 'someone-elses-file')
     File.binwrite(target, 'NOT OURS')
-    t = @now - DAY * 30
+    t = @now - (DAY * 30)
     File.utime(t, t, target)
     link = File.join(@served, "#{OLD_ISO}.iso")
     File.symlink(target, link)
@@ -154,7 +154,7 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     # rewritten by anything) and a sidecar that is not even JSON: neither may
     # keep the ISO, because the janitor reads neither.
     fresh = aged(@staging, "staging-#{OLD_ISO}.json", DAY + 60,
-                 content: '{"staged_at":"' + @now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') + '"}')
+                 content: "{\"staged_at\":\"#{@now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')}\"}")
     junk = aged(@staging, "staging-#{YOUNG_ISO}.json", DAY + 60, content: '{not json')
     counts = ForemanHyperv::BootdiskTransfer.sweep(now: @now)
     assert_not alive?(iso), 'the sidecar never vouches for the ISO'
