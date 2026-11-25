@@ -248,9 +248,12 @@ module ForemanHyperv
       # a beat dying mid-dial strands nothing, which is the property F10
       # asked to make structural.
       #
-      # The result is compared as ::text because a driver-level boolean
-      # arrives as the STRING 't' or 'f' — and 'f' is truthy in Ruby. A
-      # truthiness test here would hand every epoch to every process.
+      # The result is compared as ::text and read with the ActiveModel
+      # boolean type because the answer's WIRE FORM differs by path — the
+      # ::text cast answers the strings 'true'/'false' (measured on the CI
+      # Postgres), a raw boolean arrives typecast, and the text protocol
+      # spells them 't'/'f'. Every one of those is a truthy STRING in Ruby;
+      # a truthiness test would hand every epoch to every process.
       #
       # An interval-setting change mid-epoch needs no special case: the epoch
       # is recomputed per beat, and a beat in flight releases its (old-width)
@@ -263,9 +266,15 @@ module ForemanHyperv
         won = connection.select_value(
           "SELECT (pg_try_advisory_xact_lock(#{ADVISORY_LOCK_KEY}, #{epoch}))::text AS won"
         )
-        # TRUE / NIL, never false: the caller tells "lost" from every other
-        # answer with .nil?, and a false would read as a win.
-        won == 't' ? true : nil
+        # The answer is TEXT — pg answers the ::text cast with the strings
+        # 'true'/'false' (a raw boolean column arrives typecast, and the
+        # text protocol has yet another shape), and EVERY non-empty string
+        # is truthy in Ruby: 'false' as a truthiness test hands every epoch
+        # to every process. The ActiveModel boolean type is the reader that
+        # knows the false spellings ('f', 'false', false, 0...) from the
+        # true ones on any adapter. TRUE / NIL, never false: the caller
+        # tells "lost" from every other answer with .nil?.
+        ActiveModel::Type::Boolean.new.cast(won) ? true : nil
       rescue ActiveRecord::StatementInvalid
         # No such function on this adapter (an exotic DB the adapter check
         # missed): degrade to everyone-beats, PLG-37c's self-test names the

@@ -31,8 +31,10 @@ require 'test_helper'
 #      one beat per interval epoch across all of Foreman's processes (Pass 70
 #      proved every booted process carries a thread and each beats at its own
 #      phase). PLG-42: the winner acquires pg_try_advisory_xact_lock(KEY,
-#      epoch) — a TRANSACTION-scoped bucket compared ::text (the driver's 'f'
-#      is truthy in Ruby) — INSIDE the transaction that spans the beat, so
+#      epoch) — a TRANSACTION-scoped bucket read through the boolean type
+#      (its ::text answer arrives as 'true'/'false' — strings, and every
+#      string is truthy in Ruby) — INSIDE the transaction that spans the
+#      beat, so
 #      the commit is the release: no held-bucket bookkeeping, no unlock,
 #      nothing to strand. Losing skips exactly that epoch, and losers sleep
 #      to the next epoch boundary like winners — the 1-s loser poll is
@@ -418,15 +420,17 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
   # recorder learned that the hard way), so per-phase behavior is mutable
   # attributes on a real object, not stub blocks. PLG-42: the election
   # speaks a TRANSACTION-scoped two-key try
-  # (pg_try_advisory_xact_lock(KEY, epoch)) whose boolean arrives ::text —
-  # the fake answers with the STRINGS 't'/'f' exactly as the pg driver
-  # does, because 'f' is truthy in Ruby and a truthiness bug must fail
-  # here, not in production. There is no unlock half anymore: the beat's
+  # (pg_try_advisory_xact_lock(KEY, epoch)) whose answer is TEXT whose wire
+  # spelling differs by path — the CI Postgres answers the ::text cast with
+  # 'true'/'false', the text protocol spells them 't'/'f'. The fake answers
+  # with the 't'/'f' spellings to prove the reader is the boolean TYPE and
+  # not one exact string. There is no unlock half anymore: the beat's
   # commit is the release, and this fake RECORDS any two-key unlock so the
   # suite can pin that nothing tries one. (The tick-serialization lock is
-  # still one-key and session-scoped; in these election tests the real
-  # SQLite connection answers its adapter check, so it runs unlocked and
-  # its SQL never reaches this fake.)
+  # still one-key and session-scoped; and note the CI test DB is POSTGRES,
+  # so the UNSTUBED beats of sections 2-3 dial the real election SQL and
+  # the real single-runner lock against real pg — the cast and the
+  # lock/release pair are end-to-end proven there, not just faked here.)
   class ElectionConnection
     attr_reader :locks, :unlocks, :select_calls, :elect_sql
     attr_accessor :adapter, :try_xact, :unlock
@@ -514,9 +518,10 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
   def test_a_thread_that_does_not_own_the_current_epoch_beats_nothing
     create_cr(name: 'ka-elect-loser', keepalive: true)
     connection = election_connection
-    # PLG-42: the loser signal is the driver's STRING 'f' — which is TRUTHY
-    # in Ruby. A truthiness test on the xact answer hands every epoch to
-    # every process; only the ::text comparison loses.
+    # PLG-42: the loser answer arrives as TEXT ('f' here; real pg answers
+    # the ::text cast with 'false') — and every non-empty string is TRUTHY
+    # in Ruby. A truthiness test on the election answer hands every epoch to
+    # every process; only the boolean-type reader loses.
     connection.try_xact = 'f'
     seen = []
     ticked = nil
@@ -661,7 +666,11 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
     assert_equal 2, seen.size,
                  'winning again needs no reclaim: the heartbeat bucket just advances by one'
+    # Three tries for three beats — the loser's try included, since asking
+    # and losing still hits the bucket. What the operator's pg_locks readout
+    # shows is which BUCKET is current: epoch E twice (win, loss), then E+1.
     assert_equal [[ForemanHyperv::Keepalive::ADVISORY_LOCK_KEY, ELECT_BASE / 60],
+                  [ForemanHyperv::Keepalive::ADVISORY_LOCK_KEY, ELECT_BASE / 60],
                   [ForemanHyperv::Keepalive::ADVISORY_LOCK_KEY, ELECT_BASE / 60 + 1]],
                  connection.locks, 'the operator readout advances one bucket per interval'
   end
