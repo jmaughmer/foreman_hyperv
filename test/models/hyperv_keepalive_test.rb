@@ -47,8 +47,10 @@ require 'test_helper'
 #      lease (the F10 leak: every booted process used to pin one pool
 #      connection forever); lost_last_beat? is the operator seam run_loop
 #      logs. The CI database IS Postgres, so a rival-thread test pins the
-#      real false and the release-at-transaction-end on the real wire, and
-#      the idle-beat SQL capture pins that an all-disabled beat takes no
+#      real false and the release-at-transaction-end on the real wire — and
+#      that the beat bypasses the executor's query cache (the identical-SQL
+#      stale-answer trap round-32 caught this way) — while the
+#      idle-beat SQL capture pins that an all-disabled beat takes no
 #      lock and opens no transaction.
 #      A non-Postgres deployment never lets the election silence beats. B1:
 #      the default interval is 60 s, the clamp band 60–3600 is unchanged.
@@ -834,7 +836,18 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     # bucket rides THIS connection to the harness rollback — the test
     # transaction is not joinable, so the beat runs at a savepoint, and a
     # savepoint release is not a transaction end. That is exactly the
+    # The bucket is gone: the next beat wins and dials. (The win's own
+    # bucket rides THIS connection to the harness rollback — the test
+    # transaction is not joinable, so the beat runs at a savepoint, and a
+    # savepoint release is not a transaction end. That is exactly the
     # comment on tick_all: only a real transaction end releases.)
+    #
+    # THIS beat is also the query-cache pin, found exactly this way in
+    # round-32's CI: the executor enables the query cache around the beat,
+    # and the election SQL text is IDENTICAL between beats — without
+    # beat_once's uncached wrapper this line would read the LOSING beat's
+    # cached 'false' and the beat would dial nothing forever. A bug the
+    # fakes could not see (no cache) and production would run with.
     stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
     assert_equal 1, seen.size, 'the beat after the release beats'
     refute ForemanHyperv::Keepalive.lost_last_beat?, 'the win clears the seam'
@@ -856,8 +869,11 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     end
 
     assert_equal [], ticked, 'nothing enabled, nothing ticked'
-    assert sqls.any? { |s| s.match?(/SELECT/i) && s.include?('foreman_hyperv') },
+    assert sqls.any? { |s| s.match?(/SELECT/i) && s.include?('hyperv_keepalive') },
            "the beat DID look — the selection pluck must be there (got: #{sqls.inspect})"
+    # (The capture is also the MEASURED idle cost: the pluck plus what
+    # User.as_anonymous_admin resolves around it — a user row, its auth
+    # source — nothing lock-shaped, nothing transaction-shaped.)
     refute sqls.any? { |s| s.include?('advisory') },
            'an all-disabled beat takes no advisory lock of any kind'
     refute sqls.any? { |s| s.match?(/\A\s*(BEGIN|SAVEPOINT|RELEASE|COMMIT)\b/i) },

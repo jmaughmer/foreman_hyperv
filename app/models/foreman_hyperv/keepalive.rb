@@ -62,9 +62,11 @@ module ForemanHyperv
   # busy — because the epoch election held its session lock on that pinned
   # connection. Now the thread holds NOTHING while sleeping, and beats
   # through beat_once, which leases a connection for exactly one beat
-  # (connection_pool.with_connection) and runs it inside
+  # (connection_pool.with_connection), runs it inside
   # Rails.application.executor.wrap — the same managed context a background
-  # job gets. The thread still starts UNCONDITIONALLY on purpose: the enable
+  # job gets — and runs the tick UNCACHED (the executor's query cache would
+  # otherwise hand each beat the previous beat's cached answers to the
+  # beat's identical SQL). The thread still starts UNCONDITIONALLY on purpose: the enable
   # column and the interval are dynamic settings, and a thread that skipped
   # booting because nothing was tick-listed could never be woken when an
   # admin enables one — the idle cost is now what it always should have
@@ -222,11 +224,26 @@ module ForemanHyperv
       # lease borrows exactly one connection for exactly this beat and
       # RETURNS IT before the loop sleeps. A thread that beats for five
       # seconds a minute holds a connection for five seconds a minute.
+      #
+      # The beat runs UNCACHED, and round-32 proved it is load-bearing:
+      # the executor enables the query cache around everything it wraps,
+      # and the beat's SQL TEXT IS IDENTICAL beat after beat (the same
+      # selection pluck, the same single-runner try). With the cache on,
+      # beat N+1 gets beat N's cached answers — a stale pluck that misses a
+      # resource enabled since, a stale false from an advisory try whose
+      # holder has long released (or worse, a stale true that dials while
+      # another node holds the runner). The scheduler thread reuses its
+      # pooled connection from beat to beat — only the FIRST lease's pool
+      # checkout clears the cache — so from beat two on, every wrapped beat
+      # inherits the cache. Advisory answers are not cacheable data, never
+      # were; the beat must see current state or not run.
       # Returns what tick_all reports (the ticked ids); an empty selection
       # never ran an election and opened no transaction or lock.
       def beat_once
         Rails.application.executor.wrap do
-          ActiveRecord::Base.connection_pool.with_connection { tick_all }
+          ActiveRecord::Base.connection_pool.with_connection do
+            ActiveRecord::Base.connection.uncached { tick_all }
+          end
         end
       end
 
