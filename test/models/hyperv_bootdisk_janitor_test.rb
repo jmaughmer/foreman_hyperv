@@ -57,7 +57,7 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     FileUtils.mkdir_p([@served, @staging])
     ForemanHyperv::BootdiskTransfer.served_root = @served
     ForemanHyperv::BootdiskTransfer.staging_root = @staging
-    @now = Time.now
+    @now = Time.now.utc
   end
 
   teardown do
