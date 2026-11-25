@@ -2300,7 +2300,13 @@ module ForemanHyperv
     # refused. A same-spelling-prefix that is not under the folder (a sibling
     # "lab-vm2-backup") does NOT count: containment is by path level.
     def file_lives_in?(hdd, folder)
-      parent = normalize_windows_path(hdd.path.to_s.split('\\')[0..-2]&.join('\\'))
+      # Normalize BEFORE splitting: drive_deletion_allowed? (the neighbor that
+      # just refused this file) reads slash paths as the same path, so
+      # containment must not see a "C:/…" disk as one element — the pre-fix
+      # raw split made a slash-path refused disk "outside" and the recursion
+      # took it (round-29, inherited from base).
+      full = normalize_windows_path(hdd.path)
+      parent = normalize_windows_path(full.split('\\')[0..-2]&.join('\\'))
       folder = normalize_windows_path(folder.to_s)
       return false if parent.empty? || folder.empty?
 

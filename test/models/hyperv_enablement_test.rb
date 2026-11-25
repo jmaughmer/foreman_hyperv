@@ -528,6 +528,20 @@ class HypervEnablementTest < ActiveSupport::TestCase
                  'the recursion may not outdelete the destroy that refused'
   end
 
+  def test_a_kept_drive_with_forward_slashes_in_its_path_keeps_the_folder
+    # Round-29 fold: the drive rule (the neighbor that just refused this
+    # file) normalizes slashes before attributing, so a "C:/…" disk is the
+    # same file to it — containment must not read that same path as one
+    # element and call it outside the folder. Normalize before split.
+    cr, = build_cr(full_fog)
+    kept = FakeHdd.new('d1', 'C:/VMs/lab-vm2/Virtual Hard Disks/shared.vhdx', reservations: true)
+    vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [kept])
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
+    assert enabled_destroy(cr, vm)
+    assert_equal [false], kept.calls
+    assert_equal [[:destroy, false]], destroy_calls(vm)
+  end
+
   def test_a_kept_drive_in_a_same_prefix_sibling_folder_does_not_keep_the_folder
     # The boundary of containment: "lab-vm2-backup" merely STARTS WITH the
     # machine folder's spelling — it is a sibling, not under it. The disk
@@ -641,13 +655,17 @@ class HypervEnablementTest < ActiveSupport::TestCase
   def test_a_clustered_destroy_where_the_cluster_answered_no_role_skips_the_role_removal
     # "no role" is an ANSWER, not the unknown: the destroy proceeds and does
     # not spend the removal on a role the cluster says it does not hold.
-    cr, = build_cr(full_fog)
+    # clustered: false + is_clustered false is the fog-shaped pair (both
+    # derive from one cluster_role read); the endpoint classification lives
+    # in the stubbed state, not the double.
+    cr, fog = build_cr(full_fog)
     d1 = FakeHdd.new('d1', 'C:\ClusterStorage\Volume1\lab-vm2\disk1.vhdx')
-    vm = attributed_vm(drives: [d1], owner_node: 'hv-node2', role_answer: false)
+    vm = attributed_vm(clustered: false, drives: [d1], owner_node: 'hv-node2', role_answer: false)
     vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
     assert enabled_destroy(cr, vm, state: :clustered)
     assert_empty vm.calls.select { |c| c.is_a?(Array) && c.first == :run_cmdlist },
                  'a machine the cluster answered no role for has nothing to release'
+    assert_empty fog.calls, 'and no client-fallback transport either: zero role wire'
     assert_equal [true], d1.calls
     assert_equal [[:destroy, true]], destroy_calls(vm)
   end
