@@ -79,15 +79,19 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   # node that printed the row — the same reading_node input every other
   # cluster decision in this plugin uses.
   class MachineStub
-    attr_reader :id, :state, :generation, :computer_name
+    attr_reader :id, :state, :generation, :computer_name, :service
 
     def initialize(id = HypervBootdiskIsoTest::UUID, state: :Off, generation: :UEFI,
-                   computer_name: 'HV-NODE1', secure_boot: false)
+                   computer_name: 'HV-NODE1', secure_boot: false, service: nil)
       @id = id
       @state = state
       @generation = generation
       @computer_name = computer_name
       @secure_boot = secure_boot
+      # fog models carry the client they were read through; PLG-40 sends the
+      # detach over it. nil pins the belt: a model without one falls back to
+      # the endpoint client.
+      @service = service
     end
 
     # PR-5: the ride refuses Secure Boot off the LIVE machine, and the live
@@ -136,7 +140,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     # dvd_rows carries fog's MEASURED live answers: nil (no drive), ONE bare
     # Hash (the VM has one drive), an Array of Hashes (several).
     def initialize(dvd_rows: { id: 'dvd-1', vm_id: HypervBootdiskIsoTest::UUID, path: nil },
-                   fetch_answer: nil, remove_answers: {}, boot_rows: HypervBootdiskIsoTest::BOOT_ORDER_ROWS)
+                   fetch_answer: nil, remove_answers: {}, boot_rows: HypervBootdiskIsoTest::BOOT_ORDER_ROWS,
+                   host_name: 'HV-NODE1')
       @calls = []
       @dvd_rows = dvd_rows
       @fetch_answer = fetch_answer
@@ -144,6 +149,27 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       @boot_rows = boot_rows
       @raise_eject = false
       @raise_remove_paths = []
+      @host_name = host_name
+      @refuses_foreign_hosts = false
+    end
+
+    # FOG-11's exact-host gate, the shape PLG-40 rides: this client dials
+    # ONLY its own host, and a request carrying another node's
+    # computer_name raises the measured "Refusing to connect" PSError
+    # before the call is even recorded. Deliberately STRICTER than fog:
+    # fog's host_matches? also admits a dotless wanted name as the first
+    # label of a registered host (winrm.rb:284-292); these fixtures use
+    # exact names, and the stricter rule can never false-green.
+    def refuses_foreign_hosts!
+      @refuses_foreign_hosts = true
+    end
+
+    def gate_host!(computer_name)
+      return unless @refuses_foreign_hosts
+      return if computer_name.nil? || computer_name.to_s.casecmp(@host_name).zero?
+
+      raise Fog::Hyperv::Errors::PSError,
+            "Refusing to connect to #{computer_name}: this client serves #{@host_name} only"
     end
 
     # The enablement six, answered true (the era partnership the pull and the
@@ -155,7 +181,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     def supports_input_hardening? = true
     def supports_cluster_capacity_projection? = true
 
-    def get_vm_dvd_drive(vm_id:, **_rest)
+    def get_vm_dvd_drive(vm_id:, **rest)
+      gate_host!(rest[:computer_name])
       @calls << [:get_vm_dvd_drive, vm_id]
       @dvd_rows
     end
@@ -170,7 +197,8 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
       true
     end
 
-    def eject_vm_dvd_drive(id:, vm_id:, **_rest)
+    def eject_vm_dvd_drive(id:, vm_id:, **rest)
+      gate_host!(rest[:computer_name])
       @calls << [:eject_vm_dvd_drive, id, vm_id]
       raise Fog::Hyperv::Errors::PSError, 'eject failed (test)' if @raise_eject
 
@@ -227,7 +255,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   def build_cr(fog, roots: ['C:\VMs', 'C:\ClusterStorage\Volume1'], state: :Off,
                generation: :UEFI, sb: false,
-               machine: MachineStub.new(UUID, state: state, generation: generation, secure_boot: sb),
+               machine: MachineStub.new(UUID, state: state, generation: generation, secure_boot: sb, service: fog),
                cluster: nil, serves: true)
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.stubs(:client).returns(fog)
@@ -639,6 +667,46 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   test 'iso_detach ejects the media the drive is holding and answers true' do
     fog = FogBootdisk.new(dvd_rows: { id: 'dvd-1', vm_id: UUID, path: 'C:\VMs\host.example.com.iso' })
     cr, = build_cr(fog)
+
+    assert_equal true, cr.iso_detach(UUID)
+    assert_includes fog.calls, [:eject_vm_dvd_drive, 'dvd-1', UUID]
+  end
+
+  test 'iso_detach ejects through the client the machine was read through when the VM moved off the endpoint' do
+    # PLG-40 (review F4): the machine is built on this endpoint and
+    # live-migrates before /unattended/built. find_vm_by_uuid reads it
+    # through vm_from_cluster_owner — the OWNER node's client — and fog's
+    # exact-host gate (FOG-11) refuses any request carrying another node's
+    # computer_name on the wrong client. Over the endpoint client the read
+    # died, the death folded into this step's answer-true rescue, and the
+    # bootdisk stayed mounted: iso_delete failed on the locked ISO and every
+    # later reboot booted the disk again. Both clients here carry the gate,
+    # so a request dialed on the wrong one cannot even be recorded.
+    owner = FogBootdisk.new(dvd_rows: { id: 'dvd-1', vm_id: UUID, path: 'C:\VMs\host.example.com.iso' },
+                            host_name: 'HV-NODE2')
+    owner.refuses_foreign_hosts!
+    endpoint = FogBootdisk.new
+    endpoint.refuses_foreign_hosts!
+    machine = MachineStub.new(UUID, computer_name: 'HV-NODE2', service: owner)
+    cr, = build_cr(endpoint, machine: machine)
+
+    assert_equal true, cr.iso_detach(UUID)
+    assert_includes owner.calls, [:get_vm_dvd_drive, UUID],
+                    'the drive read rides the client that can speak to the node'
+    assert_includes owner.calls, [:eject_vm_dvd_drive, 'dvd-1', UUID]
+    assert_empty endpoint.calls,
+                 'the endpoint client never dials another node for a machine it no longer sees'
+  end
+
+  test 'iso_detach falls back to the endpoint client for a machine that carries no service at all' do
+    # The belt: a fog model always carries the client it was read through;
+    # something that carries none can only have been read through the
+    # endpoint, so the endpoint client is the honest carrier. Passes on the
+    # base too — it pins the boundary of the fix, not its absence.
+    fog = FogBootdisk.new(dvd_rows: { id: 'dvd-1', vm_id: UUID, path: 'C:\VMs\host.example.com.iso' })
+    machine = MachineStub.new(UUID)
+    machine.singleton_class.send(:undef_method, :service)
+    cr, = build_cr(fog, machine: machine)
 
     assert_equal true, cr.iso_detach(UUID)
     assert_includes fog.calls, [:eject_vm_dvd_drive, 'dvd-1', UUID]
