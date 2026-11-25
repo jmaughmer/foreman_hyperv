@@ -278,3 +278,26 @@ the configured pull root (...)"* — is the same drop-in copied without editing
 its `Alias` (and `<Directory>`) to match `hyperv_bootdisk_pull_root`. Edit the
 file to the root the refusal names and reload. Re-apply step 1 after every
 `foreman-installer` run until a kafo post-hook exists (not yet shipped).
+
+## 9. The janitor: what the hourly cron line means
+
+The plugin registers `foreman_hyperv:bootdisk_janitor` through Foreman's own
+scheduling hook (`Foreman::Cron.register(:hourly, ...)` in the plugin's rake
+file), so it runs with the platform's hourly work — the RPM's
+`/etc/cron.d/foreman` fires `foreman-rake cron:hourly` at :30 every hour. It
+removes age-exceeded files from the two transfer roots and NOTHING ELSE: only
+names matching `<32-hex>.iso` in the pull root and
+`staging-<32-hex>.json` / `staging-<32-hex>.iso.part` in the staging root, and
+age is file mtime (never the sidecar). Patience is 24 h
+(`BootdiskTransfer::JANITOR_MAX_AGE`) — healthy files live minutes, so what it
+catches is the debris of a crashed ride.
+
+You will see one line per hour in `/var/log/foreman/cron.log` while bootdisk is
+dormant: *"hyperv_bootdisk_pull_root/staging_root are not configured — bootdisk
+is dormant, nothing to sweep."* That is the off switch announcing itself:
+configure the two settings and the line becomes a removal count. Actual
+removals (and any unlink failures, e.g. a root chowned away from `foreman`) go
+to the Foreman application log, not cron.log. The registration carries no
+existence guard on `Foreman::Cron` deliberately: if a future Foreman removes
+that hook, every `foreman-rake` run failing loudly beats a janitor nobody knows
+about.

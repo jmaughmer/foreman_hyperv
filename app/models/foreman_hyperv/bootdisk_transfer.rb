@@ -86,6 +86,25 @@ module ForemanHyperv
     HTTP_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman.d/foreman-bootdisk-pull.conf'
     HTTPS_SNIPPET_PATH = '/etc/httpd/conf.d/05-foreman-ssl.d/foreman-bootdisk-pull.conf'
 
+    # PR-4 janitor (plan v10 Decision 4): the patience a crashed ride gets
+    # before its files go. A staged ISO lives MINUTES in healthy operation
+    # (iso_upload's ensure deletes it before iso_attach runs — plan §"Lifetime
+    # and what single-use honestly means"), so a day of grace is debugging
+    # room, not a leak: the hourly cron registration caps the stranded bytes
+    # at roughly one day of crashed rides. Module scope, same reason as the
+    # snippet paths above (constants inside `class << self` do NOT resolve as
+    # BootdiskTransfer::NAME from outside — measured).
+    JANITOR_MAX_AGE = 24 * 3600
+
+    # The TWO name contracts — a file either matches what stage() itself
+    # writes, or it is not the janitor's to delete (Decision 4: "refuses any
+    # name not matching ..."). Anchored, lowercase hex only, extension
+    # included: 'deadbeef…f90.iso.tmp' is somebody else's business, a
+    # directory wearing a nonce name is not an ISO, and a symlink is neither
+    # followed nor removed.
+    JANITOR_SERVED_NAME = /\A[0-9a-f]{32}\.iso\z/
+    JANITOR_STAGING_NAME = /\Astaging-[0-9a-f]{32}\.(?:iso\.part|json)\z/
+
     # Where the pull's files live. Production NEVER sets the accessors: the
     # readers resolve override-first (tests set them directly), else the
     # settings, PER OPERATION — nothing reads a Setting at boot, because a
@@ -193,6 +212,61 @@ module ForemanHyperv
         end
       end
 
+      # PR-4's janitor (plan v10 Decision 4): the age-only sweep of BOTH roots
+      # that catches what healthy operation never leaves behind — the files of
+      # a crashed ride. Age-only is a safety property, not laziness: the
+      # janitor asks no ownership questions (no host lookups, no DB beyond the
+      # two Setting-cached roots), so it can run blindly every hour; and the
+      # age comes from file MTIME and never from the sidecar (F10 — a sidecar
+      # that fails to parse, or lies, must not keep an ISO forever). Strict
+      # older-than the cutoff protects the in-flight ride: a file staged
+      # seconds ago may be mid-pull, and healthy files live minutes.
+      #
+      # Dormant answers nil (the same ConfiguredRootError doctrine as stage —
+      # an unconfigured install has no shelf and the hourly cron must not
+      # shout about it). Roots that are configured but ABSENT answer zero
+      # counts: no directory, no files, nothing to sweep. An unreadable root
+      # (EACCES) travels to the cron log: that is a broken deployment, not
+      # something to sweep past. Per-file races (a concurrent discard won the
+      # unlink) are swallowed — not the janitor's error to report.
+      #
+      # Returns { served: n, staging: m } counts, or nil when dormant. The
+      # rake task prints them; the tests pin them. A run whose unlinks ALL
+      # fail (a root chowned away mid-deployment) still answers exit-0 counts,
+      # but not silently: the failure count and the FIRST error ride a
+      # Rails.logger.warn (round 22, finding 2 — the cron roll-up can only
+      # report what the task raises, and a swallowed race is not what a
+      # silently-growing shelf looks like from).
+      def sweep(now: Time.now.utc, max_age: JANITOR_MAX_AGE)
+        cutoff = now - max_age
+        begin
+          served = served_root!
+          staging = staging_root!
+        rescue ConfiguredRootError
+          # The nil means the PAIR is unset (round 22, finding 6): one blank
+          # setting answers fully-dormant here exactly as stage refuses on the
+          # same pair, so the woken half can never have accumulated files.
+          return nil
+        end
+
+        seen = { removed: 0, failed: 0, first_error: nil }
+        sweep_dir(served, JANITOR_SERVED_NAME, cutoff, seen)
+        served_removed = seen[:removed]
+        sweep_dir(staging, JANITOR_STAGING_NAME, cutoff, seen)
+
+        counts = { served: served_removed, staging: seen[:removed] - served_removed }
+        removed = counts[:served] + counts[:staging]
+        if removed.positive?
+          Rails.logger.info("ForemanHyperv::BootdiskTransfer.sweep: removed #{counts[:served]} served ISO(s), " \
+                            "#{counts[:staging]} staging file(s) older than #{max_age}s")
+        end
+        if seen[:failed].positive?
+          Rails.logger.warn("ForemanHyperv::BootdiskTransfer.sweep: #{seen[:failed]} unlink failure(s), " \
+                            "first: #{seen[:first_error].class}: #{seen[:first_error].message}")
+        end
+        counts
+      end
+
       # Does the Apache drop-in at this path exist AND alias /bootdisk-pull at
       # this root? Existence alone is half the answer: the installer purge
       # teaches operators to COPY the snippet, and a copy whose Alias still
@@ -278,6 +352,37 @@ module ForemanHyperv
       def chmod_tolerant(dir, mode)
         File.chmod(mode, dir)
       rescue SystemCallError
+        nil
+      end
+
+      # One root, its name contract, one cutoff, one shared tally. lstat before
+      # anything: a symlink is never followed and never removed (Decision 4, on
+      # the served subtree that is Apache's to read), and a non-regular file —
+      # a directory, a fifo — wearing a nonce name is not ours. mtime is the
+      # only age read, ever (F10). Dir.children ENOENT means the root was never
+      # created or vanished after ensure: zero files is the honest answer, not
+      # an error; any OTHER directory error (EACCES on a configured root)
+      # deliberately travels out to the cron log. Per-file SystemCallError is
+      # the swallow (a concurrent discard won the race), but it is COUNTED into
+      # the tally — swallowed is not invisible (round 22, finding 2).
+      def sweep_dir(root, pattern, cutoff, seen)
+        Dir.children(root).each do |name|
+          next unless name.match?(pattern)
+
+          path = File.join(root, name)
+          begin
+            stat = File.lstat(path)
+            next unless stat.file?
+            next unless stat.mtime < cutoff
+
+            File.unlink(path)
+            seen[:removed] += 1
+          rescue SystemCallError => e
+            seen[:failed] += 1
+            seen[:first_error] ||= e
+          end
+        end
+      rescue Errno::ENOENT
         nil
       end
 
