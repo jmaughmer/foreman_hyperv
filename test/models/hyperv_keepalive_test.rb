@@ -27,15 +27,20 @@ require 'test_helper'
 #      the advisory lock makes the tick single-runner across Foreman's own
 #      processes (a holder that cannot lock does nothing), and the scheduler
 #      thread is not started in the test environment;
-#   5. the PLG-34b per-beat ELECTION: one beat per interval epoch across all
-#      of Foreman's processes (Pass 70 proved every booted process carries a
-#      thread and each beats at its own phase). The winner acquires
-#      pg_try_advisory_lock(KEY, epoch) — a session lock bucketed by
-#      (now / interval) — and HOLDS it until the epoch moves; losers beat
-#      nothing and wake once a second to try the next bucket; losing the lock
-#      (connection reaped) re-elects with no beat skipped; a non-Postgres
-#      deployment never lets the election silence beats. B1: the default
-#      interval is 60 s, the clamp band 60–3600 is unchanged.
+#   5. the per-beat ELECTION (PLG-34b, re-scoped by PLG-42 / review F10):
+#      one beat per interval epoch across all of Foreman's processes (Pass 70
+#      proved every booted process carries a thread and each beats at its own
+#      phase). PLG-42: the winner acquires pg_try_advisory_xact_lock(KEY,
+#      epoch) — a TRANSACTION-scoped bucket compared ::text (the driver's 'f'
+#      is truthy in Ruby) — INSIDE the transaction that spans the beat, so
+#      the commit is the release: no held-bucket bookkeeping, no unlock,
+#      nothing to strand. Losing skips exactly that epoch, and losers sleep
+#      to the next epoch boundary like winners — the 1-s loser poll is
+#      retired with the session-lock semantics that needed it. beat_once runs
+#      the beat through executor.wrap + a per-beat connection lease (the F10
+#      leak: every booted process used to pin one pool connection forever).
+#      A non-Postgres deployment never lets the election silence beats. B1:
+#      the default interval is 60 s, the clamp band 60–3600 is unchanged.
 class HypervKeepaliveTest < ActiveSupport::TestCase
   HOST = 'hv-node1'
   CR_URL = "http://#{HOST}:5985/wsman".freeze
@@ -406,25 +411,33 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
                'the suite stays deterministic: the tick loop is a production creature'
   end
 
-  # ---- 5: PLG-34b, the per-beat election ----
+  # ---- 5: PLG-34b/PLG-42, the per-beat election ----
 
   # A scripted stand-in for the AR connection the election talks to. Blocks
   # on mocha stubs are IGNORED by this harness's mocha 2.x (the PLG-34 tick
   # recorder learned that the hard way), so per-phase behavior is mutable
-  # attributes on a real object, not stub blocks. The election speaks
-  # TWO-key advisory SQL (resource key + epoch bucket); the tick-
-  # serialization lock stays one-key and is answered true here because
-  # these tests are about the election.
+  # attributes on a real object, not stub blocks. PLG-42: the election
+  # speaks a TRANSACTION-scoped two-key try
+  # (pg_try_advisory_xact_lock(KEY, epoch)) whose boolean arrives ::text —
+  # the fake answers with the STRINGS 't'/'f' exactly as the pg driver
+  # does, because 'f' is truthy in Ruby and a truthiness bug must fail
+  # here, not in production. There is no unlock half anymore: the beat's
+  # commit is the release, and this fake RECORDS any two-key unlock so the
+  # suite can pin that nothing tries one. (The tick-serialization lock is
+  # still one-key and session-scoped; in these election tests the real
+  # SQLite connection answers its adapter check, so it runs unlocked and
+  # its SQL never reaches this fake.)
   class ElectionConnection
-    attr_reader :locks, :unlocks, :select_calls
-    attr_accessor :adapter, :try_two, :unlock
+    attr_reader :locks, :unlocks, :select_calls, :elect_sql
+    attr_accessor :adapter, :try_xact, :unlock
 
     def initialize(adapter: 'PostgreSQL')
       @adapter = adapter
       @locks = []
       @unlocks = []
       @select_calls = 0
-      @try_two = true
+      @elect_sql = []
+      @try_xact = 't'
       @unlock = true
     end
 
@@ -435,9 +448,10 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     def select_value(sql)
       @select_calls += 1
       case sql
-      when /pg_try_advisory_lock\((\d+),\s*(\d+)\)/
+      when /pg_try_advisory_xact_lock\((\d+),\s*(\d+)\)/
+        @elect_sql << sql
         @locks << [Regexp.last_match(1).to_i, Regexp.last_match(2).to_i]
-        @try_two
+        @try_xact
       when /pg_advisory_unlock\((\d+),\s*(\d+)\)/
         @unlocks << [Regexp.last_match(1).to_i, Regexp.last_match(2).to_i]
         @unlock
@@ -460,25 +474,62 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
 
   ELECT_BASE = 1_800_000_000 # deterministic wall clock; the epoch is base/interval
 
+  # Recorder pair for the two managed-context seams beat_once must run
+  # through (PLG-42). Singleton redefinition with delegation — mocha 2.x
+  # ignores stub blocks on this harness (see stub_ticks).
+  def with_context_recorders
+    recorder = { transactions: [], leases: 0, wraps: 0 }
+
+    ar = ActiveRecord::Base.singleton_class
+    ar.send(:alias_method, :__p42_orig_transaction__, :transaction)
+    ar.send(:define_method, :transaction) do |**kwargs, &block|
+      recorder[:transactions] << kwargs
+      __p42_orig_transaction__(**kwargs, &block)
+    end
+
+    pool = ActiveRecord::Base.connection_pool
+    pool.singleton_class.send(:alias_method, :__p42_orig_with_connection__, :with_connection)
+    pool.singleton_class.send(:define_method, :with_connection) do |&block|
+      recorder[:leases] += 1
+      __p42_orig_with_connection__(&block)
+    end
+
+    executor = Rails.application.executor
+    executor.singleton_class.send(:alias_method, :__p42_orig_wrap__, :wrap)
+    executor.singleton_class.send(:define_method, :wrap) do |**kwargs, &block|
+      recorder[:wraps] += 1
+      __p42_orig_wrap__(**kwargs, &block)
+    end
+
+    yield recorder
+  ensure
+    ar.send(:alias_method, :transaction, :__p42_orig_transaction__)
+    ar.send(:remove_method, :__p42_orig_transaction__)
+    pool.singleton_class.send(:alias_method, :with_connection, :__p42_orig_with_connection__)
+    pool.singleton_class.send(:remove_method, :__p42_orig_with_connection__)
+    executor.singleton_class.send(:alias_method, :wrap, :__p42_orig_wrap__)
+    executor.singleton_class.send(:remove_method, :__p42_orig_wrap__)
+  end
+
   def test_a_thread_that_does_not_own_the_current_epoch_beats_nothing
     create_cr(name: 'ka-elect-loser', keepalive: true)
     connection = election_connection
-    connection.try_two = false # another process already won this epoch
+    # PLG-42: the loser signal is the driver's STRING 'f' — which is TRUTHY
+    # in Ruby. A truthiness test on the xact answer hands every epoch to
+    # every process; only the ::text comparison loses.
+    connection.try_xact = 'f'
     seen = []
     ticked = nil
-    outcome = nil
 
-    stub_ticks(seen) do
-      ticked = ForemanHyperv::Keepalive.tick_all
-      outcome = ForemanHyperv::Keepalive.beat_once
-    end
+    stub_ticks(seen) { ticked = ForemanHyperv::Keepalive.tick_all }
 
     assert_equal [], ticked, 'a losing tick_all reports nothing ticked'
-    assert_empty seen, 'a losing thread must not dial the nodes AT ALL'
-    assert_equal :lost, outcome, 'the loop must SEE the loss (it polls instead of sleeping)'
+    assert_empty seen, "a losing thread must not dial the nodes AT ALL ('f' won't)"
+    assert_equal true, Thread.current[ForemanHyperv::Keepalive::LOST_THREAD_KEY],
+                 'the loss must be visible to the thread (telemetry reads it)'
   end
 
-  def test_the_winner_locks_the_epoch_once_holds_it_and_moves_only_when_the_epoch_moves
+  def test_the_election_asks_for_a_transaction_scoped_bucket_on_the_current_epoch
     create_cr(name: 'ka-elect-winner', keepalive: true)
     connection = election_connection
     seen = []
@@ -489,64 +540,129 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
 
     stub_ticks(seen) do
       ForemanHyperv::Keepalive.tick_all
-      ForemanHyperv::Keepalive.tick_all # same epoch: already mine, tick again
+      ForemanHyperv::Keepalive.tick_all # same epoch: ask again, this beat is its own lock
     end
-    assert_equal 2, seen.size, 'the epoch winner ticks in its own epoch'
-    assert_equal [[key, epoch]], connection.locks, 'ONE epoch-keyed acquire, no re-entrant drift'
-    assert_empty connection.unlocks, 'the winner HOLDS the bucket while the epoch stands (the heartbeat row)'
-
-    # The epoch turns over: the old bucket is released and the new one won,
-    # so the pg_locks objid advances by exactly one — the operator readout.
-    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 60)
-    stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
-    assert_equal 3, seen.size
-    assert_equal [[key, epoch], [key, epoch + 1]], connection.locks, 'the winner moves to the next bucket'
-    assert_equal [[key, epoch]], connection.unlocks, 'the expired bucket is released, not hoarded'
+    assert_equal 2, seen.size, 'a beat that wins its epoch ticks'
+    assert_equal [[key, epoch], [key, epoch]], connection.locks,
+                 'one xact try per beat, both on the CURRENT epoch bucket'
+    assert connection.elect_sql.all? { |sql| sql.include?('pg_try_advisory_xact_lock') },
+                 "PLG-42: the election is TRANSACTION-scoped, got: #{connection.elect_sql.inspect}"
+    assert connection.elect_sql.all? { |sql| sql.include?('::text') },
+                 "the boolean comes back ::text so 'f' cannot beat as truthy"
   end
 
-  def test_a_winner_that_lost_its_connection_lock_beats_the_next_epoch_anyway
-    create_cr(name: 'ka-elect-reclaim', keepalive: true)
+  def test_the_election_has_no_release_path_the_commit_is_the_release
+    create_cr(name: 'ka-elect-nounlock', keepalive: true)
     connection = election_connection
     seen = []
     ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(60)
     ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE)
 
     stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
-    assert_equal 1, seen.size, 'wins the epoch and ticks'
 
-    # The pool reaper claims the connection mid-sleep and the session lock
-    # dies with it: the next wake sees unlock answer FALSE (not mine
-    # anymore), which is only information — the new bucket is tried like
-    # any other and won. A lost lock costs zero beats.
+    # The epoch turns over — the ONLY moment the old session-lock design
+    # reached for pg_advisory_unlock. Under the xact election nothing
+    # does: the previous beat's COMMIT already released its bucket.
     ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 60)
-    connection.unlock = false
-    stub_ticks(seen) { assert_equal :won, ForemanHyperv::Keepalive.beat_once }
-    assert_equal 2, seen.size, 're-election after lock loss ticks, never skips'
+    stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
+
+    assert_empty connection.unlocks,
+                 'no pg_advisory_unlock for the ELECTION bucket may ever run: ' \
+                 'the beat commits and Postgres releases — nothing to strand, nothing to release'
   end
 
-  def test_losing_one_epoch_skips_exactly_that_beat_and_the_next_is_winnable
-    create_cr(name: 'ka-elect-skip', keepalive: true)
+  def test_the_beat_elects_inside_an_open_transaction
+    create_cr(name: 'ka-elect-xact', keepalive: true)
+    seen = []
+    ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(60)
+
+    # The fake answers the xact try with 't' ONLY while a transaction the
+    # recorder opened is actually executing — an election outside the
+    # beat's transaction reads 'f' (which is what Postgres would do to a
+    # zero-lifetime xact lock at the next statement) and the beat loses.
+    cell = { in_xact: false, join_kwargs: [] }
+    fake = ElectionConnection.new
+    fake.define_singleton_method(:select_value) do |sql|
+      @select_calls += 1
+      if sql.include?('pg_try_advisory_xact_lock')
+        @elect_sql << sql
+        cell[:in_xact] ? 't' : 'f'
+      else
+        true
+      end
+    end
+    ForemanHyperv::Keepalive.stubs(:election_connection).returns(fake)
+
+    ar = ActiveRecord::Base.singleton_class
+    ar.send(:alias_method, :__p42_orig_transaction__, :transaction)
+    ar.send(:define_method, :transaction) do |**kwargs, &block|
+      cell[:join_kwargs] << kwargs
+      cell[:in_xact] = true
+      begin
+        __p42_orig_transaction__(**kwargs, &block)
+      ensure
+        cell[:in_xact] = false
+      end
+    end
+
+    begin
+      stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
+    ensure
+      ar.send(:alias_method, :transaction, :__p42_orig_transaction__)
+      ar.send(:remove_method, :__p42_orig_transaction__)
+    end
+
+    assert_equal 1, seen.size,
+                 'PLG-42: the xact election must run INSIDE the beat transaction — ' \
+                 'tried outside, the lock dies before the dialing starts'
+    assert_equal 1, cell[:join_kwargs].count { |kw| kw[:join] == :joinable },
+                 'one beat-wide transaction, joinable so a caller-held transaction is not lied to'
+  end
+
+  def test_beat_once_runs_the_beat_in_a_managed_connection_context
+    cr = create_cr(name: 'ka-beat-context', keepalive: true)
+    seen = []
+
+    with_context_recorders do |recorder|
+      stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
+    end
+
+    # PLG-42, the F10 fix pinned as structure: the beat leases its pool
+    # connection for EXACTLY the beat (with_connection returns it when the
+    # block ends — so the loop's sleep phase holds nothing) and runs inside
+    # the executor (reload/shard state managed, not inherited from boot).
+    assert_equal 1, recorder[:leases],
+                 'the beat goes through connection_pool.with_connection'
+    assert_equal 1, recorder[:wraps],
+                 'the beat goes through Rails.application.executor.wrap'
+    assert_equal 1, seen.size, 'and it still runs the real beat'
+  end
+
+  def test_a_beat_that_lost_or_won_never_leaves_state_for_the_next_beat
+    cr = create_cr(name: 'ka-elect-fresh', keepalive: true)
     connection = election_connection
     seen = []
     ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(60)
     ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE)
 
-    stub_ticks(seen) { ForemanHyperv::Keepalive.tick_all }
+    stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
     assert_equal 1, seen.size
 
-    # Another process already won the NEXT bucket: this thread reports lost
-    # and dials nothing (its 1-s poll wakes it for the bucket after).
-    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 60)
-    connection.try_two = false
-    stub_ticks(seen) { assert_equal :lost, ForemanHyperv::Keepalive.beat_once }
-    assert_equal 1, seen.size, 'the epoch owner dials; the loser does not'
+    # Lost epoch: nothing dials. PLG-34b needed unlock-false bookkeeping to
+    # notice a lost session lock; with the bucket scoped to the beat's own
+    # transaction there is NOTHING to notice — the next beat re-asks cold.
+    connection.try_xact = 'f'
+    stub_ticks(seen) { assert_equal [], ForemanHyperv::Keepalive.beat_once }
+    assert_equal 1, seen.size, 'the losing beat dials nothing'
 
-    # The owner releases when ITS epoch moves: this thread wins the bucket
-    # after and beats. Never two skips in a row.
-    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 120)
-    connection.try_two = true
-    stub_ticks(seen) { assert_equal :won, ForemanHyperv::Keepalive.beat_once }
-    assert_equal 2, seen.size, 'one lost epoch, then beats resume'
+    connection.try_xact = 't'
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE + 60)
+    stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
+    assert_equal 2, seen.size,
+                 'winning again needs no reclaim: the heartbeat bucket just advances by one'
+    assert_equal [[ForemanHyperv::Keepalive::ADVISORY_LOCK_KEY, ELECT_BASE / 60],
+                  [ForemanHyperv::Keepalive::ADVISORY_LOCK_KEY, ELECT_BASE / 60 + 1]],
+                 connection.locks, 'the operator readout advances one bucket per interval'
   end
 
   def test_a_non_postgres_deployment_never_lets_the_election_silence_the_beats
@@ -561,14 +677,30 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     assert_equal 0, connection.select_calls, 'no advisory SQL of any kind runs off Postgres'
   end
 
-  def test_the_loser_polls_once_a_second_and_the_winner_sleeps_the_interval
-    assert_equal 1, ForemanHyperv::Keepalive::LOSER_POLL_SECONDS
-    ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(120)
+  def test_the_loop_paces_to_epoch_boundaries_and_the_loser_poll_is_retired
+    # PLG-42: winners AND losers sleep to the next epoch boundary — the
+    # 1-second loser poll existed to notice a session lock's holder moving
+    # on, and with a lock whose lifetime IS a beat there is nothing left to
+    # notice. The whole outcome/poll apparatus is gone, not defaulted off.
+    refute ForemanHyperv::Keepalive.respond_to?(:sleep_seconds_after),
+           'the outcome-based pacing is retired; the loop paces to boundaries'
+    refute ForemanHyperv::Keepalive.const_defined?(:LOSER_POLL_SECONDS, false),
+           'the loser poll is gone'
+    refute ForemanHyperv::Keepalive.const_defined?(:EPOCH_THREAD_KEY, false),
+           'no held-epoch bookkeeping survives an xact-scoped election'
+    refute ForemanHyperv::Keepalive.respond_to?(:release_election),
+           'the commit is the release; an early-release path would only lie'
 
-    assert_equal 1, ForemanHyperv::Keepalive.sleep_seconds_after(:lost)
-    assert_equal 120, ForemanHyperv::Keepalive.sleep_seconds_after(:won)
-    assert_equal 120, ForemanHyperv::Keepalive.sleep_seconds_after(:unknown),
-                 'anything but an observed loss waits the full interval'
+    # The boundary math: always in (0, interval], and now + sleep lands
+    # exactly on the next boundary — for any phase, including ON one.
+    [0.0, 0.5, 7.5, 59.0, 59.999].each do |offset|
+      Time.stubs(:now).returns(Time.at(ELECT_BASE + offset))
+      sleep_for = ForemanHyperv::Keepalive.seconds_until_next_boundary(60)
+      assert_operator sleep_for, :>, 0, "sleep at +#{offset}s must never be zero (double-beat)"
+      assert_operator sleep_for, :<=, 60, "sleep at +#{offset}s can never exceed the interval"
+      assert_in_delta ELECT_BASE + 60, Time.at(ELECT_BASE + offset).to_f + sleep_for, 1e-6,
+                      "waking at +#{offset}s must land on the NEXT boundary"
+    end
   end
 
   def test_the_b1_defaults_are_sixty_seconds_and_the_band_is_untouched

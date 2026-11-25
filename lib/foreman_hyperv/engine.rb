@@ -92,9 +92,13 @@ module ForemanHyperv
     # PLG-34: start the keepalive scheduler. One named thread per booted
     # process, in-process. PLG-34b: the beat itself runs through a Postgres
     # advisory-lock ELECTION bucketed by interval epoch, so across all N
-    # Foreman processes exactly one thread dials per interval (losers poll
-    # the next bucket at 1 s; lock loss self-heals; non-Postgres every
-    # thread beats). Keepalive.start! is a no-op in the test environment
+    # Foreman processes exactly one thread dials per interval. PLG-42 (F10)
+    # made the election transaction-scoped (the beat's commit is the
+    # release — nothing can strand an epoch) and gave the beat a managed
+    # context: executor.wrap plus a connection leased for exactly one beat,
+    # so an idle thread holds NO connection and losers sleep to the next
+    # epoch boundary instead of polling at 1 s. Non-Postgres every thread
+    # beats. Keepalive.start! is a no-op in the test environment
     # and under rake, so tests and migrations stay deterministic and silent.
     # config.after_initialize (not a named
     # initializer) is deliberate: engine initializers run before the app's

@@ -24,24 +24,45 @@ module ForemanHyperv
   # next one. Each tick runs on a FRESHLY loaded resource instance, so no
   # client, gate or pipeline memo ever outlives the tick that made it.
   #
-  # THE ELECTION (PLG-34b, Pass 70/§70): every process that boots Foreman
-  # carries a scheduler thread — the puma master AND each sidekiq process
-  # (the preload-forked workers none). PLG-34's per-tick try-lock serialized
-  # OVERLAPPING ticks only, so N threads beat at N independent phases per
-  # interval — up to N full page-loads of dialing where one was meant. The
-  # election fixes the beat COUNT, not just the overlap: the bucket is
-  # pg_try_advisory_lock(KEY, (now / interval).floor), a SESSION-scoped lock
-  # the winner HOLDS across its interval. One thread wins each epoch and
-  # ticks once in it; losers wake every LOSER_POLL_SECONDS to try the next
-  # bucket, so a beat is never late by more than a second past the boundary
-  # the winner couldn't keep. Losing the lock costs nothing to repair: a
-  # session lock dies with its connection (pool reaper, restart, crash), and
-  # the next wake of any thread simply wins the bucket no one else holds.
+  # THE ELECTION (PLG-34b, Pass 70/§70; re-scoped by PLG-42, review F10):
+  # every process that boots Foreman carries a scheduler thread — the puma
+  # master AND each sidekiq process (the preload-forked workers none).
+  # PLG-34's per-tick try-lock serialized OVERLAPPING ticks only, so N
+  # threads beat at N independent phases per interval — up to N full
+  # page-loads of dialing where one was meant. The election fixes the beat
+  # COUNT, not just the overlap: the bucket is
+  # pg_try_advisory_xact_lock(KEY, (now / interval).floor) — SINCE PLG-42 a
+  # TRANSACTION-scoped lock acquired inside the transaction that spans the
+  # beat, so COMMIT OR ROLLBACK ALWAYS RELEASES IT. Nothing can strand an
+  # owned epoch: no release path exists to lose, no dead-man's lock waits
+  # for a connection reaper, a killed worker is simply an epoch the next
+  # boundary re-elects. Losing is settled AT THE BOUNDARY: every thread on
+  # every node shares the boundary grid (same wall clock, same epoch
+  # formula), so losers sleep to the next boundary exactly like winners
+  # rather than re-polling every second — the old LOSER_POLL_SECONDS poll
+  # existed to notice a session lock's holder moving on; with a lock whose
+  # lifetime IS a beat, there is nothing left to notice.
   # The live lock's objid IS the current epoch — pg_locks filtered to
-  # classid = ADVISORY_LOCK_KEY is the operator's heartbeat readout,
-  # advancing by one per interval. Off Postgres there is no election and
-  # every thread beats (today's PLG-34 behavior): the election is a dialing
-  # economy, never a reason to tick zero.
+  # classid = ADVISORY_LOCK_KEY, mode ShareExclusiveLock, is the operator's
+  # heartbeat readout, advancing by one per interval and gone between
+  # beats. Off Postgres there is no election and every thread beats
+  # (today's PLG-34 behavior): the election is a dialing economy, never a
+  # reason to tick zero.
+  #
+  # THE CONNECTION DISCIPLINE (PLG-42, review F10): a bare Thread has no
+  # connection management, and on the old design the first AR call in the
+  # loop pinned one pool connection to the scheduler thread of EVERY booted
+  # process for the process's WHOLE LIFE — keepalive off or on, idle or
+  # busy — because the epoch election held its session lock on that pinned
+  # connection. Now the thread holds NOTHING while sleeping, and beats
+  # through beat_once, which leases a connection for exactly one beat
+  # (connection_pool.with_connection) and runs it inside
+  # Rails.application.executor.wrap — the same managed context a background
+  # job gets. The thread still starts UNCONDITIONALLY on purpose: the enable
+  # column and the interval are dynamic settings, and a thread that skipped
+  # booting because nothing was tick-listed could never be woken when an
+  # admin enables one — the idle cost is now what it always should have
+  # been: one pluck SELECT per interval and zero held connections.
   module Keepalive
     # PLG-34b B1: the default fell 300 -> 60. The measured reason (Pass 70,
     # §70): in a real lab the warmth decays below the human-readable band
@@ -54,26 +75,33 @@ module ForemanHyperv
     DEFAULT_INTERVAL = 60
     MIN_INTERVAL = 60
     MAX_INTERVAL = 3_600
-    # A losing thread re-tries the next bucket every second; buckets turn
-    # over only at epoch boundaries, so the poll never races the winner's
-    # tick, it just cannot miss the boundary by more than a second.
-    LOSER_POLL_SECONDS = 1
     # One warn per this many intervals for the SAME still-failing resource.
     WARN_EVERY_N_INTERVALS = 12
     # Fixed advisory-lock key. Since PLG-34b it is the CLASSID half of the
     # election's two-key pair (objid = the epoch bucket) and, unchanged from
-    # PLG-34, the whole key of the tick-serialization lock below. Both are
-    # session-scoped, so a crashed holder's locks die with its connections.
+    # PLG-34, the whole key of the tick-serialization lock below. Since
+    # PLG-42 the election half is TRANSACTION-scoped (released by the beat's
+    # commit, un-strandable); the serialization half stays session-scoped,
+    # explicitly released inside the same beat's connection lease.
     ADVISORY_LOCK_KEY = 48_175_301
-    # Per-thread bookkeeping. The epoch a thread won lives in a thread-local
-    # because the session lock it names lives on that thread's checked-out
-    # connection — exactly the same lifetime, so the two can never disagree
-    # across threads.
-    EPOCH_THREAD_KEY = :foreman_hyperv_keepalive_epoch
+    # Per-thread bookkeeping. PLG-42 retired the owned-epoch thread-local:
+    # the xact lock's lifetime is the beat's own transaction, so there is
+    # no held-bucket bookkeeping left to keep. What remains is the loss
+    # flag the loop's telemetry reads.
     LOST_THREAD_KEY = :foreman_hyperv_keepalive_lost
 
     class << self
       # Tests drive the tick directly; the thread is a production creature.
+      #
+      # PLG-42: NO pre-start database gate, deliberately, and the unconditional
+      # start survives the redesign that made it cheap. Both knobs (the enable
+      # column and the interval) are dynamic settings a human changes at
+      # runtime, so a thread that skipped starting because nothing was
+      # tick-listed at boot could never be woken by an admin enabling one
+      # later. What the idle thread costs is now bounded by construction:
+      # beat_once leases and returns, so between beats it holds no connection
+      # at all, and the per-interval cost of an all-disabled install is one
+      # pluck SELECT (see tick_all's selection-first ordering).
       def start!
         return @thread if @thread
         return nil if Rails.env.test?
@@ -133,43 +161,54 @@ module ForemanHyperv
       # (caught live in production, not by the suite, because every test
       # runs as a user). A tick is "the listing an admin would see", which
       # is exactly the context this block gives it.
+      #
+      # PLG-42: the election and the dialing run inside ONE transaction
+      # (why the xact lock needs it: elect_this_beat; what dialing inside a
+      # transaction costs: the module header). Selection stays OUTSIDE it:
+      # with nothing enabled the beat opens no transaction and takes no
+      # lock, which is the idle cost PLG-42 set out to make honest.
       def tick_all
         Thread.current[LOST_THREAD_KEY] = nil
         User.as_anonymous_admin do
           ids = ForemanHyperv::Hyperv.where(hyperv_keepalive: true).order(:id).pluck(:id)
           next [] if ids.empty?
 
-          won = elect_this_beat
-          Thread.current[LOST_THREAD_KEY] = won.nil?
-          next [] if won.nil?
+          # join: :joinable — a caller that already holds a transaction (a
+          # rake task driving a manual beat) lends it to the election; the
+          # xact lock then releases at the CALLER's commit, which is still
+          # bounded by that call.
+          ActiveRecord::Base.transaction(join: :joinable) do
+            won = elect_this_beat
+            Thread.current[LOST_THREAD_KEY] = won.nil?
+            next [] if won.nil?
 
-          ticked = []
-          with_single_runner do
-            ids.each do |id|
-              cr = ComputeResource.find_by(id: id)
-              next if cr.nil? # deleted between the pluck and the dial
+            ticked = []
+            with_single_runner do
+              ids.each do |id|
+                cr = ComputeResource.find_by(id: id)
+                next if cr.nil? # deleted between the pluck and the dial
 
-              ticked << id if tick_one(cr)
+                ticked << id if tick_one(cr)
+              end
             end
+            ticked
           end
-          ticked
         end
       end
 
-      # The beat as the LOOP needs it: tick_all plus a win/loss outcome, so
-      # a winner sleeps the interval and a loser polls for the next bucket.
-      # An empty selection never ran an election and counts as won — there
-      # was nothing to dial, not a lock to lose.
+      # The beat with a MANAGED context — the pair every sane background-job
+      # runtime wraps work in, and the fix for the F10 leak: the executor
+      # gives the beat Rails' execution hooks (reload status, shard state)
+      # instead of inheriting whatever the boot thread left, and the pool
+      # lease borrows exactly one connection for exactly this beat and
+      # RETURNS IT before the loop sleeps. A thread that beats for five
+      # seconds a minute holds a connection for five seconds a minute.
+      # Returns what tick_all reports (the ticked ids); an empty selection
+      # never ran an election and costs one SELECT.
       def beat_once
-        tick_all
-        Thread.current[LOST_THREAD_KEY] == true ? :lost : :won
-      end
-
-      # How long the loop waits after an outcome. Everything except an
-      # observed loss (a raise, an empty selection, a win) waits the full
-      # interval: a beat loop must never spin.
-      def sleep_seconds_after(outcome)
-        outcome == :lost ? LOSER_POLL_SECONDS : interval_seconds
+        Rails.application.executor.wrap do
+          ActiveRecord::Base.connection_pool.with_connection { tick_all }
+        end
       end
 
       # One resource, one tick, loudly once at most. The rescue is the
@@ -194,56 +233,45 @@ module ForemanHyperv
                           "(the next warning comes no sooner than #{warn_window_seconds}s from now)"
       end
 
-      # PLG-34b: who owns THIS interval. The bucket key pair
-      # (ADVISORY_LOCK_KEY, epoch) is a session-scoped advisory lock the
-      # winner holds until the epoch moves — holding, not re-acquiring: one
-      # pg_try_advisory_lock per epoch per session keeps Postgres's re-
-      #entrant lock counter at one, so the single pg_advisory_unlock at the
-      # boundary really ends the ownership. Returns the epoch won, true when
-      # elections are unavailable (non-Postgres: every thread beats), or nil
-      # when another thread's connection holds the bucket.
+      # PLG-42: who owns THIS interval. The bucket key pair
+      # (ADVISORY_LOCK_KEY, epoch) is a TRANSACTION-scoped advisory lock
+      # acquired inside the beat's own transaction: TRUE when this beat may
+      # dial, NIL when another process's beat owns the epoch, TRUE without
+      # elections when Postgres advisory locks are unavailable (non-Postgres:
+      # every thread beats). There is no held-bucket bookkeeping and no
+      # release path — COMMIT/ROLLBACK IS the release, so a crash, a kill, or
+      # a beat dying mid-dial strands nothing, which is the property F10
+      # asked to make structural.
       #
-      # An interval-setting change mid-epoch shifts the formula, the winner
-      # notices at its next wake (held bucket mismatches the new epoch),
-      # releases and re-elects — one benign extra or skipped beat at the
-      # boundary, never a silent stop.
+      # The result is compared as ::text because a driver-level boolean
+      # arrives as the STRING 't' or 'f' — and 'f' is truthy in Ruby. A
+      # truthiness test here would hand every epoch to every process.
+      #
+      # An interval-setting change mid-epoch needs no special case: the epoch
+      # is recomputed per beat, and a beat in flight releases its (old-width)
+      # bucket at commit like any other.
       def elect_this_beat
         connection = election_connection
         return true unless postgres?(connection)
 
         epoch = beat_epoch
-        held = Thread.current[EPOCH_THREAD_KEY]
-        return held if held == epoch
-
-        if held
-          # Our bucket expired (or the interval width moved). The unlock
-          # returning false is information only: it means the lock was
-          # already gone — the reaper reclaimed the connection and the
-          # session lock died with it — which is exactly the self-heal the
-          # design runs on. Either way the flag drops and we re-elect.
-          connection.select_value("SELECT pg_advisory_unlock(#{ADVISORY_LOCK_KEY}, #{held})")
-          Thread.current[EPOCH_THREAD_KEY] = nil
-        end
-
-        if connection.select_value("SELECT pg_try_advisory_lock(#{ADVISORY_LOCK_KEY}, #{epoch})")
-          Thread.current[EPOCH_THREAD_KEY] = epoch
-          epoch
-        end
+        won = connection.select_value(
+          "SELECT (pg_try_advisory_xact_lock(#{ADVISORY_LOCK_KEY}, #{epoch}))::text AS won"
+        )
+        # TRUE / NIL, never false: the caller tells "lost" from every other
+        # answer with .nil?, and a false would read as a win.
+        won == 't' ? true : nil
+      rescue ActiveRecord::StatementInvalid
+        # No such function on this adapter (an exotic DB the adapter check
+        # missed): degrade to everyone-beats, PLG-37c's self-test names the
+        # regime.
+        true
       end
 
-      # Give up an owned epoch early (teardown / shutdown niceness). A lock
-      # that cannot be released has nowhere to be released FROM — the
-      # connection is already gone, which means the lock is gone too.
-      def release_election
-        epoch = Thread.current[EPOCH_THREAD_KEY]
-        return if epoch.nil?
-
-        Thread.current[EPOCH_THREAD_KEY] = nil
-        connection = election_connection
-        connection.select_value("SELECT pg_advisory_unlock(#{ADVISORY_LOCK_KEY}, #{epoch})") if postgres?(connection)
-      rescue StandardError
-        nil
-      end
+      # PLG-42 retired release_election: the transaction-scoped bucket has
+      # nothing left to release early — the beat's commit is the release.
+      # (The session-scoped SINGLE-RUNNER lock below keeps its explicit
+      # release; it must outlive statements inside the beat.)
 
       # The seam through which the scheduler talks to the database layer.
       # Deliberately NOT ActiveRecord::Base.connection itself: a test that
@@ -272,6 +300,16 @@ module ForemanHyperv
         Time.now.to_i
       end
 
+      # Seconds from now until the start of the next epoch, always in
+      # (0, interval]: landing exactly ON a boundary belongs to the epoch
+      # beginning then, so a beat that finished exactly on a boundary still
+      # sleeps a whole interval rather than double-beating the epoch it
+      # just finished. Public seam: this is the pacing the loop runs on,
+      # and the suite pins it the way PLG-34b pinned sleep_seconds_after.
+      def seconds_until_next_boundary(interval)
+        interval - (Time.now.to_f % interval)
+      end
+
       # Postgres advisory lock, session-scoped: the scheduler that cannot
       # hold it does NOTHING this beat. Non-Postgres deployments (no such
       # function) run the tick unlocked rather than not at all. Since
@@ -279,6 +317,20 @@ module ForemanHyperv
       # is, this decides that two ticks never dial at once. A winner that
       # finds it busy skips — and skipping is right, because the nodes are
       # being warmed by the in-flight tick at that very moment.
+      #
+      # PLG-42 KEEPS this session-scoped lock under the transaction-scoped
+      # election, and it is not redundant: the election elects who BEGINS an
+      # epoch; this refuses anyone who BEGAN LATE. A winner whose beat
+      # overruns its epoch releases the xact bucket at commit, so a
+      # straggler that wakes inside the same wall-clock epoch (NTP step, a
+      # beat longer than the interval) can win the NEXT epoch's try while
+      # the overrunning beat still dials — this lock is what keeps the
+      # second beat from dialing CONCURRENTLY with the first. Session scope
+      # is required by that job (it must outlive statements), and the
+      # explicit release below happens inside the SAME beat's connection
+      # lease (beat_once), before the connection goes back to the pool —
+      # the pool reaper remains the self-heal for a release that never
+      # runs, exactly as before.
       def with_single_runner
         connection = ActiveRecord::Base.connection
         return yield unless postgres?(connection)
@@ -297,10 +349,11 @@ module ForemanHyperv
         @last_warn ||= {}
       end
 
-      # For tests: forget throttle state, the owned epoch, and the thread.
+      # For tests: forget throttle state and the thread. (PLG-42 left
+      # nothing epoch-shaped to forget: the xact bucket dies with its
+      # transaction.)
       def reset_state
         stop!
-        release_election
         Thread.current[LOST_THREAD_KEY] = nil
         @last_warn = {}
         @warn_window_seconds = nil
@@ -308,28 +361,40 @@ module ForemanHyperv
 
       private
 
+      # PLG-42: sleep to the epoch BOUNDARY, then beat — winners and losers
+      # alike. Everyone on every node shares the boundary grid (same wall
+      # clock, same epoch formula), so all threads wake together at the
+      # start of an epoch, the xact election picks exactly one, and nobody
+      # busy-polls in between. The first wake lands on the next boundary
+      # like every other: booting mid-epoch and dialing at once with the
+      # epoch's other would-be beaters is the DESIGN (the election sorts it;
+      # the single-runner lock underneath still refuses a concurrent dial),
+      # not a restart storm. A beat that finishes after its boundary simply
+      # joins the next one; a beat can skip no more epochs than it overruns.
+      # The boundary math uses the same wall clock the epoch formula uses —
+      # the only clock under which "wake at the next boundary" means the
+      # same thing in every process; an NTP step past a boundary makes the
+      # next wake early or late by the step, and the election absorbs
+      # whichever.
       def run_loop
-        # The first wake waits a full interval, exactly as PLG-34 booted:
-        # a restart must not add a dial on top of whatever is in flight.
-        outcome = :won
         loop do
-          sleep_interval(sleep_seconds_after(outcome))
-          outcome = begin
+          sleep_interval(seconds_until_next_boundary(interval_seconds))
+          begin
             beat_once
           rescue StandardError => e
             Rails.logger.warn "Hyper-V keepalive tick failed: #{e.class}: " \
                               "#{e.message.to_s.lines.first.to_s.strip}"
-            # A raise is not a loss: the loop keeps interval pacing, never
-            # drops into the loser's 1-second poll.
-            :won
+            # A raise costs one beat, never the loop: the next boundary
+            # arrives regardless, and a dead node must not silence the
+            # clusters that are alive.
           end
         end
       end
 
       # Sleep in one-second slices so a changed interval setting takes hold
-      # without a restart (a winner asleep in a 300 s interval when the
-      # operator sets 60 still re-elects within the old sleep, then beats to
-      # the new width from the next election up).
+      # without a restart (a thread asleep toward an old-grid boundary when
+      # the operator changes the interval still recomputes from the new
+      # width at its next wake).
       def sleep_interval(seconds)
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
         loop do
