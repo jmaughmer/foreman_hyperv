@@ -232,7 +232,7 @@ module ForemanHyperv
       #
       # Returns { served: n, staging: m } counts, or nil when dormant. The
       # rake task prints them; the tests pin them.
-      def sweep(now: Time.now, max_age: JANITOR_MAX_AGE)
+      def sweep(now: Time.now.utc, max_age: JANITOR_MAX_AGE)
         cutoff = now - max_age
         begin
           served = served_root!
@@ -244,8 +244,10 @@ module ForemanHyperv
         counts = { served: sweep_dir(served, JANITOR_SERVED_NAME, cutoff),
                    staging: sweep_dir(staging, JANITOR_STAGING_NAME, cutoff) }
         removed = counts[:served] + counts[:staging]
-        Rails.logger.info("ForemanHyperv::BootdiskTransfer.sweep: removed #{counts[:served]} served ISO(s), " \
-                          "#{counts[:staging]} staging file(s) older than #{max_age}s") if removed.positive?
+        if removed.positive?
+          Rails.logger.info("ForemanHyperv::BootdiskTransfer.sweep: removed #{counts[:served]} served ISO(s), " \
+                            "#{counts[:staging]} staging file(s) older than #{max_age}s")
+        end
         counts
       end
 
