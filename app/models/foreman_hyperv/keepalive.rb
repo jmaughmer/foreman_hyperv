@@ -64,9 +64,12 @@ module ForemanHyperv
   # through beat_once, which leases a connection for exactly one beat
   # (connection_pool.with_connection), runs it inside
   # Rails.application.executor.wrap — the same managed context a background
-  # job gets — and runs the tick UNCACHED (the executor's query cache would
-  # otherwise hand each beat the previous beat's cached answers to the
-  # beat's identical SQL). The thread still starts UNCONDITIONALLY on purpose: the enable
+  # job gets — and runs the tick UNCACHED, so no beat can ever read a
+  # previous beat's cached answers to the beat's identical SQL (the pool
+  # clears a cache at CHECKIN, which housekeeps the per-beat lease clean,
+  # but a beat running on a caller-held connection never checks in — see
+  # beat_once for the trap CI measured). The thread still starts
+  # UNCONDITIONALLY on purpose: the enable
   # column and the interval are dynamic settings, and a thread that skipped
   # booting because nothing was tick-listed could never be woken when an
   # admin enables one — the idle cost is now what it always should have
@@ -225,18 +228,31 @@ module ForemanHyperv
       # RETURNS IT before the loop sleeps. A thread that beats for five
       # seconds a minute holds a connection for five seconds a minute.
       #
-      # The beat runs UNCACHED, and round-32 proved it is load-bearing:
-      # the executor enables the query cache around everything it wraps,
-      # and the beat's SQL TEXT IS IDENTICAL beat after beat (the same
-      # selection pluck, the same single-runner try). With the cache on,
-      # beat N+1 gets beat N's cached answers — a stale pluck that misses a
-      # resource enabled since, a stale false from an advisory try whose
-      # holder has long released (or worse, a stale true that dials while
-      # another node holds the runner). The scheduler thread reuses its
-      # pooled connection from beat to beat — only the FIRST lease's pool
-      # checkout clears the cache — so from beat two on, every wrapped beat
-      # inherits the cache. Advisory answers are not cacheable data, never
-      # were; the beat must see current state or not run.
+      # The beat runs UNCACHED, and the rival test caught why RED during
+      # the round-32 folds: the executor turns the query cache ON around
+      # everything it wraps, and the beat's SQL TEXT IS IDENTICAL beat
+      # after beat (the same selection pluck, the same election try
+      # within one epoch, the same single-runner try). Whenever ONE
+      # connection serves two beats with the cache on, beat 2 reads beat
+      # 1's cached answers — a stale pluck that misses a resource
+      # enabled since, a stale false from an advisory try whose holder
+      # has long released (or worse, a stale true that dials while
+      # another node holds the runner). Production's per-beat lease
+      # usually avoids this by HOUSEKEEPING, not by design: the pool
+      # disables AND CLEARS the cache at CHECKIN (checkout only
+      # RE-ENABLES it from the pool flag — it never clears), so a
+      # connection returned after its beat starts its next checkout with
+      # a cleared store. But a beat running on a connection its caller
+      # already HOLDS never checks in — a transactional test pins one
+      # connection for the whole test, and any caller that wraps beats
+      # inside its own transaction keeps the connection leased — and
+      # that is exactly the shape CI MEASURED: on the pinned test
+      # connection the identical-SQL try answered the previous beat's
+      # 'false' while an alias-distinct SQL text answered true, with
+      # zero advisory rows in pg_locks. Advisory answers are not
+      # cacheable data, never were; the beat must see current state or
+      # not run, and that freshness must come from THIS line — not from
+      # pool plumbing a caller can void.
       # Returns what tick_all reports (the ticked ids); an empty selection
       # never ran an election and opened no transaction or lock.
       def beat_once
@@ -293,9 +309,11 @@ module ForemanHyperv
       # The result is compared as ::text and read with the ActiveModel
       # boolean type because the answer's WIRE FORM differs by path — the
       # ::text cast answers the strings 'true'/'false' (measured on the CI
-      # Postgres), a raw boolean arrives typecast, and the text protocol
-      # spells them 't'/'f'. Every one of those is a truthy STRING in Ruby;
-      # a truthiness test would hand every epoch to every process.
+      # Postgres) and the text protocol spells them 't'/'f'. Every one of
+      # those is a truthy STRING in Ruby; a truthiness test would hand
+      # every epoch to every process. The boolean type is what makes
+      # every false-spelling false and every true-spelling true on any
+      # adapter, without an exact-string trust.
       #
       # An interval-setting change mid-epoch needs no special case: the epoch
       # is recomputed per beat, and a beat in flight releases its (old-width)

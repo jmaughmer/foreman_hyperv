@@ -49,7 +49,9 @@ require 'test_helper'
 #      logs. The CI database IS Postgres, so a rival-thread test pins the
 #      real false and the release-at-transaction-end on the real wire — and
 #      that the beat bypasses the executor's query cache (the identical-SQL
-#      stale-answer trap round-32 caught this way) — while the
+#      stale-answer trap round-32 caught this way); a poisoned-election
+#      test pins the savepoint degradation on a REAL aborted transaction
+#      (everyone beats, the beat's later statements still run); while the
 #      idle-beat SQL capture pins that an all-disabled beat takes no
 #      lock and opens no transaction.
 #      A non-Postgres deployment never lets the election silence beats. B1:
@@ -836,21 +838,66 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     # bucket rides THIS connection to the harness rollback — the test
     # transaction is not joinable, so the beat runs at a savepoint, and a
     # savepoint release is not a transaction end. That is exactly the
-    # The bucket is gone: the next beat wins and dials. (The win's own
-    # bucket rides THIS connection to the harness rollback — the test
-    # transaction is not joinable, so the beat runs at a savepoint, and a
-    # savepoint release is not a transaction end. That is exactly the
     # comment on tick_all: only a real transaction end releases.)
     #
-    # THIS beat is also the query-cache pin, found exactly this way in
-    # round-32's CI: the executor enables the query cache around the beat,
-    # and the election SQL text is IDENTICAL between beats — without
-    # beat_once's uncached wrapper this line would read the LOSING beat's
-    # cached 'false' and the beat would dial nothing forever. A bug the
-    # fakes could not see (no cache) and production would run with.
+    # THIS beat is also the query-cache pin, caught exactly this way in
+    # round-32's CI folds: the executor turns the cache on around the
+    # beat, the election SQL text is IDENTICAL between beats, and this
+    # transactional test pins ONE connection across both beats — without
+    # beat_once's uncached, this line reads the LOSING beat's cached
+    # 'false' and the beat dials nothing. Production's per-beat lease
+    # hides the same trap today only by pool housekeeping (the store is
+    # cleared at CHECKIN); any caller holding the connection across
+    # beats hits it — see the beat_once comment.
     stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
     assert_equal 1, seen.size, 'the beat after the release beats'
     refute ForemanHyperv::Keepalive.lost_last_beat?, 'the win clears the seam'
+  end
+
+  def test_a_failing_election_degrades_to_everyone_beating_on_a_usable_transaction
+    # The rescue's degradation, PINNED against a REAL aborted transaction:
+    # the election SELECT answers a genuinely nonexistent function, so PG
+    # aborts the transaction exactly as a statement timeout or a
+    # function-less pg would — a fake raise could not poison anything and
+    # would pin nothing. The savepoint (requires_new) around JUST the try
+    # must clear that aborted state, so the beat degrades to
+    # everyone-beats (the pre-election PLG-34 shape) AND every later
+    # statement of the beat still runs: without requires_new this test
+    # goes red on "current transaction is aborted" inside the beat, which
+    # is exactly the silent "nobody beats, forever" round-32 blocked on.
+    skip('the election is Postgres-only') unless ForemanHyperv::Keepalive.postgres?(ActiveRecord::Base.connection)
+    cr = create_cr(name: 'ka-pg-poison', keepalive: true)
+    ForemanHyperv::Keepalive.stubs(:interval_seconds).returns(60)
+    ForemanHyperv::Keepalive.stubs(:now_seconds).returns(ELECT_BASE)
+    seen = []
+
+    conn = ActiveRecord::Base.connection
+    aliased = false
+    begin
+      conn.singleton_class.send(:alias_method, :__p42_orig_select_value__, :select_value)
+      aliased = true
+      conn.singleton_class.send(:define_method, :select_value) do |sql, *args, &block|
+        if sql.include?('pg_try_advisory_xact_lock')
+          __p42_orig_select_value__('SELECT foreman_hyperv_no_such_function(1)')
+        else
+          __p42_orig_select_value__(sql, *args, &block)
+        end
+      end
+
+      # The beat survives its own poisoned election: it beats (the
+      # degradation) and its post-election statements — single-runner try,
+      # tick, unlock — ran on the SAME still-usable transaction.
+      stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
+      assert_equal 1, seen.size, 'a failed election degrades to everyone beating'
+      refute ForemanHyperv::Keepalive.lost_last_beat?, 'a failed election is not a loss'
+      assert_equal 1, conn.select_value('SELECT 1').to_i,
+                   'the aborted state is gone: the transaction is usable after the beat'
+    ensure
+      if aliased
+        conn.singleton_class.send(:alias_method, :select_value, :__p42_orig_select_value__)
+        conn.singleton_class.send(:remove_method, :__p42_orig_select_value__)
+      end
+    end
   end
 
   def test_an_all_disabled_beat_locks_nothing_and_opens_no_transaction
