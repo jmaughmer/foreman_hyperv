@@ -48,10 +48,22 @@ module ForemanHyperv
       return false unless new_record? || uuid.blank?
       # Gate, not trigger (Decision 6 item 6 — Hyper-V always answers true).
       return false unless compute_provides?(:mac)
-      # Core queues setComputeIPAM only for these two, and the predicate
-      # takes the field as a REQUIRED argument (F1: a bare mac_based_ipam?
-      # raises ArgumentError on every create).
-      return false unless mac_based_ipam?(:subnet) || mac_based_ipam?(:subnet6)
+      # Core queues setComputeIPAM only for these two modes, and the
+      # predicate takes the field as a REQUIRED argument (F1: a bare
+      # mac_based_ipam? raises ArgumentError). The GATE rides the primary
+      # nic while the loop below walks every managed nic — mirroring core's
+      # own split (setComputeIPAM's gate is primary-only,
+      # orchestration/compute.rb:80-83; the fill walks all managed nics,
+      # managed.rb:600-606). A blank behind a secondary's EUI-64 with a
+      # DHCP primary never fills, so it never goes stale (round 23, F7).
+      # The primary is DETECTED here rather than called through the host
+      # delegate because that delegate has no allow_nil (managed.rb:306
+      # raises Module::DelegationError when no nic carries the flag) and
+      # this runs INSIDE a validation cycle: the missing primary belongs to
+      # check_interfaces' error, not to a 500 (round 23, F2).
+      primary = interfaces.detect(&:primary)
+      return false unless primary
+      return false unless primary.mac_based_ipam?(:subnet) || primary.mac_based_ipam?(:subnet6)
 
       interfaces.select(&:managed).any? do |nic| # mirrors set_ip_address's own iteration
         (nic.subnet.present? && nic.ip.blank? && bootdisk_subnet_fills_address?(nic.subnet)) ||
