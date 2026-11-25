@@ -48,6 +48,7 @@ module ForemanHyperv
       return false unless new_record? || uuid.blank?
       # Gate, not trigger (Decision 6 item 6 — Hyper-V always answers true).
       return false unless compute_provides?(:mac)
+
       # Core queues setComputeIPAM only for these two modes, and the
       # predicate takes the field as a REQUIRED argument (F1: a bare
       # mac_based_ipam? raises ArgumentError). The GATE rides the primary

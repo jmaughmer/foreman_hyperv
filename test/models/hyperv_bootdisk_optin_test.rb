@@ -176,7 +176,7 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
   # without 'efi' and the merge LEAVES a submitted secure_boot_enabled
   # standing — a stale flag is not Secure Boot. The refusal must read core's
   # RESOLVED firmware, not the flag alone.
-  test 'a bootdisk create whose firmware RESOLVES to BIOS is NOT refused even when a stale secure_boot_enabled stands' do
+  test 'a bootdisk create whose firmware RESOLVES to BIOS is NOT refused on a stale flag' do
     cr = create_cr
 
     # 'automatic' + a BIOS firmware_type resolves to bios; the submitted

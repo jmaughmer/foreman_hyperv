@@ -235,10 +235,11 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     # EUI-64 fill for the secondary either — nothing fills, nothing goes
     # stale, no refusal. A test with two nics is the only place this split
     # is expressible at all.
-    host = guard_host(nics: [
-                       NicStub.new(primary: true, subnet: stub(ipam: 'dhcp'), ip: '10.0.0.7'),
-                       NicStub.new(subnet6: stub(ipam: 'eui-64'), ip6: nil)
-                     ])
+    nics = [
+      NicStub.new(primary: true, subnet: stub(ipam: 'dhcp'), ip: '10.0.0.7'),
+      NicStub.new(subnet6: stub(ipam: 'eui-64'), ip6: nil)
+    ]
+    host = guard_host(nics: nics)
 
     assert_not host.bootdisk_payload_would_go_stale?
   end
