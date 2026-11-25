@@ -252,8 +252,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
 
   def build_cr(fog, roots: ['C:\VMs', 'C:\ClusterStorage\Volume1'], state: :Off,
                generation: :UEFI, sb: false,
-               machine: MachineStub.new(UUID, state: state, generation: generation,
-                                        secure_boot: sb, service: fog),
+               machine: MachineStub.new(UUID, state: state, generation: generation, secure_boot: sb, service: fog),
                cluster: nil, serves: true)
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.stubs(:client).returns(fog)
