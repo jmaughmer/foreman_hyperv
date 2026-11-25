@@ -449,6 +449,35 @@ class HypervEnablementTest < ActiveSupport::TestCase
     assert_includes scripts.first, '-Recurse', 'the config lives one level down; the read must reach it'
   end
 
+  # PLG-41 (review F6): the verdict licenses Remove-Item -Recurse, and on
+  # the Windows PowerShell 5.1 these hosts run, that recursion deletes
+  # THROUGH a child junction into its target (PowerShell/PowerShell#621,
+  # fixed only in PS 6+). A machine folder that merely HOLDS
+  # `...\lab-vm2\iso -> D:\ISOs` must keep exactly like one that IS a
+  # junction — the old script checked only the folder itself, answered a
+  # clean NAMES for the holder, and the licensed delete emptied D:\ISOs.
+  def test_the_preflight_sweeps_for_child_junctions_before_it_answers_names
+    cr, = build_cr(full_fog)
+    vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false)
+    vm.set_preflight('KEEP:NESTED-JUNCTION')
+    cr.send(:destroy_folder?, vm)
+    scripts = vm.calls.select { |c| c.is_a?(Array) && c.first == :run_cmd }.map(&:last)
+    assert_equal 1, scripts.size, 'the sweep rides the same single round trip'
+    assert_includes scripts.first, '-Attributes ReparsePoint',
+                    'the children are swept for reparse points before any names answer'
+    assert_includes scripts.first, 'KEEP:NESTED-JUNCTION',
+                    'a child junction answers its own refusal, not the folder-level one'
+  end
+
+  def test_a_nested_junction_answer_keeps_the_folder
+    # The consumer half: the dedicated token keeps (the base kept it too,
+    # as an answer outside the shape — this pins that it is understood,
+    # not merely unrecognized, and stays keeping whatever the default
+    # rule does later).
+    cr, = build_cr(full_fog)
+    assert_not preflight_answer(cr, 'KEEP:NESTED-JUNCTION')
+  end
+
   # ---- the drive rule -----------------------------------------------------------
 
   def test_a_drive_file_is_deleted_only_when_attributed_and_proven_unshared
