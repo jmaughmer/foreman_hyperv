@@ -212,6 +212,19 @@ module ForemanHyperv
     # text beyond the child NAMES (which this parses but never re-quotes);
     # %<folder>s arrives from the string rule, already attributed and
     # single-quoted.
+    # The verdict LICENSES Remove-Item -Recurse, so it must refuse everything
+    # that recursion touches wrongly — on the Windows PowerShell 5.1 these
+    # hosts run, that includes a CHILD junction anywhere below the folder:
+    # 5.1's Remove-Item -Recurse descends into directory junctions and
+    # symlinks it meets and deletes the TARGET's contents (PowerShell fixed
+    # it only in 6+, PowerShell/PowerShell#621). A folder that merely holds
+    # `...\vm01\iso -> D:\ISOs` therefore keeps exactly as the folder that IS
+    # a junction does. PLG-41 (review F6): the sweep is in the same round
+    # trip; no nested reparse point means the names answer proceeds. The
+    # sweep rides fog's shell, which sets $ErrorActionPreference='Stop': a
+    # tree the sweep cannot enumerate aborts the script before any token
+    # prints, and the no-answer rule keeps the folder — the failure answer
+    # is keep, never NAMES over an unreadable subtree.
     FOLDER_PREFLIGHT_SCRIPT = <<~SCRIPT
       $p = %<folder>s
       if (-not (Test-Path -LiteralPath $p)) { 'ABSENT' }
@@ -219,6 +232,7 @@ module ForemanHyperv
         $i = Get-Item -LiteralPath $p -Force
         if ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { 'KEEP:JUNCTION' }
         elseif ($i.Attributes -band [System.IO.FileAttributes]::Hidden) { 'KEEP:HIDDEN' }
+        elseif (Get-ChildItem -LiteralPath $p -Recurse -Force -Attributes ReparsePoint) { 'KEEP:NESTED-JUNCTION' }
         else { 'NAMES:' + ((Get-ChildItem -LiteralPath $p -Force -Recurse | ForEach-Object { $_.Name }) -join ';') }
       }
     SCRIPT
@@ -2248,6 +2262,9 @@ module ForemanHyperv
       case answer
       when 'ABSENT' then :absent
       when 'KEEP:JUNCTION' then keep_folder(folder, 'it is a reparse point (junction or symlink)')
+      when 'KEEP:NESTED-JUNCTION'
+        keep_folder(folder, 'a reparse point lives inside it, and Remove-Item -Recurse on Windows ' \
+                            'PowerShell 5.1 deletes through child junctions into the target')
       when 'KEEP:HIDDEN' then keep_folder(folder, 'it is hidden')
       when /\AFORBIDDEN:/ then keep_folder(folder, 'the remote refused the path itself')
       when /\ANAMES:/ then folder_contents_ok?(vm, folder, answer.delete_prefix('NAMES:'))
