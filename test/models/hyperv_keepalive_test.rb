@@ -630,17 +630,19 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     seen = []
 
     with_context_recorders do |recorder|
-      stub_ticks(seen) { assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once }
+      stub_ticks(seen) do
+        assert_equal [cr.id], ForemanHyperv::Keepalive.beat_once
+
+        # PLG-42, the F10 fix pinned as structure: the beat leases its pool
+        # connection for EXACTLY the beat (with_connection returns it when
+        # the block ends — so the loop's sleep phase holds nothing) and runs
+        # inside the executor (reload/shard state managed, not inherited
+        # from boot).
+        assert_equal 1, recorder[:leases], 'the beat goes through connection_pool.with_connection'
+        assert_equal 1, recorder[:wraps], 'the beat goes through Rails.application.executor.wrap'
+      end
     end
 
-    # PLG-42, the F10 fix pinned as structure: the beat leases its pool
-    # connection for EXACTLY the beat (with_connection returns it when the
-    # block ends — so the loop's sleep phase holds nothing) and runs inside
-    # the executor (reload/shard state managed, not inherited from boot).
-    assert_equal 1, recorder[:leases],
-                 'the beat goes through connection_pool.with_connection'
-    assert_equal 1, recorder[:wraps],
-                 'the beat goes through Rails.application.executor.wrap'
     assert_equal 1, seen.size, 'and it still runs the real beat'
   end
 
