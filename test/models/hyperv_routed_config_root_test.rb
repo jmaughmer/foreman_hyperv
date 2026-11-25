@@ -39,8 +39,8 @@ class HypervRoutedConfigRootTest < ActiveSupport::TestCase
   # The machine the NODE client's servers.new builds. It records the create
   # kwargs exactly as they arrived — the config root the create shipped is the
   # fact under test — and answers the post-create surface (placement_path,
-  # generation, start/stop) so create_vm runs its steps without fog, the way
-  # the PLG-16 suite's double does. persisted? follows fog-core: FALSE until
+  # generation, start) so create_vm runs its steps without fog, the way the
+  # PLG-16 suite's double does. persisted? follows fog-core: FALSE until
   # create has been sent — which is exactly why a refusal raised before the
   # create tears nothing down: the rescue's rollback asks persisted? first.
   class RootedVm
