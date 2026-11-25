@@ -871,9 +871,15 @@ module ForemanHyperv
     # measured the WinRM push at 0.54-0.75 MB/s against the host's own HTTP
     # pull at 148.9 MB/s, so the plugin stages the ISO under a one-shot nonce
     # and fog's fetch_url_to_path has the HOST pull it — verifying status,
-    # byte count and sha256 on the host BEFORE the file takes its final name,
-    # and refusing to overwrite one that exists. The staged copy is deleted in
-    # the ensure either way: a leaked served ISO holds disk and host keys.
+    # byte count and sha256 on the host BEFORE the file takes its final name.
+    # The final move (-Force) replaces whatever that name holds, which is
+    # exactly what a rebuild needs: foreman_bootdisk names the ISO after the
+    # host (24.1.0 bootdisk_isofile is "#{name}.iso"), so a host's second
+    # build re-pulls under the same name and the freshly verified body must
+    # win — and it can: every check runs on a temporary .part, so nothing
+    # that failed status, size or sha256 ever reaches the final name. The
+    # staged copy is deleted in the ensure either way: a leaked served ISO
+    # holds disk and host keys.
     # Answers the transferred byte count; raises on any failure, because a
     # build that proceeds without its media installs from the network instead.
     def iso_upload(isofile, vm_id, options = {})
@@ -912,8 +918,10 @@ module ForemanHyperv
         nonce = staged.nonce
         # The host-side name is the ISO's basename, never the nonce: iso_attach
         # and iso_delete receive only the basename (core hands them
-        # File.basename(isofile)), and fetch_url_to_path's no-overwrite rule
-        # turns a stale file here into a refusal that reaches a human.
+        # File.basename(isofile)). A stale file of this name is no refusal —
+        # the verified pull moves over it (-Force), and because the checks ran
+        # on the .part, the bytes under this name after the move are exactly
+        # this build's ISO, the one iso_attach then mounts.
         target = bootdisk_host_path(root, File.basename(isofile))
         received = client.fetch_url_to_path(url: staged.url, path: target,
                                             sha256: staged.sha256, size: staged.bytes)
