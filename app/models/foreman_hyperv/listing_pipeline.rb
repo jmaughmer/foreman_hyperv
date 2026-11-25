@@ -62,6 +62,20 @@ module ForemanHyperv
         @queue << [:error, error]
       end
 
+      # Blocks until the hop thread answers — with NO timeout of its own. That
+      # is the invariant, not an oversight: this pop is unbounded ONLY because
+      # the hop that fills it can never run unbounded, and the reason it cannot
+      # is pinned by test_every_pipeline_hop_client_carries_the_winrm_waits
+      # (test/models/hyperv_listing_pipeline_test.rb). Every client a hop can
+      # ride is one of the four self.start composes — probe, node list,
+      # endpoint rows, and the one held for the role lane — and all four come
+      # from Hyperv#fog_client_options, which sets hyperv_operation_timeout and
+      # hyperv_receive_timeout on EVERY composed client (the PLG-16 waits,
+      # WINRM_OPERATION_TIMEOUT/WINRM_RECEIVE_TIMEOUT). So each hop's fog call
+      # ends on its own, complete/fail_with fires on that thread, and the queue
+      # is always written. If that factory ever stopped setting the waits, this
+      # pop could block a page thread forever on a stalled cold hop — the test
+      # fails RED before that regression ever ships.
       def value
         kind, payload = @queue.pop
         raise payload if kind == :error
