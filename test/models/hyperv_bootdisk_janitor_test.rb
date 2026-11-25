@@ -199,18 +199,19 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
   test 'a per-file unlink race is swallowed, COUNTED, warned once, and the walk continues' do
     racing = aged(@served, "#{OLD_ISO}.iso", DAY + 60)
     survivor = aged(@served, "#{YOUNG_ISO}.iso", DAY + 60)
-    attempts = []
-    File.stubs(:unlink) do |path|
-      attempts << path
-      raise Errno::ENOENT
-    end
-    # Round 22, findings 1+2: the OLD version (raise-for-everything, assert
-    # {0,0} + files alive) was also satisfied by an implementation that ABORTED
-    # the walk inside its first rescue — the attempts list below is what pins
-    # "swallowed, not aborted". And swallowed must not be INVISIBLE: every
-    # unlink failing (a root chowned away) must reach Rails.logger.warn with
-    # the count and the first error, while nothing was removed so info stays
-    # silent.
+    # Round 22, findings 1+2. The OLD version (one raise-for-everything stub,
+    # assert {0,0} + files alive) was also satisfied by an implementation that
+    # ABORTED inside its first rescue. Two arg-pinned expectations are the
+    # proof: each candidate must be attempted EXACTLY once (a walk that
+    # aborted after `racing` leaves the `survivor` expectation unsatisfied —
+    # measured here: mocha does NOT execute a block passed to stubs, so the
+    # first fold's attempts-list version silently returned nil and logged
+    # "removed 2" — caught by its own run), while both files stay on disk.
+    # And swallowed must not be INVISIBLE: every unlink failing (a root
+    # chowned away) must reach Rails.logger.warn with the count and the first
+    # error, while info (the removals line) stays silent.
+    File.expects(:unlink).with(racing).once.raises(Errno::ENOENT.new)
+    File.expects(:unlink).with(survivor).once.raises(Errno::ENOENT.new)
     logger = mock('sweep logger')
     logger.expects(:warn).once.with do |msg|
       msg.include?('2 unlink failure(s)') && msg.include?('Errno::ENOENT')
@@ -222,8 +223,6 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     File.unstub(:unlink) # before teardown: mocha restores only after it, and
     # a surviving File.unlink stub turns remove_entry's cleanup into ENOTEMPTY
     assert_equal({ served: 0, staging: 0 }, counts, 'failed unlinks are not removals')
-    assert_equal [racing, survivor].sort, attempts.sort,
-                 'the sweep WALKED BOTH candidates — rescue must not abort the loop'
     assert alive?(racing) && alive?(survivor)
   end
 
