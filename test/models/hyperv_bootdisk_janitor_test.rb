@@ -57,7 +57,14 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     FileUtils.mkdir_p([@served, @staging])
     ForemanHyperv::BootdiskTransfer.served_root = @served
     ForemanHyperv::BootdiskTransfer.staging_root = @staging
-    @now = Time.now.utc
+    # Second-aligned clock (round 22, finding 5): the boundary test compares a
+    # utime-stamped mtime for EXACT equality with `now - max_age`, and some
+    # filesystems truncate sub-second stamps — with a truncated store the
+    # at-cutoff file would read as OLDER and the strict-boundary assertion
+    # would invert. Aligning now to a whole second makes the equality
+    # FS-granularity-proof; every age in this file is a whole number of
+    # seconds, so all stamps stay exact.
+    @now = Time.now.utc.change(nsec: 0)
   end
 
   teardown do
@@ -140,7 +147,11 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     File.utime(t, t, target)
     link = File.join(@served, "#{OLD_ISO}.iso")
     File.symlink(target, link)
-    File.utime(t, t, link) # lstat-time ages with the rest, where the fs allows it
+    # Deliberately NO File.utime on the link itself: Ruby's File.utime FOLLOWS
+    # symlinks (round 22, finding 4), so there is no portable way to age the
+    # link's own mtime here — and none is needed. The link is rejected by the
+    # lstat .file? gate BEFORE any age is consulted, so this test proves the
+    # non-regular rejection, which is what actually saves it.
 
     counts = ForemanHyperv::BootdiskTransfer.sweep(now: @now)
     assert File.symlink?(link), 'the janitor never removes a symlink'
@@ -185,16 +196,34 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     assert_equal({ served: 1, staging: 0 }, counts)
   end
 
-  test 'a per-file unlink race is swallowed and the sweep proceeds' do
+  test 'a per-file unlink race is swallowed, COUNTED, warned once, and the walk continues' do
     racing = aged(@served, "#{OLD_ISO}.iso", DAY + 60)
     survivor = aged(@served, "#{YOUNG_ISO}.iso", DAY + 60)
-    File.stubs(:unlink).raises(Errno::ENOENT.new)
-    # The stub answers for EVERY unlink; nothing is removed, and the sweep
-    # must still walk every candidate and return honest zero counts.
+    attempts = []
+    File.stubs(:unlink) do |path|
+      attempts << path
+      raise Errno::ENOENT
+    end
+    # Round 22, findings 1+2: the OLD version (raise-for-everything, assert
+    # {0,0} + files alive) was also satisfied by an implementation that ABORTED
+    # the walk inside its first rescue — the attempts list below is what pins
+    # "swallowed, not aborted". And swallowed must not be INVISIBLE: every
+    # unlink failing (a root chowned away) must reach Rails.logger.warn with
+    # the count and the first error, while nothing was removed so info stays
+    # silent.
+    logger = mock('sweep logger')
+    logger.expects(:warn).once.with do |msg|
+      msg.include?('2 unlink failure(s)') && msg.include?('Errno::ENOENT')
+    end
+    logger.expects(:info).never
+    Rails.stubs(:logger).returns(logger)
+
     counts = ForemanHyperv::BootdiskTransfer.sweep(now: @now)
     File.unstub(:unlink) # before teardown: mocha restores only after it, and
-    # a stubbed File.unlink turns remove_entry's cleanup into ENOTEMPTY
+    # a surviving File.unlink stub turns remove_entry's cleanup into ENOTEMPTY
     assert_equal({ served: 0, staging: 0 }, counts, 'failed unlinks are not removals')
+    assert_equal [racing, survivor].sort, attempts.sort,
+                 'the sweep WALKED BOTH candidates — rescue must not abort the loop'
     assert alive?(racing) && alive?(survivor)
   end
 

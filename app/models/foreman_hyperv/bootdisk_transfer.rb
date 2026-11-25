@@ -231,22 +231,38 @@ module ForemanHyperv
       # unlink) are swallowed — not the janitor's error to report.
       #
       # Returns { served: n, staging: m } counts, or nil when dormant. The
-      # rake task prints them; the tests pin them.
+      # rake task prints them; the tests pin them. A run whose unlinks ALL
+      # fail (a root chowned away mid-deployment) still answers exit-0 counts,
+      # but not silently: the failure count and the FIRST error ride a
+      # Rails.logger.warn (round 22, finding 2 — the cron roll-up can only
+      # report what the task raises, and a swallowed race is not what a
+      # silently-growing shelf looks like from).
       def sweep(now: Time.now.utc, max_age: JANITOR_MAX_AGE)
         cutoff = now - max_age
         begin
           served = served_root!
           staging = staging_root!
         rescue ConfiguredRootError
+          # The nil means the PAIR is unset (round 22, finding 6): one blank
+          # setting answers fully-dormant here exactly as stage refuses on the
+          # same pair, so the woken half can never have accumulated files.
           return nil
         end
 
-        counts = { served: sweep_dir(served, JANITOR_SERVED_NAME, cutoff),
-                   staging: sweep_dir(staging, JANITOR_STAGING_NAME, cutoff) }
+        seen = { removed: 0, failed: 0, first_error: nil }
+        sweep_dir(served, JANITOR_SERVED_NAME, cutoff, seen)
+        served_removed = seen[:removed]
+        sweep_dir(staging, JANITOR_STAGING_NAME, cutoff, seen)
+
+        counts = { served: served_removed, staging: seen[:removed] - served_removed }
         removed = counts[:served] + counts[:staging]
         if removed.positive?
           Rails.logger.info("ForemanHyperv::BootdiskTransfer.sweep: removed #{counts[:served]} served ISO(s), " \
                             "#{counts[:staging]} staging file(s) older than #{max_age}s")
+        end
+        if seen[:failed].positive?
+          Rails.logger.warn("ForemanHyperv::BootdiskTransfer.sweep: #{seen[:failed]} unlink failure(s), " \
+                            "first: #{seen[:first_error].class}: #{seen[:first_error].message}")
         end
         counts
       end
@@ -339,16 +355,17 @@ module ForemanHyperv
         nil
       end
 
-      # One root, its name contract, one cutoff. lstat before anything: a
-      # symlink is never followed and never removed (Decision 4, on the served
-      # subtree that is Apache's to read), and a non-regular file — a
-      # directory, a fifo — wearing a nonce name is not ours. mtime is the
-      # only age read, ever (F10). Dir.children ENOENT means the root was
-      # never created or vanished after ensure: zero files is the honest
-      # answer, not an error; any OTHER directory error (EACCES on a
-      # configured root) deliberately travels out to the cron log.
-      def sweep_dir(root, pattern, cutoff)
-        removed = 0
+      # One root, its name contract, one cutoff, one shared tally. lstat before
+      # anything: a symlink is never followed and never removed (Decision 4, on
+      # the served subtree that is Apache's to read), and a non-regular file —
+      # a directory, a fifo — wearing a nonce name is not ours. mtime is the
+      # only age read, ever (F10). Dir.children ENOENT means the root was never
+      # created or vanished after ensure: zero files is the honest answer, not
+      # an error; any OTHER directory error (EACCES on a configured root)
+      # deliberately travels out to the cron log. Per-file SystemCallError is
+      # the swallow (a concurrent discard won the race), but it is COUNTED into
+      # the tally — swallowed is not invisible (round 22, finding 2).
+      def sweep_dir(root, pattern, cutoff, seen)
         Dir.children(root).each do |name|
           next unless name.match?(pattern)
 
@@ -359,14 +376,14 @@ module ForemanHyperv
             next unless stat.mtime < cutoff
 
             File.unlink(path)
-            removed += 1
-          rescue SystemCallError
-            nil
+            seen[:removed] += 1
+          rescue SystemCallError => e
+            seen[:failed] += 1
+            seen[:first_error] ||= e
           end
         end
-        removed
       rescue Errno::ENOENT
-        0
+        nil
       end
 
       def served_root!
