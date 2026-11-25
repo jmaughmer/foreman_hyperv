@@ -136,11 +136,12 @@ class HypervEnablementTest < ActiveSupport::TestCase
   class FakeVm
     attr_accessor :role_stdout
 
-    def initialize(name:, path:, drives:, clustered: false, owner_node: nil, preflight: 'ABSENT')
+    def initialize(name:, path:, drives:, clustered: false, role_answer: :follow, owner_node: nil, preflight: 'ABSENT')
       @name = name
       @path = path
       @drives = drives
       @clustered = clustered
+      @role_answer = role_answer
       @owner_node = owner_node
       @preflight = preflight
       @role_stdout = ''
@@ -153,6 +154,13 @@ class HypervEnablementTest < ActiveSupport::TestCase
     def id = GUID
     def computer_name = 'hv-node1'
     def clustered? = @clustered
+
+    # The tri-state cluster answer (fog Server#is_clustered): defaults to
+    # tracking the boolean the classification sees; PLG-39 tests pass nil (the
+    # probe could not answer) or an explicit "no role" to pin the arms.
+    def is_clustered # rubocop:disable Naming/PredicatePrefix
+      @role_answer == :follow ? @clustered : @role_answer
+    end # rubocop:enable Naming/PredicatePrefix
 
     def set_preflight(answer)
       @preflight = answer
@@ -324,8 +332,9 @@ class HypervEnablementTest < ActiveSupport::TestCase
   # ---- the two-root folder rule: the string half ------------------------------
 
   def attributed_vm(name: 'lab-vm2', path: 'C:\ClusterStorage\Volume1\lab-vm2',
-                    clustered: true, drives: [], owner_node: nil)
-    FakeVm.new(name: name, path: path, clustered: clustered, drives: drives, owner_node: owner_node)
+                    clustered: true, drives: [], owner_node: nil, role_answer: :follow)
+    FakeVm.new(name: name, path: path, clustered: clustered, drives: drives,
+               owner_node: owner_node, role_answer: role_answer)
   end
 
   def folder_rule(cr, vm)
@@ -502,6 +511,51 @@ class HypervEnablementTest < ActiveSupport::TestCase
     assert_equal [[:destroy, false]], destroy_calls(vm)
   end
 
+  def test_a_kept_drive_one_level_down_keeps_the_folder
+    # PLG-39 (review F2): Hyper-V's own default layout puts the disks one
+    # level below the config folder ("<folder>\Virtual Hard Disks\"). The
+    # direct-child survivor check called that "outside the folder", the
+    # folder delete went ahead, and Remove-Item -Recurse took exactly the
+    # shared, reserved disk the survivor rule had just refused. Containment
+    # is by path LEVEL: any depth inside the folder is inside it.
+    cr, = build_cr(full_fog)
+    kept = FakeHdd.new('d1', 'C:\VMs\lab-vm2\Virtual Hard Disks\shared.vhdx', reservations: true)
+    vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [kept])
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
+    assert enabled_destroy(cr, vm)
+    assert_equal [false], kept.calls
+    assert_equal [[:destroy, false]], destroy_calls(vm),
+                 'the recursion may not outdelete the destroy that refused'
+  end
+
+  def test_a_kept_drive_with_forward_slashes_in_its_path_keeps_the_folder
+    # Round-29 fold: the drive rule (the neighbor that just refused this
+    # file) normalizes slashes before attributing, so a "C:/…" disk is the
+    # same file to it — containment must not read that same path as one
+    # element and call it outside the folder. Normalize before split.
+    cr, = build_cr(full_fog)
+    kept = FakeHdd.new('d1', 'C:/VMs/lab-vm2/Virtual Hard Disks/shared.vhdx', reservations: true)
+    vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [kept])
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
+    assert enabled_destroy(cr, vm)
+    assert_equal [false], kept.calls
+    assert_equal [[:destroy, false]], destroy_calls(vm)
+  end
+
+  def test_a_kept_drive_in_a_same_prefix_sibling_folder_does_not_keep_the_folder
+    # The boundary of containment: "lab-vm2-backup" merely STARTS WITH the
+    # machine folder's spelling — it is a sibling, not under it. The disk
+    # there is not this folder's business (and is refused deletion by the
+    # drive rule anyway); the folder may still go.
+    cr, = build_cr(full_fog)
+    sibling = FakeHdd.new('d1', 'C:\VMs\lab-vm2-backup\disk1.vhdx', reservations: true)
+    vm = attributed_vm(path: 'C:\VMs\lab-vm2', clustered: false, drives: [sibling])
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
+    assert enabled_destroy(cr, vm)
+    assert_equal [false], sibling.calls
+    assert_equal [[:destroy, true]], destroy_calls(vm)
+  end
+
   def test_an_unattributed_drive_elsewhere_does_not_hold_the_folder
     cr, = build_cr(full_fog)
     elsewhere = FakeHdd.new('d1', 'D:\pre-existing\disk.vhdx')
@@ -579,6 +633,54 @@ class HypervEnablementTest < ActiveSupport::TestCase
     assert_raises(Foreman::Exception) { enabled_destroy(cr, vm, state: :clustered) }
     assert_equal [], d1.calls
     assert_empty destroy_calls(vm)
+  end
+
+  def test_a_clustered_destroy_whose_role_did_not_answer_refuses_before_any_mutation
+    # PLG-39 (review F1): the probe collapsed "could not tell" into "not
+    # clustered" (fog's supports_clusters? answers false on any transport
+    # error, which makes cluster_role nil and clustered? false), and the
+    # destroy deleted the disks while the cluster still held the role. The
+    # tri-state answer now decides: nil REFUSES, nothing is touched, the next
+    # attempt re-reads. The boolean said false here and the destroy went.
+    cr, = build_cr(full_fog)
+    d1 = FakeHdd.new('d1', 'C:\ClusterStorage\Volume1\lab-vm2\disk1.vhdx')
+    vm = attributed_vm(clustered: false, drives: [d1], owner_node: 'hv-node2', role_answer: nil)
+    assert_equal false, vm.clustered?, 'the boolean collapse the bug rode on'
+    error = assert_raises(ForemanHyperv::OperationRefused) { enabled_destroy(cr, vm, state: :clustered) }
+    assert_includes error.message, 'cluster role did not answer'
+    assert_empty vm.calls, 'not even stop: the refusal precedes every mutation'
+    assert_equal [], d1.calls
+  end
+
+  def test_a_clustered_destroy_where_the_cluster_answered_no_role_skips_the_role_removal
+    # "no role" is an ANSWER, not the unknown: the destroy proceeds and does
+    # not spend the removal on a role the cluster says it does not hold.
+    # clustered: false + is_clustered false is the fog-shaped pair (both
+    # derive from one cluster_role read); the endpoint classification lives
+    # in the stubbed state, not the double.
+    cr, fog = build_cr(full_fog)
+    d1 = FakeHdd.new('d1', 'C:\ClusterStorage\Volume1\lab-vm2\disk1.vhdx')
+    vm = attributed_vm(clustered: false, drives: [d1], owner_node: 'hv-node2', role_answer: false)
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
+    assert enabled_destroy(cr, vm, state: :clustered)
+    assert_empty vm.calls.select { |c| c.is_a?(Array) && c.first == :run_cmdlist },
+                 'a machine the cluster answered no role for has nothing to release'
+    assert_empty fog.calls, 'and no client-fallback transport either: zero role wire'
+    assert_equal [true], d1.calls
+    assert_equal [[:destroy, true]], destroy_calls(vm)
+  end
+
+  def test_a_fog_without_the_tri_state_answer_contributes_no_role
+    # A vm that cannot give the tri-state answer (no is_clustered at all) is
+    # unknown, not un-clustered: on a cluster-classified endpoint it refuses.
+    # A fog the plugin partners with always answers (the era gate provides-
+    # checks it), so this only pins the refuse side of the respond_to? guard.
+    cr, = build_cr(full_fog)
+    vm = attributed_vm(drives: [], owner_node: 'hv-node2')
+    vm.singleton_class.send(:undef_method, :is_clustered)
+    assert_not vm.respond_to?(:is_clustered)
+    assert_raises(ForemanHyperv::OperationRefused) { enabled_destroy(cr, vm, state: :clustered) }
+    assert_empty vm.calls
   end
 
   def test_the_guard_carries_the_netbios_truncation_for_names_over_fifteen_characters

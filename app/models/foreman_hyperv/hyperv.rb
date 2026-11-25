@@ -168,6 +168,15 @@ module ForemanHyperv
                                     'attempt, and an unreadable endpoint is not a license to delete. ' \
                                     'Nothing was stopped and nothing was deleted; the reads are made ' \
                                     'again on the next attempt.'
+    # PLG-39 (review F1): the machine's OWN role question answered "could not
+    # tell" while the endpoint classified as a cluster. The cluster may be
+    # holding a role for this machine and its disks right now, and a role left
+    # behind a deleted machine is the state remove_cluster_role's own contract
+    # calls worse than refusing.
+    DESTROY_ROLE_UNKNOWN_REFUSAL = 'Destroying a virtual machine on this Hyper-V compute resource is ' \
+                                   'refused: the machine\'s cluster role did not answer, and a role that ' \
+                                   'cannot be checked cannot be safely left behind. Nothing was stopped ' \
+                                   'and nothing was deleted; the reads are made again on the next attempt.'
 
     # F2's guard: a node-identity name is quoted into the remote guard script
     # only in this shape — a host or node name, nothing a shell or PowerShell
@@ -1420,6 +1429,29 @@ module ForemanHyperv
       # reviewed unlocks.
       raise ForemanHyperv::OperationRefused, DESTROY_SELF_RUNG_REFUSAL if state == :not_self
 
+      # PLG-39 (review F1): the role decision is made on the machine's TRI-STATE
+      # answer, not the boolean collapse. vm.clustered? answers false both when
+      # the cluster said "no role" and when the probe could not be asked at all
+      # (fog's supports_clusters? flattens any transport error into "not a
+      # cluster endpoint", which collapses cluster_role to nil) — and on an
+      # endpoint already classified :clustered, that collapse silently skipped
+      # the role removal while the destroy deleted the disks, leaving the
+      # cluster holding a role for a deleted machine. So: unknown REFUSES the
+      # destroy before anything is mutated, "no role" is an answer and skips,
+      # "role" removes. A machine classified :standalone was proven to have no
+      # cluster to ask, so its answer is false without a read. A fog whose
+      # answer raises (fog propagates classification errors) stops the destroy
+      # here too — before stop, detach, or delete.
+      role_answer =
+        if state == :clustered
+          answer = vm.respond_to?(:is_clustered) ? vm.is_clustered : nil
+          raise ForemanHyperv::OperationRefused, DESTROY_ROLE_UNKNOWN_REFUSAL if answer.nil?
+
+          answer
+        else
+          false
+        end
+
       machine_folder = folder_deletion_path(vm)
       folder_delete = !machine_folder.nil? && folder_preflight(vm, machine_folder) == :ok
       drive_deletes = []
@@ -1438,11 +1470,12 @@ module ForemanHyperv
       end
 
       vm.stop turn_off: true
-      # The role only when the machine reports one: fog's removal asserts a
-      # matching role before it deletes anything, and a machine the cluster
-      # does not hold has nothing to release. A cluster that will not give the
-      # role up stops the destroy here — before the machine or a file goes.
-      remove_cluster_role(vm) if vm.respond_to?(:clustered?) && vm.clustered?
+      # The role only when the cluster ANSWERED one for this machine (the
+      # tri-state decision above): fog's removal asserts a matching role
+      # before it deletes anything, and a machine the cluster answered no role
+      # for has nothing to release. A cluster that will not give the role up
+      # stops the destroy here — the machine and every file are still there.
+      remove_cluster_role(vm) if role_answer
       drive_deletes.each { |hdd, delete_file| hdd.destroy(underlying: delete_file) }
       vm.destroy(folder_delete)
       true
@@ -2258,9 +2291,26 @@ module ForemanHyperv
       end
     end
 
+    # PLG-39 (review F2): "somewhere INSIDE the machine folder" — the direct
+    # child or any level deeper. Hyper-V's own default layout puts the disks
+    # one level down ("<folder>\Virtual Hard Disks\"), and the folder delete
+    # RECURSES: a file this destroy refused to delete at ANY depth inside the
+    # folder must keep the folder, or Remove-Item -Recurse takes exactly the
+    # disk — including a shared, reserved one — that the survivor rule just
+    # refused. A same-spelling-prefix that is not under the folder (a sibling
+    # "lab-vm2-backup") does NOT count: containment is by path level.
     def file_lives_in?(hdd, folder)
-      parent = normalize_windows_path(hdd.path.to_s.split('\\')[0..-2]&.join('\\'))
-      !parent.empty? && parent.casecmp(folder.to_s).zero?
+      # Normalize BEFORE splitting: drive_deletion_allowed? (the neighbor that
+      # just refused this file) reads slash paths as the same path, so
+      # containment must not see a "C:/…" disk as one element — the pre-fix
+      # raw split made a slash-path refused disk "outside" and the recursion
+      # took it (round-29, inherited from base).
+      full = normalize_windows_path(hdd.path)
+      parent = normalize_windows_path(full.split('\\')[0..-2]&.join('\\'))
+      folder = normalize_windows_path(folder.to_s)
+      return false if parent.empty? || folder.empty?
+
+      parent.casecmp(folder).zero? || parent.downcase.start_with?("#{folder.downcase}\\")
     end
 
     # --- PLG-22: the drive rule (call-site path check) ----------------------------
