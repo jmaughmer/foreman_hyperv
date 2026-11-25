@@ -131,14 +131,15 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
     cr
   end
 
-  def bootdisk_create_attrs(foreman_firmware: 'uefi_secure_boot', provision_method: 'bootdisk')
+  def bootdisk_create_attrs(foreman_firmware: 'uefi_secure_boot', provision_method: 'bootdisk',
+                            firmware_type: 'EFI')
     {
       name: 'bd5.example.com',
       generation: 2,
       memory_startup: 1024,
       processor_count: 1,
       foreman_firmware: foreman_firmware,
-      firmware_type: 'EFI',
+      firmware_type: firmware_type,
       provision_method: provision_method,
       iso_upload_storage: 'C:\\ClusterStorage\\Volume1'
     }
