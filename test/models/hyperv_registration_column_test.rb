@@ -53,7 +53,7 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
     # CALLS, never the clock (any_instance so the pre-existing tests that
     # walk a retry path — stand-alone confirmation, raising roles — do
     # not each add seconds to every seed run).
-    ForemanHyperv::Hyperv.any_instance.stubs(:role_index_flap_pause)
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
   end
 
   # A cluster role exactly as fog's ClusterVirtualMachineRole answers it: the
@@ -295,7 +295,7 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
     roles = RolesDouble.new([elenas_role])
     fog = FlappingProbeFogDouble.new(roles, [false, true])
     cr = build_cr(fog)
-    cr.expects(:role_index_flap_pause).once
+    cr.expects(:flap_pause).once
 
     registration = cr.vm_registration(clustered_vm)
 
@@ -326,7 +326,7 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
                                  virtual_machine_id: ELENA, owner_node: 'HV-NODE2')
     roles = FlappingRolesDouble.new([elenas_role], raise_times: 1)
     cr = build_cr(FogDouble.new(roles))
-    cr.expects(:role_index_flap_pause).once
+    cr.expects(:flap_pause).once
 
     registration = cr.vm_registration(clustered_vm)
 
@@ -354,7 +354,7 @@ class HypervRegistrationColumnTest < ActiveSupport::TestCase
     roles = RolesDouble.new([elenas_role])
     fog = FlappingProbeFogDouble.new(roles, [true])
     cr = build_cr(fog)
-    cr.expects(:role_index_flap_pause).never
+    cr.expects(:flap_pause).never
 
     registration = cr.vm_registration(clustered_vm)
 

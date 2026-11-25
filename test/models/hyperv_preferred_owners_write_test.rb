@@ -123,7 +123,7 @@ class HypervPreferredOwnersWriteTest < ActiveSupport::TestCase
   def build_cr(fog)
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     cr.stubs(:client).returns(fog)
-    ForemanHyperv::Hyperv.any_instance.stubs(:role_index_flap_pause)
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
     cr
   end
 

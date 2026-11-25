@@ -27,7 +27,9 @@ require 'test_helper'
 #   4. the safety valves: non-default filters never ride a speculative read;
 #      a pipeline that cannot compose degrades to today's sequential path
 #      verbatim; ClusterNodeServers built directly knows nothing of the
-#      pipeline; a consumed failure warns once with the established text.
+#      pipeline; a failed probe hop is RE-ASKED on the thread (PLG-44),
+#      named once, and only a re-ask that itself raises folds to
+#      stand-alone with the established text.
 class HypervListingPipelineTest < ActiveSupport::TestCase
   HOST = 'hv-node1'
   CR_URL = "http://#{HOST}:5985/wsman".freeze
@@ -221,6 +223,13 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
     cr.vms.all(filters).map { |vm| vm.id.to_s.downcase }
   end
 
+  # PLG-44: the stand-alone leg here answers the gate no, which is now
+  # re-asked once across a pause; the suite stubs the pause so the doctrine
+  # runs without the clock.
+  setup do
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
+  end
+
   # ---- 1: the endpoint-side reads overlap ----
 
   def test_the_probe_the_node_list_and_the_endpoint_rows_are_read_at_the_same_time
@@ -333,16 +342,80 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
     assert_equal 1, @client_fog.rows_calls
   end
 
-  def test_a_failing_probe_still_answers_standalone_and_warns_like_today
+  def test_a_failing_probe_asked_directly_yes_keeps_the_cluster_page
     overlap = Overlap.new
+    cr = build_cr(overlap: overlap, probe_error: Timeout::Error)
+    # PLG-44: the failed hop is a could-not-answer, not a no. Asked directly
+    # ONCE (a yes pays no re-ask), the endpoint stays a cluster and the page
+    # keeps the listing it should always have had — the fold this replaces
+    # cached an empty one for up to three hours (review F12).
+    @client_fog.expects(:supports_clusters?).once.returns(true)
+    ids = nil
+
+    warns = capture_warns { ids = listed_ids(cr) }
+
+    assert_includes ids, NODE2_VM, 'a probe that cannot answer is asked of the endpoint, not answered false'
+    assert_equal 1, warns.count { |m| m.include?('pipelined cluster probe for lab-cr failed') },
+                 'the failed hop is named once with its own words'
+    assert_equal 0, warns.count { |m| m.include?('cluster support for lab-cr could not be read') },
+                 'an answered yes is not a fold'
+  end
+
+  def test_a_failing_probe_re_asked_no_twice_answers_standalone
+    overlap = Overlap.new
+    cr = build_cr(overlap: overlap, probe_error: Timeout::Error)
+    # The re-ask is the doctrine: ONE more ask, and two consistent noes are
+    # the verdict — the stand-alone collection exactly as before PLG-44.
+    @client_fog.expects(:supports_clusters?).twice.returns(false)
+    result = nil
+
+    warns = capture_warns { result = cr.vms }
+
+    assert_same @client_fog.servers, result,
+                'asked directly and re-asked, two noes are the stand-alone page, unchanged'
+    assert_equal 1, warns.count { |m| m.include?('pipelined cluster probe for lab-cr failed') },
+                 'the failed hop is named even when the re-ask resolves it'
+  end
+
+  def test_a_failing_probe_asked_directly_and_raising_folds_to_standalone_as_today
+    overlap = Overlap.new
+    # Both the hop and the thread's own first ask raise (build_cr gives both
+    # fogs the probe error), so there is no re-ask at all: fog outside its
+    # swallow-everything contract keeps the established fold and the
+    # established words.
     cr = build_cr(overlap: overlap, probe_error: Timeout::Error)
     result = nil
 
     warns = capture_warns { result = cr.vms }
 
     assert_same @client_fog.servers, result,
-                'a probe that cannot answer is answered false — the stand-alone path'
+                'an ask that RAISES is fog outside the contract — the established fold'
+    assert_equal 1, warns.count { |m| m.include?('pipelined cluster probe for lab-cr failed') },
+                 'the failed hop is named with its own words'
     assert_equal 1, warns.count { |m| m.include?('cluster support for lab-cr could not be read') },
-                 'the consumed failure warns with the same words the sync read used'
+                 'the established words still close the raise leg'
+  end
+
+  def test_a_failing_probe_re_asked_no_then_raising_folds_to_standalone
+    overlap = Overlap.new
+    # The leg the gate's comment documents and the legs above left unrun:
+    # the hop raises, the direct ask answers NO, and the RE-ASK — the one
+    # the pause comes before — is what raises. It rides the same outer
+    # rescue: the established fold, the established words, on top of the
+    # named hop.
+    cr = build_cr(overlap: overlap, probe_error: Timeout::Error)
+    # twice: the direct ask (NO) and the re-ask (the raise) are the two
+    # invocations this leg drives; mocha's default is exactly one.
+    @client_fog.expects(:supports_clusters?).twice.returns(false).raises(Timeout::Error)
+    result = nil
+
+    warns = capture_warns { result = cr.vms }
+
+    assert_same @client_fog.servers, result,
+                'a re-ask that RAISES folds exactly like a first ask that raises'
+    assert_equal 1, warns.count { |m| m.include?('pipelined cluster probe for lab-cr failed') },
+                 'the failed hop is still named with its own words'
+    assert_equal 1, warns.count { |m| m.include?('cluster support for lab-cr could not be read') },
+                 'the established words close the re-ask leg too'
   end
 end

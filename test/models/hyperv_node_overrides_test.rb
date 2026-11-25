@@ -133,6 +133,9 @@ class HypervNodeOverridesTest < ActiveSupport::TestCase
     rescue LoadError
       skip 'mocha is not available outside the Foreman bundle.'
     end
+    # PLG-44: a stand-alone CrFog now pays one gate re-ask across a pause;
+    # the suite stubs the pause so the doctrine runs without the clock.
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
     skip 'the hyperv_node_overrides column has not been migrated in this test database' unless overrides_column?
   end
 

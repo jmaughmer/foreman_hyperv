@@ -292,7 +292,7 @@ class HypervRoleIndexLaneTest < ActiveSupport::TestCase
   setup do
     # The sync path's flap pauses really sleep (PLG-35); this suite pins the
     # CALLS, never the clock.
-    ForemanHyperv::Hyperv.any_instance.stubs(:role_index_flap_pause)
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
   end
 
   # ---- 1/2: the gate starts the read, the render consumes it, own client idle ----
@@ -340,10 +340,10 @@ class HypervRoleIndexLaneTest < ActiveSupport::TestCase
                    cr.node_fogs.values.sum { |f| f.roles_calls },
                  'one role listing answers the whole page, wherever it rode'
     assert_equal 0, @client_fog.roles_calls, 'and it was never the render re-asking'
-    assert_equal 2, @client_fog.probe_calls,
-                 'the resource client answers EXACTLY endpoint_cluster\'s two probes (its own ' \
-                 'gate check and the one _clusters re-asks) — both predate this PR; the role ' \
-                 'index confirmed nothing again'
+    assert_equal 1, @client_fog.probe_calls,
+                 'the resource client answers EXACTLY endpoint_cluster\'s gate check — PLG-44 ' \
+                 'retired the second probe _clusters used to ask by riding this confirmed answer; ' \
+                 'the role index confirmed nothing again'
   end
 
   # ---- 3: an empty lane is an answer, not a failure ----
