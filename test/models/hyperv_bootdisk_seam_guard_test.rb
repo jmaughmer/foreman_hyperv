@@ -290,20 +290,24 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
   test 'Host#update dispatches the carry BEFORE hyperv_add_attributes' do
     host = Host::Managed.new(name: 'bd5.example.com')
     host.stubs(:provider).returns('Hyper-V')
+    # save is NOT the subject — and it must not depend on test-DB state (a
+    # shuffle left this host VALID once, which both flipped the return value
+    # and LEAKED a row). The dispatch and its ORDER are the subject: both
+    # expectations must be met before update returns. Dropping engine.rb's
+    # prepend of HostManagedExtensions fails this test while every
+    # direct-call test above stays green.
+    host.stubs(:save).returns(false)
     seq = sequence('carry')
     host.expects(:hyperv_preserve_iso_upload_storage).in_sequence(seq)
     host.expects(:hyperv_add_attributes).in_sequence(seq)
 
-    # The save fails (an unprovisioned host); the DISPATCH is the subject —
-    # both expectations must be met before update returns false. Dropping
-    # engine.rb's prepend of HostManagedExtensions fails this test while
-    # every direct-call test above stays green.
     assert_not host.update('compute_attributes' => { 'memory_startup' => '1024' })
   end
 
   test 'the REAL carry has run by the time hyperv_add_attributes sees the hash' do
     host = Host::Managed.new(name: 'bd5.example.com')
     host.stubs(:provider).returns('Hyper-V')
+    host.stubs(:save).returns(false)
     host.compute_attributes = { 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' }
     # Only the interface reconciliation is stubbed — the carry itself is the
     # real method, and the with-block proves its output arrived first.
