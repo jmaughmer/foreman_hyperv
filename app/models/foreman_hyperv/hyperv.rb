@@ -1996,7 +1996,7 @@ module ForemanHyperv
     end
 
     def client
-      @client ||= Fog::Compute.new(fog_client_options(url))
+      @client ||= note_endpoint_self_names(Fog::Compute.new(fog_client_options(url)))
     end
 
     # The one place a fog client's wire options are composed (PLG-33b): the
@@ -3902,9 +3902,12 @@ module ForemanHyperv
     # waits are identical by construction: both clients come from
     # fog_client_options. Never cached; the caller owns this one and every hop
     # on it is bounded by the PLG-16 waits, so a discarded speculative read
-    # cannot outlive the request that started it.
+    # cannot outlive the request that started it. PLG-43: composing it DOES
+    # note the endpoint's self-reported names on the resource (that is how a
+    # pipeline-backed listing knows the endpoint's own node) — the copy is
+    # uncached, the identity it reports is the endpoint's either way.
     def fresh_endpoint_client
-      Fog::Compute.new(fog_client_options(url))
+      note_endpoint_self_names(Fog::Compute.new(fog_client_options(url)))
     end
 
     # PLG-33b: the same independence for a node-routed dial (the pipeline's
@@ -4061,17 +4064,49 @@ module ForemanHyperv
       end
     end
 
-    # Whether the role's owner is the node this endpoint itself serves: the
-    # endpoint host fully qualified, or as the bare first label the NETBIOS
-    # name carries (case-insensitive). A first-label collision across two
-    # domains reads from the endpoint, misses, and answers nil — a miss,
-    # never a wrong machine, because GUIDs are unique and a node that does
-    # not host the GUID answers NotFound.
+    # PLG-43: keep the self-reported names an ENDPOINT fog client carries
+    # (fog answers them from FOG-27; older fog has no such method, answers
+    # nothing, or — discovery failed — an empty list, and in every one of
+    # those cases the note is not written and the identity rule below
+    # degrades to the URL). Written at the two places the endpoint itself is
+    # dialed — the resource's own client and the pipeline's fresh copies —
+    # and NOT by the per-node clients: a node client's self-report names
+    # that NODE, not the endpoint. This note is the rule's only way to get
+    # the names without dialing: the listing may already be answered by the
+    # pipeline's copies, and forcing the resource's own client inside a
+    # listing would add a fifth serial dial to a request that has four in
+    # flight. Returns the client so the composing call sites stay
+    # expressions.
+    def note_endpoint_self_names(fog_client)
+      return fog_client unless fog_client.respond_to?(:local_host_names)
+
+      names = fog_client.local_host_names
+      @endpoint_self_names = names.dup.freeze if names.present?
+      fog_client
+    end
+
+    # Whether the role's owner is the node this endpoint itself serves —
+    # the ONE rule (PLG-43, review F11) behind the bootdisk ride, the
+    # owner-node read, and the cluster listing's skip of the endpoint's own
+    # node. It matches, case-insensitively, against the names the endpoint
+    # REPORTED for itself at connect when an endpoint dial answered them
+    # (note_endpoint_self_names) — those are the only names that survive an
+    # IP or CNAME URL, because matched as a node name the URL host of
+    # 10.0.0.5 reduces to its first label, '10' — and, always, against the
+    # URL host itself and that first label, the documented fallback that is
+    # the whole rule when fog reports nothing. A first-label collision
+    # across two domains reads from the endpoint, misses, and answers
+    # false — a miss, never a wrong machine, because GUIDs are unique and a
+    # node that does not host the GUID answers NotFound.
     def endpoint_serves_node?(node_name)
-      endpoint = endpoint_host_name
-      return false if endpoint.nil? || node_name.blank?
+      return false if node_name.blank?
 
       asked = node_name.to_s.strip.downcase
+      return true if @endpoint_self_names&.include?(asked)
+
+      endpoint = endpoint_host_name
+      return false if endpoint.nil?
+
       asked == endpoint || asked == endpoint.split('.').first
     end
 
