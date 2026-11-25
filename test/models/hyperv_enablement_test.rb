@@ -630,7 +630,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     # attempt re-reads. The boolean said false here and the destroy went.
     cr, = build_cr(full_fog)
     d1 = FakeHdd.new('d1', 'C:\ClusterStorage\Volume1\lab-vm2\disk1.vhdx')
-    vm = attributed_vm(drives: [d1], owner_node: 'hv-node2', role_answer: nil)
+    vm = attributed_vm(clustered: false, drives: [d1], owner_node: 'hv-node2', role_answer: nil)
     assert_equal false, vm.clustered?, 'the boolean collapse the bug rode on'
     error = assert_raises(ForemanHyperv::OperationRefused) { enabled_destroy(cr, vm, state: :clustered) }
     assert_includes error.message, 'cluster role did not answer'
@@ -644,6 +644,7 @@ class HypervEnablementTest < ActiveSupport::TestCase
     cr, = build_cr(full_fog)
     d1 = FakeHdd.new('d1', 'C:\ClusterStorage\Volume1\lab-vm2\disk1.vhdx')
     vm = attributed_vm(drives: [d1], owner_node: 'hv-node2', role_answer: false)
+    vm.set_preflight("NAMES:Virtual Machines;#{GUID}.vmcx")
     assert enabled_destroy(cr, vm, state: :clustered)
     assert_empty vm.calls.select { |c| c.is_a?(Array) && c.first == :run_cmdlist },
                  'a machine the cluster answered no role for has nothing to release'
