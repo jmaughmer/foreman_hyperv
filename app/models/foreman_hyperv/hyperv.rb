@@ -121,9 +121,11 @@ module ForemanHyperv
     # vacuously true there and kept for the shape of the check.
     # A fog missing any one is the pre-enablement era again, and every
     # operation this PR unlocks refuses exactly as it refused before. The
-    # constant is FOG-9's, and the plugin gate trusts it for the rule behind
-    # it (R13): the builder validator and the connection gate are ONE pure
-    # function there, so there is nothing here for a second list to re-prove.
+    # constant did not ship whole — it landed with the tri-state entry alone
+    # and grew one entry per behaviour, so it is not FOG-9's; the gate trusts
+    # each entry for the rule behind it (R13): input_hardening's builder
+    # validator and connection gate are ONE pure function in fog, so there is
+    # nothing there for a second list to re-prove.
     # (PLG-5b grew the set with FOG-8's sixth: the capacity read PLG-14 puts
     # in front of placement stands or falls on that projection.)
     ENABLEMENT_CAPABILITIES = {
@@ -2024,7 +2026,8 @@ module ForemanHyperv
     # false on every stand-alone host — permanently pre-enablement, bootdisk
     # and disk removal unreachable — and dropped clustered hosts out of the
     # enablement on any transport flap. Existence is the build property; the
-    # answer value is endpoint state, and endpoint state is not an era.
+    # answer of one fingerprint is endpoint state, and endpoint state is not
+    # an era — none of the six is worth asking.
     # @return [Boolean] does the installed fog carry the enablement's list
     #   and do its clients provide all six fingerprints?
     def enablement_supported?
@@ -2044,6 +2047,10 @@ module ForemanHyperv
         list.exclude?(capability) || !client_provides?(client, predicate)
       end.keys
     rescue StandardError
+      # Fail closed, and say why: without this line the operator sees only
+      # the era refusal ("upgrade fog-hyperv") when the real fact is that no
+      # client could be inspected at all. No exception text is quoted.
+      logger.warn 'The enablement era check could not inspect the fog client; every behaviour counts as missing.'
       ENABLEMENT_CAPABILITIES.keys
     end
 

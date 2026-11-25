@@ -19,12 +19,14 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 # PLG-22: the enablement. With FOG-10/11/14/15, PLG-15b/15c/21b/5a and FOG-9
 # merged and fog deployed at the pinned build, the plugin's remaining refusals
 # lift — but they lift CONDITIONALLY, on the fog actually installed: every
-# unlocked operation first asks the client all six capability predicates (the
-# CAPABILITIES constant AND supports_*? answering true), and a fog missing any
-# of them gets the pre-enablement refusals verbatim, word for word, in the
-# pre-enablement order (a cluster ask refused before the endpoint is read; the
-# stand-alone create gate refusing before any placement membership is
-# consulted). Enablement is a property of the fog+plugin PAIR.
+# unlocked operation first PROVIDE-checks the era STATICALLY (the CAPABILITIES
+# constant AND respond_to? on each supports_*? fingerprint — PLG-38: no
+# predicate is ever called; a predicate's answer is endpoint state, not era),
+# and a fog missing any of them gets the pre-enablement refusals verbatim,
+# word for word, in the pre-enablement order (a cluster ask refused before
+# the endpoint is read; the stand-alone create gate refusing before any
+# placement membership is consulted). Enablement is a property of the
+# fog+plugin PAIR.
 #
 # The destructive decisions are made entirely plugin-side, before anything is
 # mutated:
