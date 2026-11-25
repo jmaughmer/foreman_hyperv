@@ -73,9 +73,12 @@ module ForemanHyperv
       # hyperv_receive_timeout on EVERY composed client (the PLG-16 waits,
       # WINRM_OPERATION_TIMEOUT/WINRM_RECEIVE_TIMEOUT). So each hop's fog call
       # ends on its own, complete/fail_with fires on that thread, and the queue
-      # is always written. If that factory ever stopped setting the waits, this
-      # pop could block a page thread forever on a stalled cold hop — the test
-      # fails RED before that regression ever ships.
+      # is always written. If that factory ever stopped setting the waits,
+      # this pop would outlive every bound THIS plugin guarantees — the hop
+      # would ride the gem's own timeout guesses, the very thing PLG-16
+      # refused to rely on — and a stalled cold hop could hold a page thread
+      # well past any page's worth of waiting. The test fails RED before that
+      # regression ever ships.
       def value
         kind, payload = @queue.pop
         raise payload if kind == :error

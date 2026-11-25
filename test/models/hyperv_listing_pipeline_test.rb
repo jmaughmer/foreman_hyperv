@@ -33,7 +33,9 @@ require 'test_helper'
 #   5. the unbounded Future#value pop (the page thread's wait) is only safe
 #      because EVERY pipeline hop client carries the PLG-16 WinRM waits —
 #      pinned so a future wire-option change cannot silently strip them and
-#      leave a page thread blocked forever on a stalled cold hop.
+#      leave the hops riding the gem's own timeout guesses (what PLG-16
+#      refused), a stalled cold hop holding a page thread past any bound
+#      this plugin guarantees.
 class HypervListingPipelineTest < ActiveSupport::TestCase
   HOST = 'hv-node1'
   CR_URL = "http://#{HOST}:5985/wsman".freeze
@@ -427,11 +429,13 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
 
   # A fog client for the composition pin. It answers the ONE call
   # fresh_endpoint_client's naming step makes (note_endpoint_self_names reads
-  # local_host_names when the client answers it) and nothing else — the hops
-  # themselves run into NoMethodError on this double, which is exactly right:
-  # this test is about the WIRE each hop client was composed with, and the
-  # futures answer (complete or fail_with) either way, so no consumer can
-  # block while mocha verifies the compositions.
+  # local_host_names when the client answers it) and nothing else — the nodes
+  # and rows hops run into NoMethodError on this double (exactly right: this
+  # test is about the WIRE each hop client was composed with), the probe hop
+  # answers false through its own respond_to?(:supports_clusters?) guard and
+  # the role lane never starts without a block — and the futures answer
+  # (complete or fail_with) either way, so no consumer can block while mocha
+  # verifies the compositions.
   class PipelineHopClient
     def local_host_names
       []
@@ -442,12 +446,13 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
   # the operator accepted it (review observation 3, 2026-11-25) on the
   # invariant that no hop can run unbounded, because every client the pipeline
   # rides carries the PLG-16 waits. (Queue#pop's own timeout keyword is not on
-  # this runtime either — the CT's ruby is 3.0 — so even a defensive pop
-  # would be a second guess on top of the waits' one.) The four clients all
-  # come through fresh_endpoint_client -> fog_client_options; this pins that
-  # the wire the pipeline speculates on is the SAME waited wire the sequential
-  # page dials, so the pop-site comment can keep its promise and a factory
-  # that ever drops a wait fails HERE, not as a hung page thread later.
+  # this runtime either — the suite's ruby is 3.0.7, the keyword is 3.2+ — so
+  # even a defensive pop would be a second guess on top of the waits' one.)
+  # The four clients all come through fresh_endpoint_client ->
+  # fog_client_options; this pins that the wire the pipeline speculates on is
+  # the SAME waited wire the sequential page dials, so the pop-site comment can
+  # keep its promise and a factory that ever drops a wait fails HERE, not as a
+  # hung page thread later.
   def test_every_pipeline_hop_client_carries_the_winrm_waits
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     composed = []
