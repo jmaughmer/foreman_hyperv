@@ -485,6 +485,21 @@ module ForemanHyperv
                                  'the files on one node’s local disk, off the cluster. Nothing was ' \
                                  'asked of the host and nothing was created.'
 
+    # PLG-46 (review observation 1): a create ROUTED to a named node used to take
+    # its config root from the endpoint's own hypervisor read even when no volume
+    # was placed — a different machine's answer, and possibly that machine's
+    # local disk, landing the config files off the node that owns and runs the
+    # machine. The routed node's own read answers instead, and a node that
+    # answers no root is refused, not guessed — the same one-node-local-disk
+    # fact STORAGE_BLANK_PATH_REFUSAL refuses for volumes, arriving from the
+    # route instead of from the volume.
+    ROUTED_CONFIG_ROOT_REFUSAL = 'Refusing to create the virtual machine on the routed node ' \
+                                 '%<node>s: the node answers no virtual machine config root, and the ' \
+                                 'compute resource’s endpoint answers a different machine’s root — a ' \
+                                 'guessed root lands the config files on one machine’s local disk, off ' \
+                                 'the node that owns the machine. Nothing was asked of the host and ' \
+                                 'nothing was created.'
+
     # The self rung's refusal (N6): a target that is not the endpoint's own
     # machine is per-node territory, and per-node addressing needs an
     # identity. Failing closed here is the pre-registered shipping state,
@@ -1193,7 +1208,9 @@ module ForemanHyperv
       # the node's local disk, and the placement folder join named the disk
       # folder relatively (C:\<name>) — and both guesses put files where
       # the cluster cannot follow them. The stand-alone case (no storage at
-      # all) keeps its honest fallback below, untouched.
+      # all) keeps its honest fallback below, untouched — PLG-46 later read
+      # that fallback for the endpoint's own machine only: a create routed to
+      # a named node now hears its root from that node instead.
       if storage && storage.id.to_s.strip.empty?
         raise ForemanHyperv::OperationRefused, format(STORAGE_BLANK_PATH_REFUSAL, volume: storage.name)
       end
@@ -1254,10 +1271,28 @@ module ForemanHyperv
       # built a model and sent nothing, so this raise tears nothing down.
       raise ForemanHyperv::OperationRefused, SELF_RUNG_REFUSAL unless routed_via_node || self_rung?(vm)
 
+      # PLG-46: the config root is named by the machine's OWN host. The placed
+      # volume answers for a create placed on the cluster; a routed create with
+      # no volume answers through the routed node's own client, whose read is
+      # the machine's host's answer; the endpoint's hypervisor read answers the
+      # self rung, exactly as PLG-14 left it. What never answers is the
+      # endpoint's read for a machine routed to another machine — the pre-PLG-46
+      # `storage&.id || hypervisor.virtual_machine_path` fallthrough — because
+      # that root may be the endpoint's local disk and the files named on it
+      # land off the node that runs the machine. servers.new has built a model
+      # and sent nothing, so the routed read's refusal tears nothing down.
+      config_root = if storage
+                      storage.id
+                    elsif routed_via_node
+                      routed_config_root(build_client, attr[:computer_name])
+                    else
+                      hypervisor.virtual_machine_path
+                    end
+
       vm.create(
         # TODO: should be :VHD if image build - when image build support exists
         boot_device: attr[:boot_device].present? ? attr[:boot_device].to_sym : :NetworkAdapter,
-        path: storage&.id || hypervisor.virtual_machine_path
+        path: config_root
       )
       # The host's New-VM answer merges back over the model with every
       # return field — and placement is not something a host knows: it
@@ -4036,6 +4071,21 @@ module ForemanHyperv
       @node_clients ||= {}
       @node_clients[node_name.to_s.strip.downcase] ||=
         Fog::Compute.new(fog_client_options(node_endpoint(node_name)))
+    end
+
+    # PLG-46: the config root of a create routed to a node is read FROM THE
+    # NODE, through the same client the machine rides — a host's
+    # VirtualMachinePath is its own, and the endpoint's hypervisor read answers
+    # the endpoint's machine, not the routed one. A node answering no root is
+    # refused, not guessed (PLG-14 doctrine), and a read that cannot answer at
+    # all (transport, refusal) travels up untouched: an unanswered read is no
+    # answer either, and the create must not stand on it. servers.new has sent
+    # nothing before this, so the refusal has nothing to tear down.
+    def routed_config_root(node_client, node_name)
+      root = node_client.hosts.first.virtual_machine_path
+      return root if root.to_s.strip.present?
+
+      raise ForemanHyperv::OperationRefused, format(ROUTED_CONFIG_ROOT_REFUSAL, node: node_name)
     end
 
     # PLG-33b: an INDEPENDENT client for the same endpoint the resource's own
