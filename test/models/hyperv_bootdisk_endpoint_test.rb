@@ -70,11 +70,23 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
   class MachineStub
     attr_reader :id, :state, :generation, :computer_name
 
-    def initialize(id = HypervBootdiskEndpointTest::UUID, state: :Off, generation: :UEFI, computer_name: 'HV-NODE1')
+    def initialize(id = HypervBootdiskEndpointTest::UUID, state: :Off, generation: :UEFI,
+                   computer_name: 'HV-NODE1', secure_boot: false)
       @id = id
       @state = state
       @generation = generation
       @computer_name = computer_name
+      @secure_boot = secure_boot
+    end
+
+    # PR-5: the ride check refuses Secure Boot off the LIVE model
+    # (FogExtensions::Hyperv::Server#foreman_firmware_type). This suite tests
+    # the endpoint wiring, so the stub answers the real shape with Secure
+    # Boot off; the refusal itself is pinned in hyperv_bootdisk_iso_test.rb.
+    def foreman_firmware_type
+      return 'bios' if generation == :BIOS
+
+      @secure_boot ? 'uefi_secure_boot' : 'uefi'
     end
   end
 
