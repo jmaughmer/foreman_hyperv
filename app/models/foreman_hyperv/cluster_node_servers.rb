@@ -114,10 +114,11 @@ module ForemanHyperv
 
     # Yields each registration read: the endpoint's own rows first, then every
     # cluster node the endpoint does not already speak for. The endpoint's own
-    # node appears in the cluster's node list (measured); it is named by the
-    # URL the resource was built with, and the endpoint read above already
-    # covers it — asking the ladder too would spend a second WinRM round trip
-    # on the same answer.
+    # node appears in the cluster's node list (measured); endpoint_serves_node?
+    # is what recognizes it — the URL host and its first label always, plus
+    # the endpoint's self-reported names once fog (FOG-27) carries them —
+    # and the endpoint read above already covers it, so asking the ladder
+    # too would spend a second WinRM round trip on the same machine.
     #
     # PLG-33: the reads are independent and each touches exactly one fog
     # client, so they run concurrently — the sequential ladder measured ~10 s
@@ -144,9 +145,8 @@ module ForemanHyperv
     # its rows and warns, exactly as a node whose read fails does.
     def sources_for(names, filters)
       sources = [{ node: nil, read: -> { endpoint_vms(filters) } }]
-      own = @cr.send(:endpoint_host_name)
       names.each do |node|
-        next if own.present? && node.casecmp?(own)
+        next if @cr.send(:endpoint_serves_node?, node)
 
         begin
           node_client = @cr.send(:client_for_node, node)
