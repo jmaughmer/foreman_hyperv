@@ -215,8 +215,14 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
   end
 
   # An era fog missing one enablement predicate: the pull and attach refuse.
+  # The pre-era fog for this suite. PLG-38: the era check PROVIDE-checks the
+  # fingerprints (respond_to?) and never calls them, so the pre-era shape is
+  # the ABSENCE of the input_hardening fingerprint — answering false is no
+  # longer what drops a fog out of the era (cluster state, not build state).
   class FogNoEra < FogBootdisk
-    def supports_input_hardening? = false
+    def respond_to?(name, *include_all)
+      name.to_sym == :supports_input_hardening? ? false : super
+    end
   end
 
   def build_cr(fog, roots: ['C:\VMs', 'C:\ClusterStorage\Volume1'], state: :Off,
