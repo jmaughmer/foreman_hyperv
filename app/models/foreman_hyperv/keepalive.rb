@@ -30,10 +30,16 @@ module ForemanHyperv
   # PLG-34's per-tick try-lock serialized OVERLAPPING ticks only, so N
   # threads beat at N independent phases per interval — up to N full
   # page-loads of dialing where one was meant. The election fixes the beat
-  # COUNT, not just the overlap: the bucket is
+  # COUNT for threads that wake on the shared boundary grid, not just the
+  # overlap: the bucket is
   # pg_try_advisory_xact_lock(KEY, (now / interval).floor) — SINCE PLG-42 a
   # TRANSACTION-scoped lock acquired inside the transaction that spans the
-  # beat, so COMMIT OR ROLLBACK ALWAYS RELEASES IT. Nothing can strand an
+  # beat, so COMMIT OR ROLLBACK ALWAYS RELEASES IT. (Its limit, by
+  # construction: a thread woken LATE into an epoch whose winner already
+  # committed wins that epoch's bucket again — same-epoch re-requests
+  # always succeed — and it is the layer below, with_single_runner, that
+  # refuses dialing CONCURRENTLY with the still-running beat.)
+  # Nothing can strand an
   # owned epoch: no release path exists to lose, no dead-man's lock waits
   # for a connection reaper, a killed worker is simply an epoch the next
   # boundary re-elects. Losing is settled AT THE BOUNDARY: every thread on
@@ -62,7 +68,9 @@ module ForemanHyperv
   # column and the interval are dynamic settings, and a thread that skipped
   # booting because nothing was tick-listed could never be woken when an
   # admin enables one — the idle cost is now what it always should have
-  # been: one pluck SELECT per interval and zero held connections.
+  # been: zero held connections, and per interval only the selection pluck
+  # plus what User.as_anonymous_admin resolves around it — no lock, no
+  # transaction (pinned by the suite's idle-beat SQL capture).
   module Keepalive
     # PLG-34b B1: the default fell 300 -> 60. The measured reason (Pass 70,
     # §70): in a real lab the warmth decays below the human-readable band
@@ -84,11 +92,11 @@ module ForemanHyperv
     # commit, un-strandable); the serialization half stays session-scoped,
     # explicitly released inside the same beat's connection lease.
     ADVISORY_LOCK_KEY = 48_175_301
-    # Per-thread bookkeeping. PLG-42 retired the owned-epoch thread-local:
-    # the xact lock's lifetime is the beat's own transaction, so there is
-    # no held-bucket bookkeeping left to keep. What remains is the loss
-    # flag the loop's telemetry reads.
-    LOST_THREAD_KEY = :foreman_hyperv_keepalive_lost
+    # PLG-42 retired the owned-epoch thread-local AND the loss thread-local:
+    # the xact lock's lifetime is the beat's own transaction, so there is no
+    # held-bucket bookkeeping left to keep, and the loss state is a property
+    # of the PROCESS's last beat, not of whichever thread happens to ask —
+    # it lives in @lost_last_beat, read via lost_last_beat?.
 
     class << self
       # Tests drive the tick directly; the thread is a production creature.
@@ -100,8 +108,9 @@ module ForemanHyperv
       # tick-listed at boot could never be woken by an admin enabling one
       # later. What the idle thread costs is now bounded by construction:
       # beat_once leases and returns, so between beats it holds no connection
-      # at all, and the per-interval cost of an all-disabled install is one
-      # pluck SELECT (see tick_all's selection-first ordering).
+      # at all, and an all-disabled beat is the selection pluck and its
+      # user context — no lock, no transaction (see tick_all's
+      # selection-first ordering; the idle-beat SQL capture pins it).
       def start!
         return @thread if @thread
         return nil if Rails.env.test?
@@ -150,8 +159,9 @@ module ForemanHyperv
       # while another tick is still dialing (the two locks, and what each
       # buys, are documented on their methods). Returns the ids whose tick
       # completed without raising — a failed resource is still ticked (and
-      # warned, throttled), it just is not reported as an answer. Empty
-      # list, zero cost beyond one SELECT.
+      # warned, throttled), it just is not reported as an answer. An empty
+      # selection costs nothing but the pluck and its user context — no
+      # transaction, no lock.
       #
       # The beat runs AS THE ANONYMOUS ADMIN, and it is load-bearing: the
       # scheduler thread has no logged-in user, and Foreman's per-user
@@ -168,23 +178,27 @@ module ForemanHyperv
       # with nothing enabled the beat opens no transaction and takes no
       # lock, which is the idle cost PLG-42 set out to make honest.
       def tick_all
-        Thread.current[LOST_THREAD_KEY] = nil
+        @lost_last_beat = false
         User.as_anonymous_admin do
           ids = ForemanHyperv::Hyperv.where(hyperv_keepalive: true).order(:id).pluck(:id)
           next [] if ids.empty?
 
           # One transaction spans the election and the dialing. The plain
-          # call carries the semantics deliberately: on every Rails this
-          # plugin runs on, a transaction with one already open JOINS it
-          # (no savepoint, no lie about nesting — a rake task driving a
-          # manual beat lends its transaction to the election, and the
-          # xact lock releases at that CALLER's commit, still bounded by
-          # the call), and with none open it starts one for the beat. (No
-          # join: kwarg — Rails 7.0 does not know it; the default IS the
-          # joinable behavior 7.1 later made explicit.)
+          # call carries the semantics deliberately: its default
+          # joinable: true is exactly the join-if-open behavior wanted
+          # here — a caller that already holds a JOINABLE transaction (a
+          # rake task driving a manual beat) lends it to the election and
+          # the xact lock releases at that CALLER's commit, still bounded
+          # by the call; with none open, this starts one for the beat. A
+          # non-joinable outer (transactional tests run in one) instead
+          # gets a SAVEPOINT — and a savepoint release is not a
+          # transaction end, so the bucket lives until the real commit or
+          # rollback. No explicit kwarg needed on any Rails this plugin
+          # runs on (7.0 spells the option joinable:, 7.1 added join:;
+          # the default we rely on is identical in both).
           ActiveRecord::Base.transaction do
             won = elect_this_beat
-            Thread.current[LOST_THREAD_KEY] = won.nil?
+            @lost_last_beat = won.nil?
             next [] if won.nil?
 
             ticked = []
@@ -209,11 +223,22 @@ module ForemanHyperv
       # RETURNS IT before the loop sleeps. A thread that beats for five
       # seconds a minute holds a connection for five seconds a minute.
       # Returns what tick_all reports (the ticked ids); an empty selection
-      # never ran an election and costs one SELECT.
+      # never ran an election and opened no transaction or lock.
       def beat_once
         Rails.application.executor.wrap do
           ActiveRecord::Base.connection_pool.with_connection { tick_all }
         end
+      end
+
+      # Operator seam, PLG-42: did THIS PROCESS's last beat lose the epoch
+      # election? Process-level, not thread-level — losing an epoch is a
+      # fact about the beat that just ran, and on a multi-node cluster this
+      # is the one-line answer to "is MY process the beater, or is another
+      # node winning?" (run_loop logs it at debug every lost beat). A
+      # manual rake-driven beat shares the flag with the scheduler thread;
+      # this is a diagnostic readout, last beat wins.
+      def lost_last_beat?
+        @lost_last_beat == true
       end
 
       # One resource, one tick, loudly once at most. The rescue is the
@@ -263,22 +288,35 @@ module ForemanHyperv
         return true unless postgres?(connection)
 
         epoch = beat_epoch
-        won = connection.select_value(
-          "SELECT (pg_try_advisory_xact_lock(#{ADVISORY_LOCK_KEY}, #{epoch}))::text AS won"
-        )
-        # The answer is TEXT — pg answers the ::text cast with the strings
-        # 'true'/'false' (a raw boolean column arrives typecast, and the
-        # text protocol has yet another shape), and EVERY non-empty string
-        # is truthy in Ruby: 'false' as a truthiness test hands every epoch
-        # to every process. The ActiveModel boolean type is the reader that
-        # knows the false spellings ('f', 'false', false, 0...) from the
-        # true ones on any adapter. TRUE / NIL, never false: the caller
-        # tells "lost" from every other answer with .nil?.
+        won = nil
+        # A savepoint around JUST the try. In Postgres a savepoint boundary
+        # is not a transaction boundary, so on the success path this changes
+        # nothing — the xact bucket still lives until the beat's REAL
+        # transaction ends. Its job is the failure path: if this SELECT
+        # itself errors (a pg-claiming adapter without the function, a
+        # statement timeout), the savepoint rollback clears the aborted
+        # state instead of poisoning every statement the beat still has to
+        # run with "current transaction is aborted".
+        ActiveRecord::Base.transaction(requires_new: true) do
+          won = connection.select_value(
+            "SELECT (pg_try_advisory_xact_lock(#{ADVISORY_LOCK_KEY}, #{epoch}))::text AS won"
+          )
+        end
+        # The answer arrives as TEXT in spellings that differ by path — the
+        # ::text cast answers 'true'/'false' (measured on the CI Postgres),
+        # the text protocol spells them 't'/'f' — and every non-empty
+        # spelling is a TRUTHY STRING in Ruby. The ActiveModel boolean type
+        # is what makes every false-spelling false and every true-spelling
+        # true on any adapter, without an exact-string trust. TRUE / NIL,
+        # never false: the caller tells "lost" from every other answer
+        # with .nil?.
         ActiveModel::Type::Boolean.new.cast(won) ? true : nil
       rescue ActiveRecord::StatementInvalid
-        # No such function on this adapter (an exotic DB the adapter check
-        # missed): degrade to everyone-beats, PLG-37c's self-test names the
-        # regime.
+        # The election could not run at all: degrade to everyone-beats,
+        # the pre-election PLG-34 behavior. The savepoint above is what
+        # makes this degradation real — without it the failed try aborts
+        # the beat's transaction, every following statement fails, and
+        # "everyone beats" would silently be "nobody beats, forever".
         true
       end
 
@@ -318,10 +356,15 @@ module ForemanHyperv
       # (0, interval]: landing exactly ON a boundary belongs to the epoch
       # beginning then, so a beat that finished exactly on a boundary still
       # sleeps a whole interval rather than double-beating the epoch it
-      # just finished. Public seam: this is the pacing the loop runs on,
-      # and the suite pins it the way PLG-34b pinned sleep_seconds_after.
-      def seconds_until_next_boundary(interval)
-        interval - (Time.now.to_f % interval)
+      # just finished. Paced from the SAME stubbable clock seam the epoch
+      # formula uses (now_seconds), so epoch and pacing can never be
+      # stubbed apart; the whole-second truncation makes the wake land up
+      # to a second INTO the new epoch — the grid is whole seconds, and the
+      # election is what decides the beat, not the sub-second wake timing.
+      # Public seam: this is the pacing the loop runs on, and the suite
+      # pins it the way PLG-34b pinned sleep_seconds_after.
+      def seconds_until_next_boundary(interval, now = now_seconds)
+        interval - (now % interval)
       end
 
       # Postgres advisory lock, session-scoped: the scheduler that cannot
@@ -342,9 +385,18 @@ module ForemanHyperv
       # second beat from dialing CONCURRENTLY with the first. Session scope
       # is required by that job (it must outlive statements), and the
       # explicit release below happens inside the SAME beat's connection
-      # lease (beat_once), before the connection goes back to the pool —
-      # the pool reaper remains the self-heal for a release that never
-      # runs, exactly as before.
+      # lease (beat_once), before the connection goes back to the pool.
+      #
+      # When the release cannot run — the tick poisoned the beat's
+      # transaction (any query error leaves Postgres aborting, and the
+      # unlock itself then raises InFailedSqlTransaction), or the beat died
+      # between try and unlock — the session lock stays on that backend
+      # until the BACKEND ends (Postgres releases session advisory locks
+      # at connection close; a pooled re-acquire from a later beat stacks,
+      # it does not clear). That is the real self-heal: the pool eventually
+      # reaps the old backend. The rescue below keeps the failed unlock
+      # from masking the beat's actual error at the one moment the operator
+      # most needs to read it.
       def with_single_runner
         connection = ActiveRecord::Base.connection
         return yield unless postgres?(connection)
@@ -355,7 +407,11 @@ module ForemanHyperv
         begin
           yield
         ensure
-          connection.select_value("SELECT pg_advisory_unlock(#{ADVISORY_LOCK_KEY})")
+          begin
+            connection.select_value("SELECT pg_advisory_unlock(#{ADVISORY_LOCK_KEY})")
+          rescue ActiveRecord::StatementInvalid
+            nil # aborted transaction: the unlock cannot run; do not mask the real error
+          end
         end
       end
 
@@ -368,7 +424,7 @@ module ForemanHyperv
       # transaction.)
       def reset_state
         stop!
-        Thread.current[LOST_THREAD_KEY] = nil
+        @lost_last_beat = false
         @last_warn = {}
         @warn_window_seconds = nil
       end
@@ -395,6 +451,12 @@ module ForemanHyperv
           sleep_interval(seconds_until_next_boundary(interval_seconds))
           begin
             beat_once
+            # Operator readout for the multi-node dedup (PLG-42): on an
+            # N-node cluster N-1 processes lose every epoch, so this is
+            # debug-level — the one line that answers "is MY process the
+            # beater?" without a pg_locks query.
+            Rails.logger.debug 'Hyper-V keepalive: this process lost the epoch ' \
+                               'election and beat nothing.' if lost_last_beat?
           rescue StandardError => e
             Rails.logger.warn "Hyper-V keepalive tick failed: #{e.class}: " \
                               "#{e.message.to_s.lines.first.to_s.strip}"
