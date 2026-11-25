@@ -580,7 +580,7 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     # recorder opened is actually executing — an election outside the
     # beat's transaction reads 'f' (which is what Postgres would do to a
     # zero-lifetime xact lock at the next statement) and the beat loses.
-    cell = { in_xact: false, join_kwargs: [] }
+    cell = { in_xact: false, transaction_calls: 0 }
     fake = ElectionConnection.new
     fake.define_singleton_method(:select_value) do |sql|
       @select_calls += 1
@@ -596,7 +596,7 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     ar = ActiveRecord::Base.singleton_class
     ar.send(:alias_method, :__p42_orig_transaction__, :transaction)
     ar.send(:define_method, :transaction) do |**kwargs, &block|
-      cell[:join_kwargs] << kwargs
+      cell[:transaction_calls] += 1
       cell[:in_xact] = true
       begin
         __p42_orig_transaction__(**kwargs, &block)
@@ -615,8 +615,9 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
     assert_equal 1, seen.size,
                  'PLG-42: the xact election must run INSIDE the beat transaction — ' \
                  'tried outside, the lock dies before the dialing starts'
-    assert_equal 1, cell[:join_kwargs].count { |kw| kw[:join] == :joinable },
-                 'one beat-wide transaction, joinable so a caller-held transaction is not lied to'
+    assert_equal 1, cell[:transaction_calls],
+                 'one beat-wide transaction around election and dialing (its default ' \
+                 'join-if-open is what makes a caller-held transaction harmless)'
   end
 
   def test_beat_once_runs_the_beat_in_a_managed_connection_context

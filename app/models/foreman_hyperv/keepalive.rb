@@ -173,11 +173,16 @@ module ForemanHyperv
           ids = ForemanHyperv::Hyperv.where(hyperv_keepalive: true).order(:id).pluck(:id)
           next [] if ids.empty?
 
-          # join: :joinable — a caller that already holds a transaction (a
-          # rake task driving a manual beat) lends it to the election; the
-          # xact lock then releases at the CALLER's commit, which is still
-          # bounded by that call.
-          ActiveRecord::Base.transaction(join: :joinable) do
+          # One transaction spans the election and the dialing. The plain
+          # call carries the semantics deliberately: on every Rails this
+          # plugin runs on, a transaction with one already open JOINS it
+          # (no savepoint, no lie about nesting — a rake task driving a
+          # manual beat lends its transaction to the election, and the
+          # xact lock releases at that CALLER's commit, still bounded by
+          # the call), and with none open it starts one for the beat. (No
+          # join: kwarg — Rails 7.0 does not know it; the default IS the
+          # joinable behavior 7.1 later made explicit.)
+          ActiveRecord::Base.transaction do
             won = elect_this_beat
             Thread.current[LOST_THREAD_KEY] = won.nil?
             next [] if won.nil?
