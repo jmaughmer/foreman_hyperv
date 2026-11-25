@@ -53,7 +53,7 @@ module ForemanHyperv
       # raises ArgumentError on every create).
       return false unless mac_based_ipam?(:subnet) || mac_based_ipam?(:subnet6)
 
-      interfaces.select(&:managed).any? do |nic|   # mirrors set_ip_address's own iteration
+      interfaces.select(&:managed).any? do |nic| # mirrors set_ip_address's own iteration
         (nic.subnet.present? && nic.ip.blank? && bootdisk_subnet_fills_address?(nic.subnet)) ||
           (nic.subnet6.present? && nic.ip6.blank? && bootdisk_subnet_fills_address?(nic.subnet6))
       end
@@ -72,11 +72,11 @@ module ForemanHyperv
     def validate_bootdisk_payload_would_go_stale
       return unless bootdisk_payload_would_go_stale?
 
-      errors.add(:base, _('The boot disk cannot be built for this host: a managed interface has no '\
-                          'address and the host uses MAC-based IPAM (EUI-64 answers the IPv6 address '\
-                          'only after Hyper-V assigns the MAC on first power-on). The boot disk image '\
-                          'is generated BEFORE that fill, so its payload would carry no address for '\
-                          'that interface. Set the address, or choose a subnet whose IPAM mode answers '\
+      errors.add(:base, _('The boot disk cannot be built for this host: a managed interface has no ' \
+                          'address and the host uses MAC-based IPAM (EUI-64 answers the IPv6 address ' \
+                          'only after Hyper-V assigns the MAC on first power-on). The boot disk image ' \
+                          'is generated BEFORE that fill, so its payload would carry no address for ' \
+                          'that interface. Set the address, or choose a subnet whose IPAM mode answers ' \
                           'addresses before the machine is created.'))
     end
   end

@@ -503,7 +503,7 @@ module ForemanHyperv
     # validation that flaps. The precedent is foreman_bootdisk's own proxmox
     # ext, verbatim: `def capabilities; super + [:bootdisk]; end`.
     def capabilities
-      [:build, :bootdisk]
+      %i[build bootdisk]
     end
 
     def test_connection(options = {})
@@ -3275,7 +3275,9 @@ module ForemanHyperv
       # The read is FogExtensions::Hyperv::Server#foreman_firmware_type —
       # the same value the edit form shows — and this gate runs inside the
       # bootdisk flow only, so no ordinary host can meet it.
-      raise ForemanHyperv::OperationRefused, BOOTDISK_SECURE_BOOT_RIDE_REFUSAL if server.foreman_firmware_type == 'uefi_secure_boot'
+      if server.foreman_firmware_type == 'uefi_secure_boot'
+        raise ForemanHyperv::OperationRefused, BOOTDISK_SECURE_BOOT_RIDE_REFUSAL
+      end
 
       node = reading_node(server)
       if endpoint_cluster && node.present? && !endpoint_serves_node?(node)

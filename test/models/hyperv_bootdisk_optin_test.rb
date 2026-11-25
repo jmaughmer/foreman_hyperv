@@ -63,13 +63,13 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
   test 'capabilities answers [:build, :bootdisk]: the opt-in word APPENDED after the default' do
     cr = build_cr
 
-    assert_equal [:build, :bootdisk], cr.capabilities,
+    assert_equal %i[build bootdisk], cr.capabilities,
                  'core defaults provision_method to capabilities.first (managed.rb:749) — putting ' \
                  ':bootdisk first would silently move every host that never set a provision_method ' \
                  'onto the bootdisk flow'
   end
 
-  test 'capabilities answers without touching the endpoint or any setting: the capability validation runs on every managed save' do
+  test 'capabilities answers without touching the endpoint: validation runs on every save' do
     cr = build_cr
     # The validation provision_method_in_capabilities runs on EVERY managed
     # save including /unattended/built; a capabilities that dialed the WinRM
@@ -78,7 +78,7 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
     # blocking A). Any client touch must therefore be a loud failure here.
     cr.stubs(:client).raises(RuntimeError, 'capabilities reached the endpoint')
 
-    assert_equal [:build, :bootdisk], cr.capabilities
+    assert_equal %i[build bootdisk], cr.capabilities
   end
 
   # ---- iso_upload_storage: validation + fog mass-assign ------------------------
@@ -151,7 +151,7 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
     assert_includes error.message, 'Nothing was created'
   end
 
-  test 'the same create is NOT refused for provision_method build: Secure Boot stays the normal answer for every other flow' do
+  test 'the same create is NOT refused for provision_method build: SB stays the normal answer' do
     cr = create_cr
 
     # The refusal keys on the bootdisk provision method ONLY — an ordinary

@@ -103,7 +103,7 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
            'would carry no address for the interface it configures'
   end
 
-  test 'a rebuild of the same host is NOT refused: queue_compute_update has no IPAM step, so the payload cannot diverge' do
+  test 'a rebuild is NOT refused: queue_compute_update has no IPAM step to diverge' do
     host = guard_host(old: rebuild_old, uuid: EXISTING_UUID, mac_based_subnet6: true)
 
     assert_not host.bootdisk_payload_would_go_stale?
@@ -115,7 +115,7 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     assert_not host.bootdisk_payload_would_go_stale?
   end
 
-  test 'a create behind a NON-mac-based IPAM is NOT refused even with blanks: the before_validation fill owns those modes' do
+  test 'a NON-mac-based IPAM create is NOT refused with blanks: before_validation owns those' do
     # The plan's list item 3, expressed honestly: dhcp/db/random_db/
     # external_ipam fill in before_validation (before generation), so core's
     # own IP-presence validation owns any blank there — the guard's mac-based
@@ -131,7 +131,7 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     assert_not host.bootdisk_payload_would_go_stale?
   end
 
-  test 'an UNMANAGED interface blank behind EUI-64 is NOT refused: the guard mirrors set_ip_address, which walks managed nics only' do
+  test 'an UNMANAGED blank behind EUI-64 is NOT refused: the guard walks managed nics only' do
     host = guard_host(mac_based_subnet6: true, nics: :unmanaged_blank)
 
     assert_not host.bootdisk_payload_would_go_stale?
