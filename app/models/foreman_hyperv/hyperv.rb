@@ -276,14 +276,23 @@ module ForemanHyperv
     ROLE_NAME_PREFIX = 'Virtual Machine '
 
     # PLG-35: how many live reads the role index demands before it believes
-    # a flap-shaped answer, and how long it waits between asks. Two asks a
-    # pause apart: the WinRM flaps on record cleared within seconds (a
-    # fresh instance read correctly while the memo still held the flap's
-    # answer), and the cap keeps a true outage at one pause with the same
-    # honest answer it gives today.
+    # a flap-shaped answer. Two asks a pause apart (the wait itself is the
+    # shared FLAP_RETRY_DELAY_SECONDS below): the WinRM flaps on record
+    # cleared within seconds (a fresh instance read correctly while the
+    # memo still held the flap's answer), and the cap keeps a true outage
+    # at one pause with the same honest answer it gives today.
     ROLE_INDEX_PROBE_ATTEMPTS = 2
     ROLE_INDEX_READ_ATTEMPTS = 2
-    ROLE_INDEX_RETRY_DELAY_SECONDS = 2
+    # The two ATTEMPTS constants above keep their role-index name: they
+    # count that index's own asks, not the shared wait.
+    # PLG-44 renamed this from ROLE_INDEX_RETRY_DELAY_SECONDS: the same flap
+    # the role index waits out is the one the cluster gate re-asks over and
+    # the cluster listing retries over (review F12). One flap, one pause.
+    FLAP_RETRY_DELAY_SECONDS = 2
+    # PLG-44: the cluster listing rides the same read-retry doctrine as the
+    # role listing (PLG-35): two asks a pause apart, and a read that raises
+    # through both is reported as failed, never as empty.
+    CLUSTER_LISTING_READ_ATTEMPTS = 2
 
     # PLG-31: the value a clustered group carries on BOTH ends of its
     # failback window when no window is set — measured on HV-CL01 (§60,
@@ -629,12 +638,36 @@ module ForemanHyperv
       cluster_backed_hosts(cluster)
     end
 
+    # PLG-44 internal control flow: the cache block's way of telling core's
+    # ComputeResourceCache#cache "this answer came from a FAILED read — write
+    # nothing" (core's write runs only on a block that RETURNED — a raising
+    # block leaves the store untouched). It never crosses a public boundary:
+    # #clusters rescues it and answers the degraded listing itself.
+    class CLUSTERS_UNREAD < StandardError; end
+
+    # The cluster listing every reader is served from — the form and the
+    # API through cluster and available_clusters, endpoint_cluster and
+    # storage_roots directly. PLG-44 (review F12): a listing that could not
+    # be read answers the page with the same empty it answers today, but
+    # NOTHING IS CACHED — the failed read raises the sentinel through core's
+    # cache (whose write then never runs, so the store keeps whatever truth
+    # it holds, including one a concurrent request warmed during this read),
+    # and the rescue below turns it into the degraded empty.
+    # What reaches the cache is only ever an answer that is allowed to live
+    # out the duration: a real listing, an honest empty, or the [] of a
+    # CONFIRMED stand-alone verdict — a gate memo that came from a RAISE
+    # is not a verdict and caches nothing (see _clusters).
     def clusters
       client.clusters.load(
         cache.cache(:clusters) do
-          _clusters.map(&:attributes)
+          listed = _clusters
+          raise CLUSTERS_UNREAD if listed.nil?
+
+          listed.map(&:attributes)
         end
       )
+    rescue CLUSTERS_UNREAD
+      client.clusters.load([])
     end
 
     # Mirror available_networks above: core renders the clusters endpoint from
@@ -1967,7 +2000,9 @@ module ForemanHyperv
     # the tick's own listing, never double-dialled) and warms precisely the
     # hops a human pays: WSMan shell allocation, PowerShell startup, the
     # cluster cmdlets. A stand-alone tick is the endpoint branch only: the
-    # gate's probe plus the fog collection read, no node list, no roles.
+    # gate's probe and its one re-ask (PLG-44 — a stand-alone answer is
+    # confirmed across the pause), plus the fog collection read; no node
+    # list, no roles.
     # Hard failures RAISE to ForemanHyperv::Keepalive.tick_one, which is what
     # rescues and throttles them; the per-node fail-soft ladder stays inside
     # the listing, exactly as it does for a page. Called on a freshly loaded
@@ -2871,12 +2906,41 @@ module ForemanHyperv
       raise ForemanHyperv::OperationRefused, SIGHTING_WRITE_REFUSAL
     end
 
+    # The cluster listing as a TRI-STATE (PLG-44, review F12): [] is a
+    # VERDICT — a CONFIRMED stand-alone endpoint (two consistent asks, or
+    # a fog without the vocabulary), or a cluster endpoint that honestly
+    # lists nothing — and nil is "the read failed". The gate is no longer
+    # a second live probe of its own that could disagree with the cache's
+    # lifetime pick (and be flapped the same way): it IS the confirmed,
+    # memoized cluster_endpoint? that built the cache object a few calls
+    # up, so it costs no extra dial and one flap cannot write [] as a
+    # verdict. A listing that raises through the retry is named once and
+    # answers nil, which keeps it OUT of the cache — as does a gate memo
+    # that came from a RAISE (the established fold keeps its words and its
+    # false, but a could-not-answer is not a verdict and caches nothing).
     def _clusters
-      return [] if client.respond_to?(:supports_clusters?) && !client.supports_clusters?
+      return nil if @cluster_probe_raised
+      return [] unless cluster_endpoint?
 
-      client.clusters.all
-    rescue StandardError
-      []
+      read_cluster_listing
+    rescue StandardError => e
+      Rails.logger.warn "The cluster listing for #{name} could not be read " \
+                        "(#{e.class}: #{e.message.to_s.lines.first.to_s.strip}); answering empty without caching"
+      nil
+    end
+
+    # The listing retried once after the flap pause — PLG-35's read-retry
+    # doctrine for the same transport. A raise through the retry re-raises
+    # the original into _clusters, whose rescue turns it into the
+    # do-not-cache answer.
+    def read_cluster_listing
+      (1..CLUSTER_LISTING_READ_ATTEMPTS).each do |attempt|
+        return client.clusters.all
+      rescue StandardError
+        raise if attempt >= CLUSTER_LISTING_READ_ATTEMPTS
+
+        flap_pause
+      end
     end
 
     # The cluster an endpoint belongs to, or nil for a stand-alone host — and for a
@@ -2958,7 +3022,13 @@ module ForemanHyperv
     # Core's cache object, built with the lifetime this endpoint deserves. The cluster
     # question is asked of fog rather than of the listings, because what is being
     # decided here is how long those listings live: reading them would ask the cache
-    # object that is still being built.
+    # object that is still being built. PLG-44: the answer this builds on is the
+    # gate's CONFIRMED one — one probe flap no longer gets to put a cluster
+    # endpoint's listings under core's 3-hour default. When the probe itself
+    # RAISED the answer is the established raise-fold — the false this file
+    # refuses to call a verdict: that instance's cluster listing answers the
+    # failed-read nil and caches nothing, and its other keys ride core's
+    # default, as they do today.
     def cache
       @cache ||= if cluster_endpoint?
                    ComputeResourceCache.new(self, cache_duration: CLUSTER_CACHE_EXPIRY)
@@ -2967,26 +3037,89 @@ module ForemanHyperv
                  end
     end
 
-    # Whether the endpoint answers as a cluster, asked once and remembered: fog asks
-    # the host every time, and every cache key would otherwise ask with it.
+    # Whether the endpoint answers as a cluster — the ONE answer that
+    # decides both how long this resource's cluster listings live (the
+    # cache method's duration pick) and what shape they hold. Asked once
+    # and remembered: fog asks the host every time, and every cache key
+    # would otherwise ask with it.
+    # But PLG-44 (review F12): a SINGLE no is not a verdict. fog's
+    # Real#supports_clusters? rescues every transport error into false,
+    # so one flap used to memoize the stand-alone answer for the whole
+    # instance — and with it core's 3-hour cache duration and an empty
+    # cluster listing (measured live: a flapped gate wrote [] under the
+    # clusters key with expires_in 180.minutes). A no — live or pipelined
+    # — is re-asked ONCE after the established flap pause; a hop that
+    # RAISED is not a no at all (consumed_endpoint_probe) and the live ask
+    # that replaces it is treated the same way; a yes is accepted at once.
+    # A flap that lasts THROUGH the re-ask is two consistent answers and
+    # becomes the verdict, exactly the rule PLG-35 set for the role index.
+    # Out of this gate's scope and recorded so (review round 39, brief D6
+    # family): endpoint_cluster above still asks its own, unconfirmed
+    # supports_clusters? — that answer names the cache KEY and picks the
+    # branch for the hypervisor listing's shape; a flap there degrades
+    # that listing's shape, whose LIFETIME this gate now sets from its
+    # answer — confirmed across the pause, or the established raise-fold
+    # (this method's rescue), which is deliberately not called a verdict.
     def cluster_endpoint?
       return @cluster_endpoint if instance_variable_defined?(:@cluster_endpoint)
 
-      # PLG-33b: when this request started a listing, the probe is already in
-      # flight — take that answer instead of asking again. The rescue and the
-      # warn below are today's, unchanged: a consumed failure re-raises on
-      # THIS thread and degrades exactly like the sequential read did. With
-      # no pipeline (every other caller) this is the sync read, verbatim.
-      probe = @listing_pipeline&.take_probe
-      @cluster_endpoint =
-        if probe.nil?
-          client.respond_to?(:supports_clusters?) && client.supports_clusters?
-        else
-          !!probe
-        end
+      # PLG-33b: when this request started a listing, the probe is already
+      # in flight — take that answer instead of asking again. PLG-44
+      # changed what a CONSUMED FAILURE does: it is a could-not-answer,
+      # not a no, so this thread asks the endpoint itself (consumed_
+      # endpoint_probe) rather than folding to stand-alone — which is the
+      # sequential read this gate degrades to with no pipeline anyway.
+      probe = consumed_endpoint_probe
+      # Fog answers this question with a strict boolean (live or pipelined),
+      # so no normalization sits between the answer and the memo.
+      answer = probe.nil? ? cluster_probe : probe
+      @cluster_endpoint = answer || cluster_membership_reprobed?
     rescue StandardError => e
+      # A probe that RAISES on this thread is fog outside its swallow-
+      # everything contract: the established words, the established false.
+      # PLG-44 (round 39): the memo now also RECORDS that it came from a
+      # raise, so _clusters answers the failed-read nil for this instance
+      # instead of letting the fold's [] pose as a stand-alone verdict in
+      # the cache — the raise door was F12's exposure too.
       Rails.logger.warn "Hyper-V cluster support for #{name} could not be read: #{e.message.lines.first}"
+      @cluster_probe_raised = true
       @cluster_endpoint = false
+    end
+
+    # This request's pipelined probe, or nil for "ask this thread": no
+    # pipeline, the probe already taken, or — PLG-44 — a probe hop that
+    # could not answer. A failed hop is named with its own words and
+    # dropped to the sequential ask, in the style of take_pipelined_role_
+    # read above the lanes: the operator sees which read failed, and the
+    # page still gets the real question.
+    def consumed_endpoint_probe
+      return nil unless instance_variable_defined?(:@listing_pipeline) && @listing_pipeline
+
+      @listing_pipeline.take_probe
+    rescue StandardError => e
+      Rails.logger.warn "The pipelined cluster probe for #{name} failed " \
+                        "(#{e.class}: #{e.message.to_s.lines.first.to_s.strip}); asking the endpoint directly"
+      nil
+    end
+
+    # The endpoint's own answer, live: vocabulary first — a fog that
+    # cannot answer this question at all is not a fog that can flap —
+    # then the probe fog answers by querying the host over the wire.
+    def cluster_probe
+      client.respond_to?(:supports_clusters?) && client.supports_clusters?
+    end
+
+    # PLG-44: the one re-ask a single no must pass through before it
+    # becomes this instance's answer. The pause comes FIRST so the two
+    # asks cannot land back-to-back inside one failure window (the false
+    # being re-asked was just taken); a fog without the vocabulary is
+    # answered without a dial; a re-ask that RAISES rides the outer
+    # rescue, whose answer and words are unchanged.
+    def cluster_membership_reprobed?
+      return false unless client.respond_to?(:supports_clusters?)
+
+      flap_pause
+      client.supports_clusters?
     end
 
     # The cluster's roles keyed by BOTH identities that name a machine: its
@@ -3087,7 +3220,7 @@ module ForemanHyperv
       (1..ROLE_INDEX_PROBE_ATTEMPTS).each do |attempt|
         return true if client.supports_clusters?
 
-        role_index_flap_pause if attempt < ROLE_INDEX_PROBE_ATTEMPTS
+        flap_pause if attempt < ROLE_INDEX_PROBE_ATTEMPTS
       end
       false
     end
@@ -3102,16 +3235,19 @@ module ForemanHyperv
       rescue StandardError
         raise if attempt >= ROLE_INDEX_READ_ATTEMPTS
 
-        role_index_flap_pause
+        flap_pause
       end
     end
 
     # The pause between retry attempts, on its own method so tests pin the
     # CALLS without running the clock. Two seconds is a rounding error
     # against the 2–8 s a healthy cluster read already costs, and well
-    # inside the flaps on record.
-    def role_index_flap_pause
-      sleep ROLE_INDEX_RETRY_DELAY_SECONDS
+    # inside the flaps on record. PLG-44 renamed this from
+    # role_index_flap_pause: the role index, the cluster gate's re-ask and
+    # the cluster listing retry all wait out the SAME transport flap, and
+    # one flap deserves one pause.
+    def flap_pause
+      sleep FLAP_RETRY_DELAY_SECONDS
     end
 
     # The node that answered the read. Printed for stand-alone machines, where

@@ -154,6 +154,9 @@ class HypervCrossNodeListingTest < ActiveSupport::TestCase
     # suites it must arrive at the SAME fog double (see the parallel suite for
     # the full reason). Count, order and fail-soft assertions untouched.
     cr.stubs(:fresh_endpoint_client).returns(fog)
+    # PLG-44: the stand-alone fake now pays one gate re-ask across a pause;
+    # pin the CALLS without running the clock.
+    cr.stubs(:flap_pause)
     cr
   end
 

@@ -79,6 +79,9 @@ class HypervEnablementTest < ActiveSupport::TestCase
     rescue LoadError
       skip 'mocha is not available outside the Foreman bundle.'
     end
+    # PLG-44: stand-alone fakes now pay one gate re-ask across a pause;
+    # the suite stubs the pause so the doctrine runs without the clock.
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
   end
 
   # A fog that provides everything the enablement stands on: the CAPABILITIES

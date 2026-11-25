@@ -15,7 +15,8 @@ require 'test_helper'
 #      node's rows, the role index — each EXACTLY ONCE, and consumes the
 #      same request's speculative pipeline (composes with PLG-33b rather
 #      than duplicating it). A stand-alone tick is the endpoint branch only:
-#      probe + rows, no node list, no roles, no per-node clients;
+#      probe + its PLG-44 re-ask + rows, no node list, no roles, no
+#      per-node clients;
 #   2. selection: only resources with hyperv_keepalive ON are ticked, once
 #      per tick_all, from freshly loaded AR instances (a client or a gate
 #      memoized in the scheduler must never outlive one tick);
@@ -190,6 +191,10 @@ class HypervKeepaliveTest < ActiveSupport::TestCase
   # and create! returns an unsaved record). The migrated-but-unseeded test
   # DB has no admin, so the test provides one — transactional, like the rows.
   setup do
+    # PLG-44: a stand-alone tick (supports: false) now re-asks the gate once
+    # across a pause; the suite stubs the pause so the doctrine runs without
+    # the clock.
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
     # User.current starts nil in this harness, and creating an admin needs a
     # current user allowed to grant admin flags.
     User.current = User.anonymous_admin

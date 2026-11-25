@@ -99,6 +99,10 @@ class HypervRefusalsTest < ActiveSupport::TestCase
     rescue LoadError
       skip 'mocha is not available outside the Foreman bundle.'
     end
+    # PLG-44: a stand-alone fake answers the cluster gate no, and the gate
+    # now re-asks once across a pause — the pause is stubbed suite-wide here
+    # so the flap doctrine is exercised without the suite clock running it.
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
 
     @fog = FogSpy.new
     @cr = ForemanHyperv::Hyperv.new(

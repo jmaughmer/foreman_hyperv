@@ -130,7 +130,7 @@ class HypervHaSettingsTest < ActiveSupport::TestCase
   setup do
     # The stand-alone confirmation probe really sleeps between attempts
     # (PLG-35); this suite pins the calls, never the clock.
-    ForemanHyperv::Hyperv.any_instance.stubs(:role_index_flap_pause)
+    ForemanHyperv::Hyperv.any_instance.stubs(:flap_pause)
   end
 
   def leah
