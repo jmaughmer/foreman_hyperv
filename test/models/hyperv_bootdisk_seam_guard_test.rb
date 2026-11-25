@@ -152,6 +152,17 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     assert_includes message, 'EUI-64'
   end
 
+  test 'the guard is REGISTERED on Host::Managed: the live probe proved a prepended Concern never runs its included block' do
+    # The first implementation PREPENDED this ActiveSupport::Concern beside
+    # HostManagedExtensions. The module then sat in the ancestor chain, the
+    # predicate worked when called, and the validate callback was NOT
+    # registered — a guard that only runs when someone remembers to call it
+    # (probed against the booted app: SEAM_ANCESTOR=true,
+    # SEAM_REGISTERED=false). Registration is a separate fact from the
+    # method existing, so it is asserted as its own fact.
+    assert_includes Host::Managed._validate_callbacks.map(&:filter), :validate_bootdisk_payload_would_go_stale
+  end
+
   # ---- the iso_upload_storage carry ----------------------------------------------
 
   def carrying_host(stored)
