@@ -786,6 +786,15 @@ module ForemanHyperv
       require_bootdisk_pull!
       bootdisk_ride_check!(vm_id)
       root = bootdisk_storage_root!(storage_id, 'iso_upload', 'transferred', storage_roots)
+      # The shelf must exist before anything stages onto it. The settings are
+      # the ONLY configuration (nothing creates these dirs at install), so a
+      # configured-but-never-used deploy has no roots yet; the ensure lands
+      # them at the measured modes. Its failures ride through here BEFORE any
+      # byte copies and before any WinRM: ConfiguredRootError while the
+      # settings are blank (the dormant state), a filesystem error when a
+      # root cannot exist (a broken deployment, not a dormant one), and the
+      # snippet refusal the moment the pull URL would be a lie.
+      ForemanHyperv::BootdiskTransfer.ensure_roots!
 
       nonce = nil
       begin

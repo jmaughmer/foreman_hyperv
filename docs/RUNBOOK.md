@@ -250,3 +250,31 @@ Foreman service; until the partner is installed, the enabled operations
 refuse as they did before enablement, by design. The check asks the fog, and
 a predicate that raises is an unanswered predicate — an fog that cannot
 answer has not answered.
+
+## 8. The pull refuses: the boot disk drop-in
+
+*"The boot disk file cannot be staged for the host to pull: the Apache
+configuration serving /bootdisk-pull is not installed (/etc/httpd/conf.d/
+05-foreman.d/foreman-bootdisk-pull.conf). ... Nothing was staged."* The Hyper-V
+host pulls the generated boot disk ISO over HTTP, and the URL the plugin hands
+it only works while an Apache drop-in serves the configured pull root. Measured
+(2026-11-24): `foreman-installer` PURGES the vhost drop-in directories — a
+snippet answering HTTP 200 was gone after the next installer run — so this
+refusal is expected to come back after every installer run, and `iso_upload`
+answers it before staging a byte rather than letting the host discover a 404
+minutes later. The remedy, in order:
+
+1. Copy the snippet the gem ships (`config/apache/foreman-bootdisk-pull.conf`
+   inside the installed `foreman_hyperv` gem) to the path the refusal names.
+   If the `unattended_url` is https, also copy it to the `05-foreman-ssl.d`
+   path a matching refusal names — each vhost includes only its own drop-in
+   directory (measured).
+2. Set both roots (`Hyper-V boot disk pull root`, `Hyper-V boot disk staging
+   root`); blank keeps the whole transfer dormant and nothing ever stages.
+3. `systemctl reload httpd`.
+
+The other message — *"...is installed (...) but does not Alias that path at
+the configured pull root (...)"* — is the same drop-in copied without editing
+its `Alias` (and `<Directory>`) to match `hyperv_bootdisk_pull_root`. Edit the
+file to the root the refusal names and reload. Re-apply step 1 after every
+`foreman-installer` run until a kafo post-hook exists (not yet shipped).

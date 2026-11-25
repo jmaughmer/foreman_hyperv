@@ -45,6 +45,44 @@ module ForemanHyperv
                                       'across all Foreman processes (a Postgres advisory-lock ' \
                                       'election). A tick replays one page load of endpoint ' \
                                       'reads so the next human load is warm.'))
+              # bootdisk PR-3: the two roots the pull endpoint rides (plan v10
+              # Decision 2). DEFAULT BLANK — an unset pair is the documented
+              # dormant state the store refuses with (iso_* steps answer
+              # before writing a byte), so enabling the shelf is a deliberate
+              # operator act: set both roots AND install the shipped Apache
+              # snippet (config/apache/foreman-bootdisk-pull.conf; the
+              # installer purges the drop-in dirs — measured 2026-11-24 — so
+              # the copy is an explicit act, re-applied after every installer
+              # run). Nothing reads these at boot: the store resolves them
+              # per operation, so a fresh install boots and migrates before
+              # any of this exists (the PLG-34 initializer lesson). Named
+              # hyperv_bootdisk_*, not bootdisk_*: settings share ONE flat
+              # namespace, foreman_bootdisk already owns bootdisk_* (24.1.0
+              # registers bootdisk_ipxe_dir through bootdisk_allowed_types —
+              # measured), a future upstream collision would crash boot on a
+              # duplicate registration, and the plugin's own convention is the
+              # hyperv_ prefix (hyperv_keepalive_interval_seconds).
+              setting(:hyperv_bootdisk_pull_root,
+                      type: :string,
+                      default: '',
+                      full_name: N_('Hyper-V boot disk pull root'),
+                      description: N_('Directory Apache serves at /bootdisk-pull for Hyper-V hosts ' \
+                                      'to pull generated boot disk ISOs over HTTP (created 0711, ' \
+                                      'owner foreman, when missing). Must match the Alias target of ' \
+                                      'the foreman-bootdisk-pull.conf snippet — iso_upload checks the ' \
+                                      'installed drop-in against this value and refuses before ' \
+                                      'staging on a mismatch — and the installer removes that ' \
+                                      'drop-in, so re-copy it after every installer run. Blank keeps ' \
+                                      'boot disk transfers dormant: iso_upload refuses before ' \
+                                      'staging.'))
+              setting(:hyperv_bootdisk_staging_root,
+                      type: :string,
+                      default: '',
+                      full_name: N_('Hyper-V boot disk staging root'),
+                      description: N_('Private directory beside the pull root holding in-flight ' \
+                                      'copies and sidecars (created 0700, owner foreman, when ' \
+                                      'missing; never served by Apache). Blank keeps boot disk ' \
+                                      'transfers dormant: iso_upload refuses before staging.'))
             end
           end
         end
