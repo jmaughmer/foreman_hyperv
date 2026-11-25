@@ -936,7 +936,10 @@ module ForemanHyperv
     # mounted — every later reboot boots it again. server.service is the
     # client the machine was read through (for a machine the endpoint still
     # sees, that is simply the endpoint's own client, so the common path does
-    # not change shape).
+    # not change shape). The one residue is fog's own name registration: a
+    # split-DNS node reporting a ComputerName that matches neither address
+    # behind it still refuses on the owner client too — base behavior, never
+    # worse, and name discovery is fog's business.
     def iso_detach(vm_id)
       raise ArgumentError, 'iso_detach requires a virtual machine id' if vm_id.blank?
 

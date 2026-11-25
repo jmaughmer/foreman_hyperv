@@ -156,7 +156,10 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     # FOG-11's exact-host gate, the shape PLG-40 rides: this client dials
     # ONLY its own host, and a request carrying another node's
     # computer_name raises the measured "Refusing to connect" PSError
-    # before the call is even recorded.
+    # before the call is even recorded. Deliberately STRICTER than fog:
+    # fog's host_matches? also admits a dotless wanted name as the first
+    # label of a registered host (winrm.rb:284-292); these fixtures use
+    # exact names, and the stricter rule can never false-green.
     def refuses_foreign_hosts!
       @refuses_foreign_hosts = true
     end
