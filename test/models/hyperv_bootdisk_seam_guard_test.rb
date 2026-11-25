@@ -49,6 +49,34 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
   IPAM_NONE = IPAM::MODES[:none].freeze
   EXISTING_UUID = 'bd5-existing-uuid'
 
+  # A nic wearing the real contract the guard reads (the iso suite's
+  # MachineStub convention): managed/primary are columns, and
+  # mac_based_ipam? takes the REQUIRED field argument (nic/base.rb:252) —
+  # answered per field from the mac_based map. primary?/managed? aliases
+  # exist because core's flag lookup (get_interface_by_flag) may call either
+  # shape, and the F2 case drives that real delegate.
+  class NicStub
+    attr_reader :managed, :primary, :subnet, :subnet6, :ip, :ip6
+
+    def initialize(managed: true, primary: false, subnet: nil, subnet6: nil,
+                   ip: nil, ip6: nil, mac_based: {})
+      @managed = managed
+      @primary = primary
+      @subnet = subnet
+      @subnet6 = subnet6
+      @ip = ip
+      @ip6 = ip6
+      @mac_based = mac_based
+    end
+
+    alias managed? managed
+    alias primary? primary
+
+    def mac_based_ipam?(field)
+      @mac_based.fetch(field, false)
+    end
+  end
+
   # A booted-Foreman Host::Managed with its answers stubbed (the built-seam
   # suite's convention): the guard reads ONLY in-memory state, so every read
   # it makes is answered here and anything else it touches fails loudly.
@@ -66,20 +94,25 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     # Hyper-V always answers true for :mac (Decision 6 item 6: the guard must
     # not turn that ever-true fact into an over-refusal).
     host.stubs(:compute_provides?).with(:mac).returns(true)
+    # Answered at BOTH levels on purpose: the host-level call answers the
+    # core delegate (managed.rb:306 forwards to primary_interface), and the
+    # primary nic answers it directly — the guard's own path. Keeping the
+    # pair means the harness passes on the delegate shape AND on the
+    # primary-detected shape, so it cannot mask a silent move between them.
     host.stubs(:mac_based_ipam?).with(:subnet).returns(mac_based_subnet)
     host.stubs(:mac_based_ipam?).with(:subnet6).returns(mac_based_subnet6)
     host.stubs(:interfaces).returns(
       case nics
       when :eui64_blank
-        [stub(managed: true, subnet: nil, ip: nil, subnet6: stub(ipam: 'eui-64'), ip6: nil)]
+        [primary_nic(mac_based_subnet, mac_based_subnet6, subnet6: stub(ipam: 'eui-64'))]
       when :eui64_filled
-        [stub(managed: true, subnet: nil, ip: nil, subnet6: stub(ipam: 'eui-64'), ip6: 'fe80::1')]
+        [primary_nic(mac_based_subnet, mac_based_subnet6, subnet6: stub(ipam: 'eui-64'), ip6: 'fe80::1')]
       when :none_blank
-        [stub(managed: true, subnet: stub(ipam: IPAM_NONE), ip: nil, subnet6: nil, ip6: nil)]
+        [primary_nic(mac_based_subnet, mac_based_subnet6, subnet: stub(ipam: IPAM_NONE))]
       when :dhcp_filled
-        [stub(managed: true, subnet: stub(ipam: 'dhcp'), ip: '10.0.0.7', subnet6: nil, ip6: nil)]
+        [primary_nic(mac_based_subnet, mac_based_subnet6, subnet: stub(ipam: 'dhcp'), ip: '10.0.0.7')]
       when :unmanaged_blank
-        [stub(managed: false, subnet: nil, ip: nil, subnet6: stub(ipam: 'eui-64'), ip6: nil)]
+        [primary_nic(mac_based_subnet, mac_based_subnet6, managed: false, subnet6: stub(ipam: 'eui-64'))]
       else
         nics
       end
@@ -91,6 +124,16 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     old = Host::Managed.new(name: 'bd5.example.com', provision_method: 'bootdisk')
     old.stubs(:build?).returns(false) # the built transition; rebuild flips build back on
     old
+  end
+
+  # Every single-nic scenario wears the primary flag: the guard's gate rides
+  # the PRIMARY nic (core's setComputeIPAM gate is primary-only,
+  # orchestration/compute.rb:80-83), so a flagless nic would short-circuit
+  # it for reasons unrelated to the case under test.
+  def primary_nic(mac_based_subnet, mac_based_subnet6, **attrs)
+    NicStub.new(primary: true,
+                mac_based: { subnet: mac_based_subnet, subnet6: mac_based_subnet6 },
+                **attrs)
   end
 
   # ---- Decision 1: the guard refuses the stale-payload create, and nothing else ----
@@ -163,6 +206,43 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     assert_includes Host::Managed._validate_callbacks.map(&:filter), :validate_bootdisk_payload_would_go_stale
   end
 
+  test 'a host whose nics carry no primary flag answers NOT stale: no raise from the allow_nil-less delegate' do
+    # Core delegates mac_based_ipam? to primary_interface WITHOUT allow_nil
+    # (managed.rb:306) and primary_interface is a flag lookup
+    # (host/base.rb:268-270) — nil on a host whose interfaces lack the flag.
+    # Core only ever calls the delegate from after_validation/orchestration;
+    # this guard runs INSIDE the validation cycle, where a NoMethodError
+    # would 500 the save instead of letting check_interfaces (managed.rb:691)
+    # report the missing primary (round 23, F2). The predicate is UNSTUBBED
+    # here on purpose: the real delegate must be the thing that used to blow.
+    host = Host::Managed.new(name: 'bd5.example.com', provision_method: 'bootdisk')
+    host.build = true
+    host.stubs(:old).returns(nil)
+    host.stubs(:compute_provides?).with(:mac).returns(true)
+    host.stubs(:interfaces).returns(
+      [NicStub.new(primary: false, subnet6: stub(ipam: 'eui-64'), ip6: nil,
+                   mac_based: { subnet6: true })]
+    )
+
+    assert_not host.bootdisk_payload_would_go_stale?
+  end
+
+  test 'a SECONDARY blank behind EUI-64 with a non-mac-based primary is NOT refused: gate primary, fill all' do
+    # Documented scope (round 23, F7): core's setComputeIPAM GATE is
+    # primary-only (orchestration/compute.rb:80-83 — mac_based_ipam? reads
+    # the primary's subnet), while the FILL walks every managed nic
+    # (managed.rb:600-606). So with a DHCP primary, core never queues the
+    # EUI-64 fill for the secondary either — nothing fills, nothing goes
+    # stale, no refusal. A test with two nics is the only place this split
+    # is expressible at all.
+    host = guard_host(nics: [
+                       NicStub.new(primary: true, subnet: stub(ipam: 'dhcp'), ip: '10.0.0.7'),
+                       NicStub.new(subnet6: stub(ipam: 'eui-64'), ip6: nil)
+                     ])
+
+    assert_not host.bootdisk_payload_would_go_stale?
+  end
+
   # ---- the iso_upload_storage carry ----------------------------------------------
 
   def carrying_host(stored)
@@ -198,5 +278,38 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     host.send(:hyperv_preserve_iso_upload_storage, submitted)
 
     assert_not submitted['compute_attributes'].key?('iso_upload_storage')
+  end
+
+  # The tests above call the private method directly — the exact class of
+  # blind spot this file already documents once (a method that exists but is
+  # not WIRED, round 23, F6). These two pin the wiring itself: the prepended
+  # HostManagedExtensions#update is what runs the carry, before the interface
+  # reconciliation that sees the same hash.
+
+  test 'Host#update dispatches the carry BEFORE hyperv_add_attributes' do
+    host = Host::Managed.new(name: 'bd5.example.com')
+    host.stubs(:provider).returns('Hyper-V')
+    seq = sequence('carry')
+    host.expects(:hyperv_preserve_iso_upload_storage).in_sequence(seq)
+    host.expects(:hyperv_add_attributes).in_sequence(seq)
+
+    # The save fails (an unprovisioned host); the DISPATCH is the subject —
+    # both expectations must be met before update returns false. Dropping
+    # engine.rb's prepend of HostManagedExtensions fails this test while
+    # every direct-call test above stays green.
+    assert_not host.update('compute_attributes' => { 'memory_startup' => '1024' })
+  end
+
+  test 'the REAL carry has run by the time hyperv_add_attributes sees the hash' do
+    host = Host::Managed.new(name: 'bd5.example.com')
+    host.stubs(:provider).returns('Hyper-V')
+    host.compute_attributes = { 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' }
+    # Only the interface reconciliation is stubbed — the carry itself is the
+    # real method, and the with-block proves its output arrived first.
+    host.expects(:hyperv_add_attributes).with do |attrs|
+      attrs['compute_attributes']['iso_upload_storage'] == 'C:\\ClusterStorage\\Volume1'
+    end
+
+    host.update('compute_attributes' => { 'memory_startup' => '1024' })
   end
 end

@@ -117,15 +117,17 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
 
   # ---- Decision 5: the create-time Secure-Boot refusal --------------------------
 
-  # A create that gets past the refusal reaches the endpoint reads, which
-  # these stubs make loud: hypervisor (the endpoint self-name, create_vm's
-  # first touch) first, build_client (servers.new) behind it. The refusal
-  # must be decided BEFORE both.
+  # A create that gets past the refusal reaches the endpoint, and this stub
+  # makes the FIRST fog touch loud: create_vm's first read is hypervisor (the
+  # endpoint self-name — reached from create_vm via the computer/hypervisor
+  # line before servers.new; measured as a SocketError backtrace through
+  # create_vm before the stub existed). build_client is a LOCAL in create_vm
+  # (hyperv.rb:1113), not a method — stubbing it stubs nothing (round 23,
+  # F5), so the negative tests assert THIS tripwire's message.
   def create_cr
     cr = build_cr
     cr.stubs(:enablement_supported?).returns(true)
     cr.stubs(:hypervisor).raises(RuntimeError, 'fog reads started: hypervisor was reached')
-    cr.stubs(:build_client).raises(RuntimeError, 'fog writes started: servers.new was reached')
     cr
   end
 
@@ -156,13 +158,46 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
 
     # The refusal keys on the bootdisk provision method ONLY — an ordinary
     # build host keeps its Secure Boot (its media is PXE/grub, a different
-    # story the plan never touched).
-    assert_raises(RuntimeError) { cr.create_vm(bootdisk_create_attrs(provision_method: 'build')) }
+    # story the plan never touched). The MESSAGE is the proof: it can only be
+    # the fog tripwire, not some other RuntimeError (round 23, F5).
+    error = assert_raises(RuntimeError) { cr.create_vm(bootdisk_create_attrs(provision_method: 'build')) }
+    assert_includes error.message, 'fog reads started'
   end
 
   test 'the same create is NOT refused when the resolved firmware has Secure Boot off' do
     cr = create_cr
 
-    assert_raises(RuntimeError) { cr.create_vm(bootdisk_create_attrs(foreman_firmware: 'uefi')) }
+    error = assert_raises(RuntimeError) { cr.create_vm(bootdisk_create_attrs(foreman_firmware: 'uefi')) }
+    assert_includes error.message, 'fog reads started'
+  end
+
+  # Round 23, F3: generate_secure_boot_settings returns {} for a firmware
+  # without 'efi' and the merge LEAVES a submitted secure_boot_enabled
+  # standing — a stale flag is not Secure Boot. The refusal must read core's
+  # RESOLVED firmware, not the flag alone.
+  test 'a bootdisk create whose firmware RESOLVES to BIOS is NOT refused even when a stale secure_boot_enabled stands' do
+    cr = create_cr
+
+    # 'automatic' + a BIOS firmware_type resolves to bios; the submitted
+    # secure_boot_enabled: 'true' survives the {} merge as a stale companion.
+    attrs = bootdisk_create_attrs(foreman_firmware: 'automatic', firmware_type: 'BIOS')
+    attrs[:secure_boot_enabled] = 'true'
+
+    error = assert_raises(RuntimeError) { cr.create_vm(attrs) }
+    assert_includes error.message, 'fog reads started'
+  end
+
+  test 'an automatic firmware resolved to Secure Boot by the PXE loader IS refused (the automatic path)' do
+    cr = create_cr
+
+    # host_compute_attrs merges host.firmware_type — here the symbol the
+    # Secure-Boot PXE loaders answer (pxe_loader_support.rb) — and
+    # resolve_automatic_firmware turns 'automatic' into it BEFORE the
+    # generate step flips secure_boot_enabled.
+    attrs = bootdisk_create_attrs(foreman_firmware: 'automatic', firmware_type: :uefi_secure_boot)
+    attrs[:secure_boot_enabled] = true
+
+    error = assert_raises(ForemanHyperv::OperationRefused) { cr.create_vm(attrs) }
+    assert_includes error.message, 'Secure Boot'
   end
 end
