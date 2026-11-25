@@ -152,7 +152,7 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     assert_includes message, 'EUI-64'
   end
 
-  test 'the guard is REGISTERED on Host::Managed: the live probe proved a prepended Concern never runs its included block' do
+  test 'the guard is REGISTERED on Host::Managed: prepend left it unregistered (probe)' do
     # The first implementation PREPENDED this ActiveSupport::Concern beside
     # HostManagedExtensions. The module then sat in the ancestor chain, the
     # predicate worked when called, and the validate callback was NOT
