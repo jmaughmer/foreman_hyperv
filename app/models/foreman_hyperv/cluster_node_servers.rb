@@ -115,10 +115,10 @@ module ForemanHyperv
     # Yields each registration read: the endpoint's own rows first, then every
     # cluster node the endpoint does not already speak for. The endpoint's own
     # node appears in the cluster's node list (measured); endpoint_serves_node?
-    # is what recognizes it — the endpoint's self-reported names once fog
-    # (FOG-27) carries them, the URL and its first label otherwise — and the
-    # endpoint read above already covers it, so asking the ladder too would
-    # spend a second WinRM round trip on the same machine.
+    # is what recognizes it — the URL host and its first label always, plus
+    # the endpoint's self-reported names once fog (FOG-27) carries them —
+    # and the endpoint read above already covers it, so asking the ladder
+    # too would spend a second WinRM round trip on the same machine.
     #
     # PLG-33: the reads are independent and each touches exactly one fog
     # client, so they run concurrently — the sequential ladder measured ~10 s

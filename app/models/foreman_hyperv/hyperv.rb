@@ -4095,9 +4095,13 @@ module ForemanHyperv
     # 10.0.0.5 reduces to its first label, '10' — and, always, against the
     # URL host itself and that first label, the documented fallback that is
     # the whole rule when fog reports nothing. A first-label collision
-    # across two domains reads from the endpoint, misses, and answers
-    # false — a miss, never a wrong machine, because GUIDs are unique and a
-    # node that does not host the GUID answers NotFound.
+    # across two domains answers TRUE — the rule itself does not reject the
+    # collision. The safety lives downstream: GUIDs are unique and a node
+    # that does not host the GUID answers NotFound, so the trusting owner
+    # read folds to nil and the bootdisk drive calls ride the endpoint's
+    # own machine rather than a fresh dial of the owner; the listing simply
+    # skips the colliding node's own read. A miss at worst, never a wrong
+    # machine.
     def endpoint_serves_node?(node_name)
       return false if node_name.blank?
 

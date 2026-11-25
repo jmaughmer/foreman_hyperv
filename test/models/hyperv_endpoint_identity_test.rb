@@ -43,7 +43,6 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
   # it touches is a closure local, never an @ivar of this test.
   def stage_compositions(*fogs)
     composed = []
-    @composed = composed
     queue = fogs.dup
     @original_new = Fog::Compute.method(:new)
     Fog::Compute.define_singleton_method(:new) do |opts = {}|
@@ -98,8 +97,9 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
   end
 
   def test_a_report_of_no_names_leaves_the_rule_on_the_url
-    # Discovery failed (or an old fog answering the method with an empty
-    # list): the note is not written and the answer is the URL rule alone.
+    # A fog that carries the vocabulary but learned nothing (discovery
+    # failed): the note is not written and the answer is the URL rule alone.
+    # (The no-vocabulary-at-all leg is SilentFog, pinned above.)
     cr = build_cr
     stage_compositions(ReportingFog.new([]))
     cr.send(:client)
@@ -237,15 +237,18 @@ class HypervEndpointIdentityTest < ActiveSupport::TestCase
     assert_equal [ENDPOINT_VM, NODE2_VM], listing_ids(rows), 'the union keeps each machine once'
   end
 
-  def test_the_listing_on_an_old_fog_degrades_to_the_url_rule
-    # The capability gate's other half: with old fog the IP miss — and the
-    # second read of the same machine — is KEPT, exactly as before PLG-43.
+  def test_the_listing_degrades_to_the_url_rule_when_fog_reports_no_names
+    # The gate's other leg: fog that ANSWERS local_host_names with nothing
+    # (the no-method-at-all leg is SilentFog, pinned above) keeps the IP
+    # miss — and the second read of the same machine — exactly as before
+    # PLG-43.
     cr, endpoint_servers, node1, node2 = build_listing_cr(endpoint_names: nil)
 
     rows = ForemanHyperv::ClusterNodeServers.new(cr).all({})
 
     assert_equal 1, endpoint_servers.calls
-    assert_equal 1, node1.servers_collection.calls, 'old fog keeps the pre-PLG-43 second read'
+    assert_equal 1, node1.servers_collection.calls,
+                 'a fog that reports no names keeps the pre-PLG-43 second read'
     assert_equal 1, node2.servers_collection.calls
     assert_equal [ENDPOINT_VM, NODE2_VM], listing_ids(rows)
   end
