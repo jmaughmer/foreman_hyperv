@@ -117,11 +117,14 @@ class HypervBootdiskOptinTest < ActiveSupport::TestCase
 
   # ---- Decision 5: the create-time Secure-Boot refusal --------------------------
 
-  # A create that gets past the refusal reaches build_client, which this stub
-  # makes loud: the refusal must be decided BEFORE any fog model is built.
+  # A create that gets past the refusal reaches the endpoint reads, which
+  # these stubs make loud: hypervisor (the endpoint self-name, create_vm's
+  # first touch) first, build_client (servers.new) behind it. The refusal
+  # must be decided BEFORE both.
   def create_cr
     cr = build_cr
     cr.stubs(:enablement_supported?).returns(true)
+    cr.stubs(:hypervisor).raises(RuntimeError, 'fog reads started: hypervisor was reached')
     cr.stubs(:build_client).raises(RuntimeError, 'fog writes started: servers.new was reached')
     cr
   end
