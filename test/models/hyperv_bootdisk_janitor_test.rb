@@ -192,6 +192,8 @@ class HypervBootdiskJanitorTest < ActiveSupport::TestCase
     # The stub answers for EVERY unlink; nothing is removed, and the sweep
     # must still walk every candidate and return honest zero counts.
     counts = ForemanHyperv::BootdiskTransfer.sweep(now: @now)
+    File.unstub(:unlink) # before teardown: mocha restores only after it, and
+    # a stubbed File.unlink turns remove_entry's cleanup into ENOTEMPTY
     assert_equal({ served: 0, staging: 0 }, counts, 'failed unlinks are not removals')
     assert alive?(racing) && alive?(survivor)
   end
