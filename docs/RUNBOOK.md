@@ -5,8 +5,9 @@ asked and what the unknown costs, and each lifts by a merged PR, never by
 configuration. This file covers the places where the contract still leaves a
 manual path for an operator: reading and clearing the sightings ledger,
 resolving a stranded cluster-role write, an endpoint whose reads can never
-answer, per-node addressing, storage and disk-file refusals, and a fog that
-is not the plugin's partner.
+answer, per-node addressing, storage and disk-file refusals, a fog that
+is not the plugin's partner, and the boot disk: its drop-in, its janitor,
+and the opt-in and the ride that turn them on (§§8–11).
 
 Everything here describes the era the enablement names: the installed
 `fog-hyperv` answers all six behaviours listed in
@@ -19,9 +20,10 @@ until then.
 
 The constants, scripts and commands quoted below live in
 `app/models/foreman_hyperv/hyperv.rb` (and, on the fog side, in the
-`fog-hyperv` build the enablement names). Nothing here is a knob: every
-gate named makes its reads again on every attempt, and classifier results
-are never cached.
+`fog-hyperv` build the enablement names). Nothing here is a knob — the one
+exception is the two boot disk settings of §10, a designed opt-in whose off
+state the contract answers for — every gate named makes its reads again on
+every attempt, and classifier results are never cached.
 
 ## 1. The sightings ledger
 
@@ -301,3 +303,86 @@ to the Foreman application log, not cron.log. The registration carries no
 existence guard on `Foreman::Cron` deliberately: if a future Foreman removes
 that hook, every `foreman-rake` run failing loudly beats a janitor nobody knows
 about.
+
+## 10. Enabling the pull: the opt-in and the SELinux read
+
+The boot disk transfer is opt-in, and the two settings are the opt-in
+(`Hyper-V boot disk pull root`, `Hyper-V boot disk staging root`). They are
+the only knob in this file, and off is a real state: with either blank
+nothing stages — a build that asks for the boot disk reaches the answer
+*"hyperv_bootdisk_pull_root is not configured"* (or the staging twin) once
+the ride's gates let it through — and §9's janitor line reads dormant.
+Enabling is §8's remedy in order — copy the shipped drop-in to the path it
+names, set both roots, `systemctl reload httpd` — and §8's purge warning
+applies to the whole arrangement: re-apply the drop-in after every
+`foreman-installer` run.
+
+The opt-in has a second half §8 does not mention. Measured (2026-11-26, a
+production host under Enforcing): the shipped SELinux policy makes the
+opt-in NOT complete under Enforcing. The snippet gate reads the installed drop-in as
+`foreman_rails_t`, and the policy denies that domain `search` on
+`/etc/httpd/conf.d` (`httpd_config_t`) and the read of the snippet itself;
+to the gate an EACCES looks like absence, so §8's *"is not installed"*
+refusal answers for a drop-in that IS installed and serving. The proven
+interim fix is a local policy module granting exactly the measured denial
+set and nothing else:
+
+    module foreman_hyperv_bootdisk 1.0;
+
+    require {
+            type foreman_rails_t;
+            type httpd_config_t;
+            class dir search;
+            class file { getattr open read ioctl };
+    };
+
+    allow foreman_rails_t httpd_config_t:dir search;
+    allow foreman_rails_t httpd_config_t:file { getattr open read ioctl };
+
+(`checkmodule -M -m -o bootdisk.mod foreman_hyperv_bootdisk.te`,
+`semodule_package -o bootdisk.pp -m bootdisk.mod`, `semodule -i bootdisk.pp`.)
+With it loaded, three full build chains ran end to end under Enforcing on a
+real cluster, AVC-denial-free for the whole ride window — the transfer
+itself asks for no grant: staged files are written by puma (`system_u`),
+inherit the pull root's
+`foreman_lib_t`, and Apache serves them Enforcing-quiet at dir 0711 / file
+0644. Two upstream tracks stay open: a foreman-selinux feature request for
+the snippet read, and a gate change so a policy block names the policy in
+the refusal instead of answering "not installed". Until one of them lands,
+an Enforcing host needs the module.
+
+## 11. Riding it: entry, power, and the media boot
+
+Measured (2026-11-26, production host, create and rebuild alike — the
+rebuild is the one an operator drives day to day):
+
+1. *Enter the build with the machine Off.* Core answers *"The host must be
+   powered off to build."* for a host whose build asks for the boot disk,
+   and `iso_attach` repeats the demand with its own refusal for any machine
+   not Off (fog's `Set-VMDvdDrive` refuses a running machine). There is no
+   `PUT /api/hosts/:id/build` member route — rebuild is the update route,
+   `PUT /api/hosts/:id`.
+2. *A rebuild must re-pass the storage root.* Send
+   `{"build":true,"compute_attributes":{"iso_upload_storage":"<root>"}}`.
+   `compute_attributes` is request-scoped and the stored attributes are not
+   what the boot disk reads, so a rebuild that only flips `build` wastes the
+   ISO generate and then answers *"iso_upload requires a storage id"*. The
+   root must be one the host reports: a wrong one is refused by name, the
+   refusal lists the reported roots, and *"Nothing was transferred."* On a
+   clustered resource the CSV volumes are among the reported roots and the
+   transfer rides them like any other root.
+3. *Nothing boots the media by itself.* On create, core queues the power-on
+   BEFORE the attach lands, so the machine's first boot happens without the
+   media; on rebuild nothing starts anything and the machine stays Off.
+   The attach writes DVD-first into the boot order — that write is the
+   F12, nothing waits on a keyboard — so the operator's move is one reboot
+   after a create, one start after a rebuild. (A reset against an Off VM
+   boots nothing: measured, no template fetch in ten minutes.)
+4. *The guest then rides its own media.* Anaconda fetches its template from
+   the unattended URL (measured: a media boot without F12), and the media's
+   built hook POSTs built (both measured rides drove that step by hand
+   through the HTTP vhost). The built side closes the ride: detach EJECTS
+   the media even from a running guest, delete sweeps the host-reported
+   roots for the host-named ISO, and nothing restores the boot order — DVD
+   stays first, harmless with an empty drive. Debris from a crashed ride
+   ages out under §9's janitor.
