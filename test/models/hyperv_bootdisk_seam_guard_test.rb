@@ -321,26 +321,36 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
 
   # ---- F1: the API path never crosses #update (asymmetry recorded at merge) -------
   #
-  # Api::V2::HostsController#update (installed core, hosts_controller.rb:158-167,
-  # read 2026-11-26) does @host.attributes = host_attributes(...) + @host.save —
-  # #update is NEVER called — and Orchestration::Compute declares
-  # compute_attributes as a plain attr_accessor (installed
-  # orchestration/compute.rb:9; rails-runner probe 2026-11-26: attributes= with
-  # the key lands the raw hash, no sanitizer, no override on Host::Managed), so
-  # the serialized hash is REPLACED WHOLE. hammer host update
-  # --compute-attributes that omits iso_upload_storage therefore loses the
-  # stored destination — the asymmetry PR-5 recorded at merge (round-23 fold)
-  # as documented-not-fixed: the carry lives in #update, and the lower seam
+  # Api::V2::HostsController#update (installed core, hosts_controller.rb:
+  # 158-164 — def at 158, attributes= at 162, save at 164, verified line-wise
+  # 2026-11-26) does @host.attributes = host_attributes(...) +
+  # @host.save — #update is NEVER called. The UI controller DOES call it
+  # (hosts_controller.rb:120 @host.update(attributes), read the same day),
+  # and that is the asymmetry PR-5 recorded at merge (round-23 fold) as
+  # documented-not-fixed: the carry lives in #update, and the lower seam
   # that would cover both paths was deferred out of the one-feature scope.
-  # These tests pin the RECORDED state, not new behavior: test-only, green on
-  # the base tree by design (no runtime line exists for them to be red
-  # about — recorded green-on-both-trees like the PLG-47 pin). The third pins
-  # WHERE the loss surfaces: installed bootdisk 24.1.0 reads
+  # compute_attributes is the plain attr_accessor Orchestration::Compute
+  # declares (installed orchestration/compute.rb:9, inside included do — the
+  # raw accessor is owned by Host::Managed itself; probe 2026-11-26), and
+  # this install stores it in NO hosts column (same probe: assigning the key
+  # marks no dirty column — changes stayed name/type — and
+  # columns_hash['compute_attributes'] is nil), so attributes= writes the
+  # hash WHOLE and the save's own orchestration reads whatever THIS request
+  # put on the accessor. A hammer/API update that omits iso_upload_storage
+  # therefore leaves the hash that request builds from without a
+  # destination — and no carry can rescue it, because the carry lives in
+  # the method the API path skips. (Today's probe also corrects the TODO's
+  # "stored destination" framing — with no column the key's only home is
+  # the request's accessor; the correction is recorded in the sandbox.)
+  # These tests pin the RECORDED state, not new behavior: test-only, green
+  # on the base tree by design (no runtime line exists for them to be red
+  # about — recorded green-on-both-trees like the PLG-47 pin). The third
+  # pins WHERE the loss surfaces: installed bootdisk 24.1.0 reads
   # compute_attributes&.with_indifferent_access&.dig(:iso_upload_storage) at
   # orchestration time (its orchestration/compute.rb:76-77) and hands it to
   # iso_upload as storage_id (:61), whose blank-id refusal (hyperv.rb:904)
-  # names the failure one build later instead of writing an ISO toward an
-  # undefined destination.
+  # names the failure at the queued build instead of writing an ISO toward
+  # an undefined destination.
 
   test 'the API controller shape (attributes= then save) REPLACES compute_attributes ' \
        'whole: the omitted iso_upload_storage is gone' do
@@ -370,8 +380,8 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
                  host.compute_attributes)
   end
 
-  test 'the loss surfaces one build later: bootdisk digs nil and iso_upload refuses ' \
-       'the replaced-hash storage id by name' do
+  test 'the loss surfaces at the queued build: bootdisk digs nil and iso_upload ' \
+       'refuses the replaced-hash storage id by name' do
     host = Host::Managed.new(name: 'bd5.example.com')
     host.compute_attributes = { 'memory_startup' => '1024', 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' }
     host.attributes = { 'compute_attributes' => { 'memory_startup' => '2048' } }
