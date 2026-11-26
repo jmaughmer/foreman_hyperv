@@ -451,8 +451,11 @@ class HypervListingPipelineTest < ActiveSupport::TestCase
   # The four clients all come through fresh_endpoint_client ->
   # fog_client_options; this pins that the wire the pipeline speculates on is
   # the SAME waited wire the sequential page dials, so the pop-site comment can
-  # keep its promise and a factory that ever drops a wait fails HERE, not as a
-  # hung page thread later.
+  # keep its promise and a factory that ever drops a wait fails HERE, not as
+  # a page thread held past every bound this plugin guarantees (round-51
+  # ruling on this tail: absent the plugin's waits it is the gem's own
+  # measured 60/70 s defaults that cap such a thread — held past every
+  # guarantee this file pins, but not hung forever).
   def test_every_pipeline_hop_client_carries_the_winrm_waits
     cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: CR_URL, user: 'u', password: 'p')
     composed = []
