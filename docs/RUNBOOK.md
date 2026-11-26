@@ -348,7 +348,7 @@ inherit the pull root's
 `foreman_lib_t`, and Apache serves them Enforcing-quiet at dir 0711 / file
 0644. Two upstream tracks stay open: a foreman-selinux feature request for
 the snippet read, and a gate change so a policy block names the policy in
-the refusal instead of answering "not installed". Until one of them lands,
+the refusal instead of answering *"not installed"*. Until one of them lands,
 an Enforcing host needs the module.
 
 ## 11. Riding it: entry, power, and the media boot
