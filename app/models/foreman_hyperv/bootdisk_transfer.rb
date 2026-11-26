@@ -74,6 +74,26 @@ module ForemanHyperv
                                      'Alias and <Directory> target to %<root>s and reload httpd (systemctl ' \
                                      'reload httpd). Nothing was staged.'
 
+    # The third answer, and on an enforcing host the most misleading one to
+    # lose: the drop-in exists but the Foreman application cannot READ it.
+    # Measured (sandbox pass 134, evidence/ride2-enforcing-2026-11-26.log):
+    # the shipped foreman-selinux policy denies foreman_rails_t the read on
+    # httpd_config_t, so File.file? answers false for an INSTALLED file —
+    # answering "not installed" there sends the operator to copy a file that
+    # is already in place. The remedy is a policy grant, and the message says
+    # so with the exact working module pointer.
+    BOOTDISK_SNIPPET_UNREADABLE_REFUSAL = 'The boot disk file cannot be staged for the host to pull: the Apache ' \
+                                          'drop-in for /bootdisk-pull is installed (%<paths>s) but Foreman cannot ' \
+                                          'read it (permission denied). The file is there, so copying it again ' \
+                                          'changes nothing: on an SELinux enforcing host the shipped ' \
+                                          'foreman-selinux policy does not grant the Foreman application the ' \
+                                          'read on Apache configuration (measured: denied on httpd_config_t), so ' \
+                                          'until foreman-selinux ships the grant, install a local policy module ' \
+                                          'giving the Foreman application domain directory search on the ' \
+                                          'drop-in dirs plus getattr/open/read/ioctl on httpd_config_t ' \
+                                          '(semodule -i; the foreman_hyperv RUNBOOK boot disk opt-in section ' \
+                                          'carries the exact measured module). Nothing was staged.'
+
     # The Apache drop-ins the pull URL rides. Measured (2026-11-24,
     # evidence/bd-pr3-apache-2026-11-24.log): foreman-installer PURGES the
     # vhost drop-in dirs, so the installed snippet is a state that can
@@ -291,6 +311,25 @@ module ForemanHyperv
         false
       end
 
+      # The boolean above answers false for BOTH "gone" and "denied", because
+      # its rescue throws the errno away — and under the measured enforcing
+      # denial that collapse made an installed drop-in report "not installed".
+      # The refusal needs the difference, so this asks the same read again and
+      # keeps only the answer the gate acts on: EACCES/EPERM is denial, and
+      # everything else (ENOENT first among them — a file that is gone is not
+      # unreadable) leaves the absence and Alias answers to their own checks.
+      # The second read is a classification retry on a path already about to
+      # refuse the ride, never a hot path. Public for the same seam reason as
+      # apache_snippet_serves?.
+      def apache_snippet_unreadable?(path)
+        File.read(path.to_s)
+        false
+      rescue Errno::EACCES, Errno::EPERM
+        true
+      rescue SystemCallError
+        false
+      end
+
       private
 
       # Which drop-ins the URL about to be handed to the host requires, and
@@ -301,11 +340,25 @@ module ForemanHyperv
       # request the host makes. A drop-in that exists but Aliases a different
       # root is as broken as one that is gone, so the check reads the target
       # too (apache_snippet_serves?) and names the right remediation for each.
+      # A drop-in that cannot be READ is the third answer, and the one an
+      # enforcing host is most likely to hand you: the measured policy denial
+      # makes File.file? answer false for an INSTALLED file, so the unreadable
+      # check goes first or a present drop-in is told "not installed".
       def require_served_snippet!(url, served)
         wanted = [HTTP_SNIPPET_PATH]
         wanted << HTTPS_SNIPPET_PATH if url.start_with?('https://')
         unmet = wanted.reject { |path| apache_snippet_serves?(path, served) }
         return if unmet.empty?
+
+        # Unreadable first: the denial makes the other two answers unreliable
+        # — a file the plugin cannot read cannot be checked for its Alias, and
+        # the File.file? absence test answering false on it is the exact
+        # confusion this branch was measured to fix (sandbox pass 134).
+        unreadable = unmet.select { |path| apache_snippet_unreadable?(path) }
+        if unreadable.any?
+          raise ForemanHyperv::OperationRefused,
+                format(BOOTDISK_SNIPPET_UNREADABLE_REFUSAL, paths: unreadable.join(' and '))
+        end
 
         absent = unmet.reject { |path| File.file?(path) }
         if absent.any?
