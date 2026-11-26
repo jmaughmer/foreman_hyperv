@@ -42,7 +42,11 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 #     so a UI save would otherwise WIPE the operator's ISO destination. The
 #     plugin's update seam carries the stored value into the submitted hash
 #     unless the submission itself names the key (API '' clears stay
-#     possible).
+#     possible). (PLG-48 probe 2026-11-26: there is NO hosts column for
+#     compute_attributes — "lives"/"stored" above can only mean the
+#     request's own accessor; see the F1 section header at the tail.) The
+#     API controller never crosses #update — that recorded asymmetry
+#     (PR-5, F1) and where the loss surfaces are pinned at the tail.
 class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
   alias assert_not refute
 
@@ -316,5 +320,88 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     end
 
     host.update('compute_attributes' => { 'memory_startup' => '1024' })
+  end
+
+  # ---- F1: the API path never crosses #update (asymmetry recorded at merge) -------
+  #
+  # Api::V2::HostsController#update (installed core, hosts_controller.rb:
+  # 158-164 — def at 158, attributes= at 162, save at 164, verified line-wise
+  # 2026-11-26) does @host.attributes = host_attributes(...) +
+  # @host.save — #update is NEVER called. The UI controller DOES call it
+  # (hosts_controller.rb:120 @host.update(attributes), read the same day),
+  # and that is the asymmetry PR-5 recorded at merge (round-23 fold) as
+  # documented-not-fixed: the carry lives in #update, and the lower seam
+  # that would cover both paths was deferred out of the one-feature scope.
+  # compute_attributes is the plain attr_accessor Orchestration::Compute
+  # declares (installed orchestration/compute.rb:9, inside included do — the
+  # raw accessor is owned by Host::Managed itself; probe 2026-11-26), and
+  # this install stores it in NO hosts column (same probe: assigning the key
+  # marks no dirty column — changes stayed name/type — and
+  # columns_hash['compute_attributes'] is nil), so attributes= writes the
+  # hash WHOLE and the save's own orchestration reads whatever THIS request
+  # put on the accessor. A hammer/API update that omits iso_upload_storage
+  # therefore leaves the hash that request builds from without a
+  # destination — and no carry can rescue it, because the carry lives in
+  # the method the API path skips. (Today's probe also corrects the TODO's
+  # "stored destination" framing — with no column the key's only home is
+  # the request's accessor; the correction is recorded in the sandbox.)
+  # These tests pin the RECORDED state, not new behavior: test-only, green
+  # on the base tree by design (no runtime line exists for them to be red
+  # about — recorded green-on-both-trees like the PLG-47 pin). The third
+  # pins WHERE the loss surfaces: installed bootdisk 24.1.0 reads
+  # compute_attributes&.with_indifferent_access&.dig(:iso_upload_storage) at
+  # orchestration time (its orchestration/compute.rb:76-77) and hands it to
+  # iso_upload as storage_id (:61), whose blank-id refusal (hyperv.rb:904)
+  # names the failure at the queued build instead of writing an ISO toward
+  # an undefined destination.
+
+  test 'the API controller shape (attributes= then save) REPLACES compute_attributes ' \
+       'whole: the omitted iso_upload_storage is gone' do
+    host = Host::Managed.new(name: 'bd5.example.com')
+    host.compute_attributes = { 'memory_startup' => '1024', 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' }
+
+    # Exactly the controller line — plain accessor write, no carry seam:
+    # hosts_controller.rb:162 @host.attributes = host_attributes(...).
+    host.attributes = { 'compute_attributes' => { 'memory_startup' => '2048' } }
+
+    assert_equal({ 'memory_startup' => '2048' }, host.compute_attributes)
+  end
+
+  test 'the SAME submission through #update keeps the destination: the F1 asymmetry is the entrypoint, not the carry' do
+    host = Host::Managed.new(name: 'bd5.example.com')
+    host.stubs(:provider).returns('Hyper-V')
+    host.stubs(:save).returns(false)
+    host.stubs(:hyperv_add_attributes)
+    host.compute_attributes = { 'memory_startup' => '1024', 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' }
+
+    host.update('compute_attributes' => { 'memory_startup' => '2048' })
+
+    # The UI path's hash arrives at the same accessor write the API path uses,
+    # but the prepended #update carried the key into it first (the wiring the
+    # dispatch tests above pin): whole-hash replace, yet the destination rides.
+    # Rides WHEN the accessor already holds it — no fresh request does on
+    # today's column-less core (F1 header above), so this pins the seam's
+    # behavior for a held accessor, not a proven production precondition.
+    assert_equal({ 'memory_startup' => '2048', 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' },
+                 host.compute_attributes)
+  end
+
+  test 'the loss surfaces at the queued build: bootdisk digs nil and iso_upload ' \
+       'refuses the replaced-hash storage id by name' do
+    host = Host::Managed.new(name: 'bd5.example.com')
+    host.compute_attributes = { 'memory_startup' => '1024', 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' }
+    host.attributes = { 'compute_attributes' => { 'memory_startup' => '2048' } }
+
+    # bootdisk's EXACT orchestration-time read (24.1.0
+    # orchestration/compute.rb:76-77), then the same hand-off :61 makes.
+    storage_id = host.compute_attributes&.with_indifferent_access&.dig(:iso_upload_storage)
+    assert_nil storage_id
+
+    cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: 'https://host.example:5985', user: 'u', password: 'p')
+    # __FILE__ stands in for the generated ISO: the blank-arg checks run FIRST
+    # (hyperv.rb:902-904), so this raises before any enablement gate, fog dial,
+    # or byte — the refusal is the documented one, not an environmental accident.
+    err = assert_raises(ArgumentError) { cr.iso_upload(__FILE__, EXISTING_UUID, storage_id: storage_id) }
+    assert_match(/iso_upload requires a storage id/, err.message)
   end
 end
