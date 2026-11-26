@@ -142,8 +142,8 @@ is any other lift a refusal promises.
 What a refusal means, and the paths this plugin leaves to an operator by
 hand — resolving a stranded cluster-role write, reading and clearing the
 sightings ledger, an endpoint whose cluster reads can never answer, a disk
-whose file cannot be proven safe to delete — are in
-[docs/RUNBOOK.md](docs/RUNBOOK.md).
+whose file cannot be proven safe to delete, and enabling and riding the
+boot disk pull — are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## Contributing
 
