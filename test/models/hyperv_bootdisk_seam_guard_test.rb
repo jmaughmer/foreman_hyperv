@@ -42,8 +42,11 @@ require 'fog/hyperv' if FOREMAN_BOOT || (defined?(Rails) && Rails.application)
 #     so a UI save would otherwise WIPE the operator's ISO destination. The
 #     plugin's update seam carries the stored value into the submitted hash
 #     unless the submission itself names the key (API '' clears stay
-#     possible). The API controller never crosses #update — that recorded
-#     asymmetry (PR-5, F1) and where the loss surfaces are pinned at the tail.
+#     possible). (PLG-48 probe 2026-11-26: there is NO hosts column for
+#     compute_attributes — "lives"/"stored" above can only mean the
+#     request's own accessor; see the F1 section header at the tail.) The
+#     API controller never crosses #update — that recorded asymmetry
+#     (PR-5, F1) and where the loss surfaces are pinned at the tail.
 class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
   alias assert_not refute
 
@@ -376,6 +379,9 @@ class HypervBootdiskSeamGuardTest < ActiveSupport::TestCase
     # The UI path's hash arrives at the same accessor write the API path uses,
     # but the prepended #update carried the key into it first (the wiring the
     # dispatch tests above pin): whole-hash replace, yet the destination rides.
+    # Rides WHEN the accessor already holds it — no fresh request does on
+    # today's column-less core (F1 header above), so this pins the seam's
+    # behavior for a held accessor, not a proven production precondition.
     assert_equal({ 'memory_startup' => '2048', 'iso_upload_storage' => 'C:\\ClusterStorage\\Volume1' },
                  host.compute_attributes)
   end
