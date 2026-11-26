@@ -851,7 +851,7 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_includes failed, 'Hyperv lab-cr:',
                     'the prefix names the compute resource, not the swept file'
     assert_includes failed, "for #{UUID}",
-                    'iso_detach already answers for #{vm_id} in its rescue line; delete names the machine too'
+                    'iso_detach already names the machine in its rescue line; delete does too'
   end
 
   # ---- the capability split -----------------------------------------------------
