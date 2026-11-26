@@ -334,19 +334,19 @@ Before the first enable, one prerequisite §8's remedy does not include: the
 `/var/lib/foreman/bootdisk`) must hold the EFI binaries the ISO is assembled
 from. Measured (2026-11-24: `generate_full_host` failed exactly there three
 times on the stock host before the files were installed; gem source re-read
-2026-11-26): every full
-provisioning-ISO generate copies exactly `grubx64.efi`, `shimx64.efi` and
-`mmx64.efi` from that directory into the 6 MB ESP image — and the gem ships
-no EFI binaries, so on a fresh host the first rebuild dies at the generate
-step with `ERF42-8203 ... Ensure /var/lib/foreman/bootdisk/grubx64.efi is
-readable (or update "Grub2 directory" setting)` no matter how correctly §8
+2026-11-26): every full provisioning-ISO generate copies exactly
+`grubx64.efi`, `shimx64.efi` and `mmx64.efi` from that directory into the
+6 MB ESP image — and the gem ships no EFI binaries, so on a fresh host the
+first rebuild dies at the generate step with `ERF42-8203 ... Ensure
+/var/lib/foreman/bootdisk/grubx64.efi is readable (or update "Grub2
+directory" setting)` no matter how correctly §8
 and the SELinux half below are done. What works here, sha256-verified
 byte-identical to the boot ESP's own files and `rpm -qf`-attributed (other
 distros keep the same three under their own `/boot/efi/EFI/<distro>/`):
 
     mkdir -p /var/lib/foreman/bootdisk
-    install -o foreman -g foreman -m 0644 \\
-      /boot/efi/EFI/almalinux/{grubx64,shimx64,mmx64}.efi \\
+    install -o foreman -g foreman -m 0644 \
+      /boot/efi/EFI/almalinux/{grubx64,shimx64,mmx64}.efi \
       /var/lib/foreman/bootdisk/
 
 `grubx64.efi` comes from the `grub2-efi-x64` package, `shimx64.efi` and
@@ -385,9 +385,10 @@ real cluster, AVC-denial-free for the whole ride window — the transfer
 itself asks for no grant: staged files are written by puma (`system_u`),
 inherit the pull root's
 `foreman_lib_t`, and Apache serves them Enforcing-quiet at dir 0711 / file
-0644. Of the two upstream tracks one has since landed in this plugin: the
+0644. Of the two upstream tracks, one has since landed in this plugin: the
 gate now splits the answers, and a blocked read arrives as §8's *"Foreman
-cannot read it"* refusal naming this module instead of *"is not installed"*.
+cannot read it"* refusal pointing to this module instead of *"is not
+installed"*.
 The foreman-selinux feature request for the read itself stays open, so the
 module remains required on an enforcing host until that one ships.
 
