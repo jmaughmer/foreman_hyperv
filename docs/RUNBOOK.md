@@ -281,6 +281,18 @@ its `Alias` (and `<Directory>`) to match `hyperv_bootdisk_pull_root`. Edit the
 file to the root the refusal names and reload. Re-apply step 1 after every
 `foreman-installer` run until a kafo post-hook exists (not yet shipped).
 
+A third message exists for the state an SELinux enforcing host is most likely
+to hit: *"...is installed (...) but Foreman cannot read it (permission
+denied)"*. Measured (2026-11-26, enforcing production host): the shipped
+foreman-selinux policy denies the Foreman application domain the search of
+`/etc/httpd/conf.d` and the read of the drop-in itself, and a permission
+denied reads to the gate like absence — an earlier build of this plugin
+answered the FIRST message above for an installed, serving file. It now
+answers this one instead, and the first two messages mean what they say
+(`is not installed` is true absence only). This refusal is not a drop-in
+fault: the file is correct, the policy is not — the remedy is §10's local
+policy module, and no amount of copying or editing the drop-in changes it.
+
 ## 9. The janitor: what the hourly cron line means
 
 The plugin registers `foreman_hyperv:bootdisk_janitor` through Foreman's own
@@ -317,6 +329,33 @@ names, set both roots, `systemctl reload httpd` — and §8's purge warning
 applies to the whole arrangement: re-apply the drop-in after every
 `foreman-installer` run.
 
+Before the first enable, one prerequisite §8's remedy does not include: the
+*Grub2 directory* (foreman_bootdisk's `bootdisk_grub2_dir` setting, default
+`/var/lib/foreman/bootdisk`) must hold the EFI binaries the ISO is assembled
+from. Measured (2026-11-24: `generate_full_host` failed exactly there three
+times on the stock host before the files were installed; gem source re-read
+2026-11-26): every full provisioning-ISO generate copies exactly
+`grubx64.efi`, `shimx64.efi` and `mmx64.efi` from that directory into the
+6 MB ESP image — and the gem ships no EFI binaries, so on a fresh host the
+first rebuild dies at the generate step with `ERF42-8203 ... Ensure
+/var/lib/foreman/bootdisk/grubx64.efi is readable (or update "Grub2
+directory" setting)` no matter how correctly §8
+and the SELinux half below are done. What works here, sha256-verified
+byte-identical to the boot ESP's own files and `rpm -qf`-attributed (other
+distros keep the same three under their own `/boot/efi/EFI/<distro>/`):
+
+    mkdir -p /var/lib/foreman/bootdisk
+    install -o foreman -g foreman -m 0644 \
+      /boot/efi/EFI/almalinux/{grubx64,shimx64,mmx64}.efi \
+      /var/lib/foreman/bootdisk/
+
+`grubx64.efi` comes from the `grub2-efi-x64` package, `shimx64.efi` and
+`mmx64.efi` from `shim-x64`. No grub module tree is involved — the prebuilt
+`grubx64.efi` is what is copied, so `grub2-efi-x64-modules` is not needed.
+They are copies, not symlinks: they do not follow RPM upgrades, so re-copy
+them after every `grub2-efi-x64` or `shim-x64` update — until you do, the
+generated disks boot with the copied generation's signed binaries and SBAT.
+
 The opt-in has a second half §8 does not mention. Measured (2026-11-26, a
 production host under Enforcing): the shipped SELinux policy makes the
 opt-in NOT complete under Enforcing. The snippet gate reads the installed drop-in as
@@ -346,10 +385,12 @@ real cluster, AVC-denial-free for the whole ride window — the transfer
 itself asks for no grant: staged files are written by puma (`system_u`),
 inherit the pull root's
 `foreman_lib_t`, and Apache serves them Enforcing-quiet at dir 0711 / file
-0644. Two upstream tracks stay open: a foreman-selinux feature request for
-the snippet read, and a gate change so a policy block names the policy in
-the refusal instead of answering *"not installed"*. Until one of them lands,
-an Enforcing host needs the module.
+0644. Of the two upstream tracks, one has since landed in this plugin: the
+gate now splits the answers, and a blocked read arrives as §8's *"Foreman
+cannot read it"* refusal pointing to this module instead of *"is not
+installed"*.
+The foreman-selinux feature request for the read itself stays open, so the
+module remains required on an enforcing host until that one ships.
 
 ## 11. Riding it: entry, power, and the media boot
 
