@@ -1055,7 +1055,11 @@ module ForemanHyperv
     # (every non-bootdisk build sweeps nothing), so each root answers quietly
     # and only a real host error is logged.
     def iso_delete(isofile, vm_id)
-      name = bootdisk_filename!(isofile.nil? ? nil : File.basename(isofile.to_s), 'iso_delete')
+      # NOT named `name`: a local by that word shadowed ComputeResource#name
+      # for the whole method body (Ruby binds the bare `name` in the log lines
+      # below to the local, not the method), so every line printed the ISO
+      # basename where the compute resource name belongs (round 55).
+      disk_name = bootdisk_filename!(isofile.nil? ? nil : File.basename(isofile.to_s), 'iso_delete')
       raise ArgumentError, 'iso_delete requires a virtual machine id' if vm_id.blank?
 
       begin
@@ -1072,7 +1076,7 @@ module ForemanHyperv
           return true
         end
         roots.each do |root|
-          path = bootdisk_host_path(root, name)
+          path = bootdisk_host_path(root, disk_name)
           begin
             removed = client.remove_file(path: path, root: root)
             if removed
@@ -1086,7 +1090,7 @@ module ForemanHyperv
           end
         end
       rescue StandardError => e
-        logger.warn "Hyperv #{name}: bootdisk iso_delete for #{name} failed (#{e.message}); the build proceeds"
+        logger.warn "Hyperv #{name}: bootdisk iso_delete for #{vm_id} failed (#{e.message}); the build proceeds"
       end
       true
     end

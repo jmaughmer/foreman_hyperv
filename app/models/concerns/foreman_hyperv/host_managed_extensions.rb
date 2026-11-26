@@ -32,15 +32,27 @@ module ForemanHyperv
 
     # bootdisk PR-5: the carry. foreman_bootdisk ships NO widget for
     # iso_upload_storage (grepped 24.1.0's views, lib and helpers: zero
-    # writers) — the key is set through the API/hammer and lives in the
-    # host's stored compute_attributes, which is exactly where the
-    # orchestration reads it (compute.rb:76-78). A UI edit re-renders only
-    # what the form draws, and Host::Managed#vm_compute_attributes
-    # (managed.rb:720-722) seeds the form from the LIVE fog model, which
-    # holds no such property — so without this carry every UI save would
-    # wipe the operator's ISO destination mid-flow. A submission that NAMES
-    # the key always wins (the API's explicit '' clear stays possible); this
-    # only replaces absence.
+    # writers) — the key is set through the API/hammer and lands on the
+    # request's compute_attributes accessor (the included-do attr_accessor at
+    # compute.rb:9), which is exactly where the orchestration reads it at the
+    # queued build (compute.rb:76-78). There is no storing to speak of: hosts
+    # has no compute_attributes column on the installed core (measured
+    # 2026-11-26 — columns_hash answers nil, the packaged migrations only
+    # ever added the old compute-profile KV table and the nics column, and
+    # assigning the key marks no dirty column), so the compute_attributes
+    # this carry reads can only be what the current request's own assignment
+    # put there. What the carry is therefore worth: within one request that
+    # submits the key, #update re-injects a key the accessor already holds
+    # (the no-op PLG-48 pins); in a fresh request it finds nothing, form
+    # prefill included — the form seeds from the LIVE fog model
+    # (vm_compute_attributes, managed.rb:720-722), which holds no such
+    # property. Round 52 RULED no shipped production flow presents #update a
+    # non-nil accessor in a fresh request, so TODAY this carries nothing
+    # there; whether it earns its keep or simplifies out is the open design
+    # question for the bootdisk activation window (production is opt-in and
+    # dormant). The mechanical contract stays: a submission that NAMES the
+    # key always wins (the API's explicit '' clear stays possible); this only
+    # replaces absence.
     def hyperv_preserve_iso_upload_storage(attributes)
       compute = attributes['compute_attributes']
       return unless compute.is_a?(Hash)

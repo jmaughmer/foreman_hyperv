@@ -253,6 +253,21 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     end
   end
 
+  # Captures log lines so a test can pin WHAT a line says, not just that the
+  # step logged at all (the round-55 iso_delete shadow made the words a
+  # correctness surface).
+  class LogCapture
+    attr_reader :lines
+
+    def initialize
+      @lines = []
+    end
+
+    %i[debug info warn error fatal].each do |level|
+      define_method(level) { |message, *_rest| @lines << message.to_s }
+    end
+  end
+
   def build_cr(fog, roots: ['C:\VMs', 'C:\ClusterStorage\Volume1'], state: :Off,
                generation: :UEFI, sb: false,
                machine: MachineStub.new(UUID, state: state, generation: generation, secure_boot: sb, service: fog),
@@ -799,6 +814,44 @@ class HypervBootdiskIsoTest < ActiveSupport::TestCase
     assert_raises(ArgumentError) { cr.iso_delete('/tmp/x/host.iso', '') }
     assert_raises(ArgumentError) { cr.iso_delete('', UUID) }
     assert_empty fog.calls
+  end
+
+  # Round 55 finding: iso_delete's local `name = bootdisk_filename!` shadowed
+  # ComputeResource#name for the whole method — Ruby binds the bare `name` in
+  # every log line to the local, not the method — so the lines printed the ISO
+  # basename where the compute resource name belongs, and the outer rescue
+  # printed it a second time where the machine id belongs (iso_detach's rescue
+  # already answers `for #{vm_id}`). These pin the words in the lines.
+
+  test 'iso_delete log lines name the COMPUTE RESOURCE — the local name shadow printed the basename' do
+    fog = FogBootdisk.new(remove_answers: { 'c:\vms\host.example.com.iso' => true })
+    cr, = build_cr(fog)
+    log = LogCapture.new
+    cr.stubs(:logger).returns(log)
+
+    assert_equal true, cr.iso_delete('/tmp/foreman-d0x/host.example.com.iso', UUID)
+
+    assert(log.lines.any? { |line| line.include?('Hyperv lab-cr:') },
+           "every iso_delete line must open with the compute resource name, got: #{log.lines.inspect}")
+    assert(log.lines.none? { |line| line.include?('Hyperv host.example.com.iso:') },
+           'the ISO basename in the Hyperv prefix is the shadow: the sweep target lives in the path, ' \
+           'the prefix is for the resource the sweep ran against')
+  end
+
+  test 'the iso_delete rescue line names the resource and the machine — never the basename twice' do
+    cr, = build_cr(FogBootdisk.new)
+    log = LogCapture.new
+    cr.stubs(:logger).returns(log)
+    cr.stubs(:storage_roots).raises(RuntimeError, 'host vanished mid-sweep')
+
+    assert_equal true, cr.iso_delete('/tmp/foreman-d0x/host.example.com.iso', UUID)
+
+    failed = log.lines.grep(/iso_delete for/).first
+    assert failed, "the outer rescue must log the failed sweep, got: #{log.lines.inspect}"
+    assert_includes failed, 'Hyperv lab-cr:',
+                    'the prefix names the compute resource, not the swept file'
+    assert_includes failed, "for #{UUID}",
+                    'iso_detach already names the machine in its rescue line; delete does too'
   end
 
   # ---- the capability split -----------------------------------------------------

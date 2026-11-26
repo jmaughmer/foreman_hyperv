@@ -338,6 +338,54 @@ class HypervBootdiskEndpointTest < ActiveSupport::TestCase
     assert_empty Dir.children(@served), 'a mis-aliased drop-in stages nothing, exactly like a missing one'
   end
 
+  # The third answer, from the measured Enforcing blocker (sandbox pass 134):
+  # with the shipped foreman-selinux policy, foreman_rails_t is denied the
+  # read on the httpd_config_t drop-in, so File.file? answers FALSE for a
+  # file that IS installed and the read raises EACCES. The two-answer gate
+  # called that "not installed" and sent the operator to copy a file that was
+  # already there; the truth is a policy grant. The refusal wording is the
+  # fix under Enforcing-without-the-module, which is every fresh install.
+
+  test 'a drop-in that EXISTS but cannot be READ refuses with the policy answer, not "not installed"' do
+    FileUtils.mkdir_p([@served, @staging])
+    src = make_iso(@root)
+    stub_snippet(ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH, false)
+    File.stubs(:read).with(ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH)
+        .raises(Errno::EACCES.new('Permission denied @ rb_file_open - ' \
+                                  '/etc/httpd/conf.d/05-foreman.d/foreman-bootdisk-pull.conf'))
+
+    error = assert_raises(ForemanHyperv::OperationRefused) do
+      ForemanHyperv::BootdiskTransfer.stage(src, machine: UUID)
+    end
+
+    assert_includes error.message, ForemanHyperv::BootdiskTransfer::HTTP_SNIPPET_PATH
+    assert_includes error.message, 'cannot read'
+    assert_not_includes error.message, 'is not installed',
+                        'the file IS there under the measured denial — telling the operator to install it ' \
+                        'again sends them past a file that is already in place'
+    assert_includes error.message, 'foreman-selinux',
+                    'the remedy is the policy grant (local module or upstream), not a copy'
+    assert_empty Dir.children(@served)
+    assert_empty Dir.children(@staging)
+  end
+
+  test 'the unreadable check tells permission denied from absence — absence keeps the purge refusal' do
+    ForemanHyperv::BootdiskTransfer.unstub(:apache_snippet_serves?)
+    path = File.join(@root, 'denied.conf')
+    File.write(path, "Alias /bootdisk-pull #{@served}\n")
+
+    assert_not ForemanHyperv::BootdiskTransfer.apache_snippet_unreadable?(path),
+               'a readable drop-in is not the unreadable case'
+
+    File.stubs(:read).with(path).raises(Errno::EACCES.new('Permission denied'))
+    assert ForemanHyperv::BootdiskTransfer.apache_snippet_unreadable?(path),
+           'the measured denial answers EACCES on a file that EXISTS — that is the whole finding'
+
+    File.stubs(:read).with(path).raises(Errno::ENOENT.new('No such file or directory'))
+    assert_not ForemanHyperv::BootdiskTransfer.apache_snippet_unreadable?(path),
+               'ENOENT is absence: the installer-purge refusal stays the honest answer there'
+  end
+
   test 'an http unattended URL does NOT require the ssl-side twin — the scheme rule is a rule, not a mood' do
     FileUtils.mkdir_p([@served, @staging])
     stub_unattended
