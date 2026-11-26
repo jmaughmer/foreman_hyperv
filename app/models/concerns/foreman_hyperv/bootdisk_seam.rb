@@ -23,8 +23,15 @@ module ForemanHyperv
   # (orchestration/compute.rb:29). The guard mirrors the queue's own gate, or
   # it would be dead code. Per Decision 6 item 6 a blank MAC itself NEVER
   # refuses: Hyper-V always answers compute_provides?(:mac) true, and that
-  # ever-true fact is precisely the one the owed CALL-ORDER deferral exists
-  # to work with — not this guard's trigger.
+  # ever-true fact is precisely the one the CALL-ORDER deferral exists to
+  # work with — not this guard's trigger. The deferral is now MEASURED and
+  # deliberately unshipped (sandbox pass 132): queuers run core-first /
+  # plugin-second in valid? order with Task#<=> tying on created, so at
+  # priorities 5/6 core runs first and the generate's upload pair interleaves
+  # AFTER core's Query-details/Set-IP — the generate's xorriso seconds are
+  # what delays Set-IP — and attach (900) lands last. Moving
+  # queue_bootdisk_compute later is proven to be the lever; if bootdisk
+  # activation ever shows IP-config lag, that is the measurement to act on.
   #
   # The known harmless gap (round 10 nit): a host that carries a uuid whose
   # VM was deleted out from under Foreman takes core's create branch while
