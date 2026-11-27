@@ -6,3 +6,33 @@
 <% end -%>
 <%= text_f f, :basename, label: _('Name'), label_help: _('This is the VHD filename on disk, without extension'), required: true, disabled: f.object.persisted? %>
 <%= byte_size_f f, :size_bytes, label: _('Size') %>
+<%
+  # PLG-60: the cluster shared volume a disk lands on. Placement reads
+  # volumes_attributes[*][:datastore] (the membership check refuses a named
+  # volume the cluster does not report, and create composes the folder and
+  # config root from the chosen volume's own path); fog never persists the
+  # key, so this select is the only place a UI can say where the disk goes.
+  # A stand-alone resource gets no select — placement takes its root from the
+  # node and does nothing with the datastore key there; a raw API rider that
+  # names one anyway is refused, the endpoint answering no cluster volumes at
+  # all. A volumes read that raises renders the select with only its blank:
+  # silence offers no choices, blank is the honest "no instruction", and
+  # placement's own refusals stay the loud word at save. hypervClusterChange
+  # refills the select per cluster; a volume the cluster answers but declines
+  # (offline, no mount path) is not offered here, and the create's refusal
+  # names its reason if a raw API rider asks for it anyway.
+  placement_cluster = compute_resource.endpoint_cluster
+  placement_volumes =
+    begin
+      placement_cluster ? compute_resource.available_storage_domains(placement_cluster.name) : []
+    rescue StandardError => ex
+      Rails.logger.warn "Hyper-V shared volumes for #{placement_cluster.name} could not be read for the disk form: #{ex.message.lines.first}"
+      []
+    end
+-%>
+<% if placement_cluster -%>
+<%= select_f f, :datastore, placement_volumes, :name, :name,
+      { include_blank: true, selected: f.object.datastore },
+      label: _('Shared volume'), label_size: 'col-md-3', size: 'col-md-8', disabled: f.object.persisted?,
+      label_help: _('Cluster shared volume to place this disk on. Blank lets placement pick the cluster\'s first offered volume. Decided at create: editing a disk never moves its files.') %>
+<% end -%>

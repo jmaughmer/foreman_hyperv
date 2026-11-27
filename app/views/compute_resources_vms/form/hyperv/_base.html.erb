@@ -15,7 +15,14 @@
   end
 -%>
 <% if clusters.any? -%>
-  <%= select_f f, :cluster_name, clusters, :to_s, :to_s, { include_blank: true }, label: _('Cluster'), disabled: !new_host %>
+  <%# PLG-60: the cluster select also drives the disk placement select —
+      core's nested cluster route answers a cluster NAME (cluster_named
+      matches names as well as ids), so the URL rides only the resource.
+      The nested route is a core string route with no named helper, so the
+      prefix rides the member helper's own path (which carries the
+      RELATIVE_URL_ROOT a sub-URI deploy serves Foreman from — a hardcoded
+      /api/v2/... would 404 there and the refill would fail open forever). -%>
+  <%= select_f f, :cluster_name, clusters, :to_s, :to_s, { include_blank: true }, label: _('Cluster'), disabled: !new_host, onload: 'hypervClusterChange(this);', onchange: 'hypervClusterChange(this);', data: { hyperv_storage_domains_base_url: "#{api_compute_resource_path(compute_resource)}/available_clusters" } %>
   <% if computers.count > 1 -%>
     <%# PLG-59: the switch-hosts endpoint URL rides the host select the hook
         is wired to; the JS reads it off the element (hypervFilterSwitchesForHost). -%>

@@ -220,6 +220,18 @@ class HypervAvailableStorageDomainsTest < ActiveSupport::TestCase
     assert_equal VOL1, domain.id
   end
 
+  def test_placement_storage_reads_a_blank_datastore_as_no_instruction_not_a_volume_named_blank
+    # The PLG-60 volume select's blank option submits ''; Rails keeps it in
+    # the nested-attributes hash. An emptied instruction is the absence of an
+    # instruction — placement chooses — and never a volume whose name is ''.
+    cr, cluster, = placement_cr([online_volume('Cluster Volume1', VOL1), online_volume('Cluster Volume3', VOL3)])
+    attrs = { volumes_attributes: { '0' => { 'datastore' => '' } } }
+
+    domain = cr.send(:placement_storage, cluster, attrs)
+
+    assert_equal VOL1, domain.id
+  end
+
   def test_placement_storage_refuses_a_named_volume_that_is_nowhere_naming_it
     cr, cluster, = placement_cr([online_volume('Cluster Volume1', VOL1)])
     attrs = { volumes_attributes: { '0' => { 'datastore' => 'Cluster Volume9' } } }
@@ -281,6 +293,20 @@ class HypervAvailableStorageDomainsTest < ActiveSupport::TestCase
     error = assert_raises(ForemanHyperv::OperationRefused) { cr.send(:validate_placement!, attrs) }
     assert_includes error.message, 'has not read'
     assert_not_includes error.message, 'offline'
+  end
+
+  def test_validate_placement_reads_the_forms_blank_datastore_as_no_instruction
+    # The PLG-60 volume select's blank option submits ''; the membership
+    # check must not treat it as a volume named '' and refuse a create the
+    # form made with the field left alone.
+    cr = ForemanHyperv::Hyperv.new(name: 'lab-cr', url: "http://#{HOST}:5985/wsman", user: 'u', password: 'p')
+    cr.stubs(:placement_target_names).returns([HOST])
+    cluster = ClusterDouble.new(id: 'c1', name: 'lab-cluster', volumes: [online_volume('Cluster Volume1', VOL1)])
+    cr.stubs(:endpoint_cluster).returns(cluster)
+    cr.stubs(:logger).returns(LogDouble.new)
+
+    attrs = { volumes_attributes: { '0' => { 'datastore' => '' } } }
+    cr.send(:validate_placement!, attrs) # no raise: blank is no instruction
   end
 
   # ---- the blank-id gate on the create ------------------------------------------

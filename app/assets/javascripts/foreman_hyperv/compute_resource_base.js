@@ -165,3 +165,66 @@ function hypervVLANPrivateModeChange(item) {
   $(parent.querySelectorAll(id)).show();
   $(parent.querySelectorAll(id + ' input')).removeAttr('disabled');
 }
+
+// PLG-60: shared volumes are a per-cluster fact and the volume partial was
+// rendered against the endpoint's own cluster. Changing the cluster refills
+// every datastore select in the form — the hidden "Add Volume" template
+// included, so volumes added after a cluster change are born with the right
+// choices too. A failed fetch leaves every option exactly as the server
+// rendered it (the save-time membership check is the enforcement); a cluster
+// that offers nothing leaves only the blank, which is the honest
+// "no instruction". A selection survives a refill only while the new list
+// still offers it; a name no longer offered resets to the blank rather than
+// keeping a choice the list denies.
+var hypervClusterChangeGen = 0;
+function hypervClusterChange(item) {
+  var url = $(item).data('hyperv-storage-domains-base-url');
+  if (!url) { return; }
+
+  var $form = $(item).closest('form');
+  var selects = $form.find('select[name$="[datastore]"]');
+  if (selects.length === 0) { return; }
+
+  var cluster = $(item).val() || '';
+  if (cluster === '') {
+    // No cluster named: nothing to place on, and nothing to name.
+    hypervClusterChangeGen += 1; // any in-flight list no longer speaks for the form
+    hypervApplyStorageDomains(selects, []);
+    return;
+  }
+
+  // Same generation rule as hypervSwitchHosts: the newest REQUEST owns the
+  // form, so a rapid cluster change cannot have an older cluster's volume
+  // list land after the newer one's.
+  hypervClusterChangeGen += 1;
+  var gen = hypervClusterChangeGen;
+  $.ajax({
+    url: url + '/' + encodeURIComponent(cluster) + '/available_storage_domains',
+    type: 'GET',
+    dataType: 'json',
+    success: function (data) {
+      if (gen !== hypervClusterChangeGen) { return; }
+      hypervApplyStorageDomains(selects, (data && data.results) || []);
+    },
+    error: function () {
+      if (gen !== hypervClusterChangeGen) { return; }
+      // Silence keeps the server-rendered choices standing.
+    },
+  });
+}
+
+function hypervApplyStorageDomains(selects, domains) {
+  var names = domains.map(function (domain) { return domain.name; });
+  selects.each(function () {
+    var $select = $(this);
+    var current = $select.val() || '';
+    var html = '<option value=""></option>';
+    names.forEach(function (name) {
+      var esc = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      html += '<option value="' + esc + '">' + esc + '</option>';
+    });
+    $select.html(html);
+    $select.val(names.indexOf(current) !== -1 ? current : '');
+  });
+}
