@@ -484,13 +484,43 @@ Hyper-V host fetches the staged file from the pull endpoint, so Foreman's
 wire carries the WinRM command and its answer, not the 245 MB of ISO bytes.
 RTT adds command round trips, not volume; what a slow link does stretch is
 the transfer's wall-clock time inside the one long-running command the host
-runs for it. That command's deadline is the WinRM transport's operation
-timeout — the 90 s this plugin hands the fog (§2 counts the same wait; the
-fog's own default applies only when the compute resource sets no timeout
-option) — and the plugin layers no transfer deadline of its own. The
-transfer math is therefore one window: the 245 MB ISO must cross the link
-inside the endpoint-side 90 s operation window, roughly 3 MB/s sustained;
-the measured LAN pull cleared it with room to spare (234 MiB in 1.6 s).
+runs for it. That command rides its OWN WinRM operation window, computed by
+fog-hyperv builds from the pull-window change onward from the size the pull
+already carries (the README's "Which `fog-hyperv` you get" says which gem
+you get, not which of these two builds — both answer 0.2.2 with the same
+capability list; the tell is whether the installed gem's
+fetch_url_to_path.rb defines pull_operation_timeout): one MiB per second — a
+budget set below every pull rate this fork has measured, the lab's 234 MiB
+in 1.6 s included — so the lab's 245 MB (234 MiB) ISO rides a 234 s window,
+clamped at 90 s below and 3600 s above (the floor is exactly the 90 s this
+plugin pins its clients to — §2 counts the same wait — so small pulls keep
+the window they have always had; the ceiling bounds the computation at
+3600 MiB, just over 3.5 GiB of ISO). The fog keeps a longer configured
+`hyperv_operation_timeout` when a client brings one — the window is the
+larger of the computed number and the configured one, so the computation
+only ever widens an explicit wait, never narrows it — and through this
+plugin there is nothing to widen: every fog client it composes is pinned to
+90 s (§2), so the computed number IS the pull's window. The widened window
+rides its own WinRM connection inside the fog — cached per endpoint and
+window, kept out of the ordinary connection pool — so everything else on the
+resource keeps the pinned 90 s wait, and the plugin layers no transfer
+deadline of its own. The transfer math is therefore the link's, not a fixed
+window's: what still aborts a pull is exceeding the computed window — in
+practice a link sustaining well under 1 MiB/s across the download AND its
+host-side size check and hash (below 90 MiB the 90 s floor is the window,
+far more generous than the budget) — and an abort mid-download (the window
+expiring, not a script refusal, which deletes its own `.part`) leaves the
+`.part` file behind on the host, out of §9's janitor's reach — it sweeps
+only the two Foreman-side roots — until the next pull to that name writes
+over it. On an older fog build the pull shares the pinned 90 s like every
+other command, which caps a 245 MB ISO at roughly 2.7 MB/s (2.6 MiB/s)
+however good the link is; the measured LAN pull cleared even that with room
+to spare (234 MiB in 1.6 s). This computed-window build rode the production
+host on 2026-11-27: the rebuild answered 200 in 44.6 s (generate through
+attach — the host's pull of the 245 MB boot disk included), well inside the
+234 s the disk's own size computes; the guest's own template fetch proved
+the media boot, and the verifier closed the ride with the eject from the
+running guest and the staged file's removal.
 
 ## 13. Which Windows Server builds this plugin's behavior was measured on
 
