@@ -765,7 +765,7 @@ module ForemanHyperv
       # missing-where warnings below — folding silence into an empty list let
       # one down node shrink the shared set and log every switch as missing
       # there, which is how an outage used to rewrite the cluster's facts.
-      answered = switches_by_host.reject { |_host, list| list.nil? }
+      answered = switches_by_host.compact
       shared = answered.values.map { |list| list.map(&:name) }.reduce(:&) || []
       (first_by_name.keys - shared).each do |name|
         without = answered.reject { |_host, list| list.any? { |sw| sw.name == name } }.keys
@@ -790,7 +790,7 @@ module ForemanHyperv
       hosts = cluster ? cluster_backed_hosts(cluster) : []
       return endpoint_switch_hosts if hosts.empty?
 
-      read_node_switches(hosts).transform_values { |list| list && list.map(&:name) }
+      read_node_switches(hosts).transform_values { |list| list&.map(&:name) }
     end
 
     # PLG-59: the endpoint's own switch list as plain {id, name} pairs — the
