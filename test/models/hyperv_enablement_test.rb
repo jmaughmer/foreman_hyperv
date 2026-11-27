@@ -452,6 +452,49 @@ class HypervEnablementTest < ActiveSupport::TestCase
     assert_includes scripts.first, '-Recurse', 'the config lives one level down; the read must reach it'
   end
 
+  # PLG-54 (whole-fork review, folder_preflight finding): the site's escaping
+  # is one owner, not a per-site gsub. The PowerShell tokenizer ends a
+  # single-quoted literal at FIVE characters — the ASCII apostrophe and the
+  # four typographic single quotes (U+2018-U+201B) — and the name rule above
+  # deliberately allows them all (a typographic apostrophe is real filename
+  # material). An escape that doubles only the ASCII one let a name like
+  # lab’vm2 close its own literal: the benign answer is a parse error, a lost
+  # pre-flight, and a kept folder; the crafted answer — a name carrying a
+  # typographic quote and then `;` `(` `)` (all allowed by the name rule) —
+  # runs the tail as CODE under the WinRM account. The pin is byte-exact on
+  # the `$p = ` line: the whole path, every literal-ending character doubled,
+  # and nothing outside the quotes.
+  def test_the_preflight_doubles_every_quote_that_can_end_the_literal
+    cr, = build_cr(full_fog)
+    ["'", "\u2018", "\u2019", "\u201A", "\u201B"].each do |quote|
+      vm = attributed_vm(name: "lab#{quote}vm2", path: "C:\\VMs\\lab#{quote}vm2", clustered: false)
+      vm.set_preflight('ABSENT')
+      cr.send(:destroy_folder?, vm)
+      scripts = vm.calls.select { |c| c.is_a?(Array) && c.first == :run_cmd }.map(&:last)
+      assert_equal 1, scripts.size
+      line = scripts.first.lines.find { |l| l.start_with?('$p = ') }.to_s.strip
+      assert_equal "$p = 'C:\\VMs\\lab#{quote * 2}vm2'",
+                   line, "the #{quote.inspect} in the machine name must ride doubled inside the literal"
+    end
+  end
+
+  # The crafted name, byte-exact: base rendered `$p = 'C:\VMs\a’);('` — the
+  # tokenizer closes the literal at U+2019 and `); (` executes in the script.
+  # The fixed line has the quote doubled and the injection inert, with no
+  # code after the closing quote.
+  def test_a_name_crafted_to_escape_the_literal_stays_inside_it
+    cr, = build_cr(full_fog)
+    name = "a\u2019);("
+    vm = attributed_vm(name: name, path: "C:\\VMs\\#{name}", clustered: false)
+    vm.set_preflight('ABSENT')
+    cr.send(:destroy_folder?, vm)
+    scripts = vm.calls.select { |c| c.is_a?(Array) && c.first == :run_cmd }.map(&:last)
+    assert_equal 1, scripts.size
+    line = scripts.first.lines.find { |l| l.start_with?('$p = ') }.to_s.strip
+    assert_equal "$p = 'C:\\VMs\\a\u2019\u2019);('", line,
+                 'the doubled typographic quote keeps the whole path ONE literal'
+  end
+
   # PLG-41 (review F6): the verdict licenses Remove-Item -Recurse, and on
   # the Windows PowerShell 5.1 these hosts run, that recursion deletes
   # THROUGH a child junction into its target (PowerShell/PowerShell#621,

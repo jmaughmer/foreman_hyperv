@@ -1,5 +1,11 @@
 # frozen_string_literal: true
 
+# fog-hyperv's Utils module autoloads six members and PsQuote is not one of
+# them — fog's own consumers require the file by path, and so does this site,
+# rather than relying on which of fog's internals happened to load first.
+# The required file is idempotent (one module definition).
+require 'fog/hyperv/utils/ps_quote'
+
 module ForemanHyperv
   class Hyperv < ::ComputeResource
     include ComputeResourceCaching
@@ -2332,12 +2338,17 @@ module ForemanHyperv
     # The wire half, one script, one round trip: exists, attributes, contents
     # in a single answer. The path riding the script is one the string rule
     # already attributed (its components matched a hypervisor-named root and a
-    # clean machine name) — the escaping is belt, the string rule is braces.
-    # Any read that cannot be had (fog error, unparsable answer) keeps the
-    # folder: the pre-flight licenses the delete, and no answer licenses nothing.
+    # clean machine name) — the escaping is belt, the string rule is braces,
+    # and the belt is fog's single PsQuote owner (PLG-54, whole-fork review):
+    # the name rule allows the four typographic single quotes, and the PowerShell
+    # tokenizer ends a single-quoted literal at all five quote characters, so
+    # a doubling of only the ASCII apostrophe let a legal name close its own
+    # literal. Any read that cannot be had (fog error, unparsable answer) keeps
+    # the folder: the pre-flight licenses the delete, and no answer licenses
+    # nothing.
     # @return [Symbol] :ok, :absent, or :keep (with the reason logged)
     def folder_preflight(vm, folder)
-      quoted = "'#{folder.gsub("'", "''")}'"
+      quoted = Fog::Hyperv::Utils::PsQuote.quote(folder)
       script = format(FOLDER_PREFLIGHT_SCRIPT, folder: quoted)
       out = vm.service.run_cmd(script, _skip_json: true)
       answer = out.stdout.to_s.strip
