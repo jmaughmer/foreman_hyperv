@@ -36,8 +36,10 @@ function hypervHostChange(item) {
 // The map is fetched once and reused while its key holds. The key is the
 // resource plus the cluster the form currently names, because the map is a
 // statement about that cluster's nodes; changing the cluster and then the
-// host re-fetches, and a cluster change alone cannot strand a wrong dim
-// (the host hook is the only thing that dims).
+// host re-fetches. Requests carry a generation number: when a newer fetch
+// has been asked for, an older in-flight response no longer speaks for the
+// form and applies no dim (last REQUEST wins, not last RESPONSE).
+var hypervSwitchHostsGen = 0;
 function hypervSwitchHosts(hostSelect, done) {
   var url = $(hostSelect).data('hyperv-switch-hosts-url');
   if (!url) { done(null); return; }
@@ -51,11 +53,14 @@ function hypervSwitchHosts(hostSelect, done) {
     return;
   }
 
+  hypervSwitchHostsGen += 1;
+  var gen = hypervSwitchHostsGen;
   $.ajax({
     url: url + (cluster ? '?cluster_name=' + encodeURIComponent(cluster) : ''),
     type: 'GET',
     dataType: 'json',
     success: function (data) {
+      if (gen !== hypervSwitchHostsGen) { return; }
       var cr = (data && data.compute_resource) || {};
       window.hypervSwitchHostsCache = { key: key, info: { switchHosts: cr.switch_hosts || {}, endpointSwitches: cr.endpoint_switches || null } };
       done(window.hypervSwitchHostsCache.info);
@@ -63,6 +68,7 @@ function hypervSwitchHosts(hostSelect, done) {
     error: function () {
       // Silence is not absence: the map is simply not held, and the caller
       // fails open. Nothing is cached for a failed read.
+      if (gen !== hypervSwitchHostsGen) { return; }
       done(null);
     },
   });

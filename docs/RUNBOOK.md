@@ -656,8 +656,12 @@ selectable for another, and a doomed selection that bypasses the form (a
 raw API create with `computer_name` and a `switch_id` GUID) is caught by
 the gate before the machine exists, not after. A create that names no
 owner node cannot be gated — fog's placement wins, and fog's error stays
-as measured. The JS path has no harness in this fork: the dimming is
+as measured. An API UPDATE naming both owner and cluster is gated by the
+same rule; the web edit page cannot reach the gate, because its disabled
+Computer Name select submits no owner. The JS path has no harness in this fork: the dimming is
 verified by reading, the gate and the map by the model suite
-(`test/models/hyperv_switch_hosts_test.rb`), and the route's shape by the
-deploy read-back (§2's MARK pattern applies to the rabl too).
+(`test/models/hyperv_switch_hosts_test.rb`), and the route by live read-backs
+against the lab: the stand-alone endpoint's own map, the clustered three-node
+map plus endpoint pairs, a 404 for an unknown resource id, and the core
+sibling routes answering unregressed beside them (§13's builds).
 

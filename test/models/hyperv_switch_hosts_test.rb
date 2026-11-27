@@ -118,6 +118,13 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
       Loader.new
     end
 
+    # endpoint_cluster asks a fog too old to have it via respond_to?, and
+    # nothing in this suite reaches #clusters; answering [] keeps a later
+    # narrowing of that rescue from red-ing this suite on a NoMethodError.
+    def clusters
+      []
+    end
+
     def hosts
       HostCollection.new(self)
     end
@@ -355,6 +362,21 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     assert_includes error.message, 'SRV-3'
     assert_includes error.message, 'HV-NODE1'
     assert_includes error.message, 'LAN, SRV-1', 'the refusal names what the node DOES answer'
+  end
+
+  def test_the_gate_names_no_switches_at_all_for_a_node_whose_completed_read_is_empty
+    # The empty-completed-list arm of the refusal: absence is proven, and the
+    # sentence must not trail off into "(that node answers: )".
+    cr = build_cr
+    cr.node_fogs['hv-node3'].host.switches = Switches.new([])
+    silence_warnings
+
+    error = assert_raises(ForemanHyperv::OperationRefused) do
+      cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, computer: 'HV-NODE3'))
+    end
+
+    assert_includes error.message, 'no switches at all'
+    assert_not_includes error.message, '(that node answers: )'
   end
 
   def test_the_gate_passes_a_switch_the_node_answers

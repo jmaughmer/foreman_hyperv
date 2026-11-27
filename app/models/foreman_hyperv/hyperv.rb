@@ -778,9 +778,11 @@ module ForemanHyperv
     # PLG-59: which switch NAMES each node of the placement answers, as
     # {host name => [names] | nil}. This is the per-node membership
     # available_networks already computes and discards, kept: the VM form's
-    # Computer Name select filters its switch dropdown with it (create-only —
-    # the edit form's host select is disabled), and the create gate reuses it
-    # from the same per-node cache entries switches(host) maintains. nil is
+    # Computer Name select filters its switch dropdown with it (the web edit
+    # form offers no owner change — its host select is disabled and submits no
+    # computer — but the map is not create-only: see the gate's note on
+    # updates), and the gate reuses it from the same per-node cache entries
+    # switches(host) maintains. nil is
     # UNKNOWN, never empty-by-assumption: a node whose read raised says
     # "could not be confirmed", and every consumer must fail open on it.
     # A stand-alone resource (or a cluster read that gave no nodes) answers
@@ -2621,7 +2623,12 @@ module ForemanHyperv
     # kept verbatim). Every silence passes the create through with fog keeping
     # the last word — no named owner node (a plain API create), a node the map
     # holds nil for, an endpoint list that did not answer: fail-open is one
-    # rule everywhere, and nil is never read as absence.
+    # rule everywhere, and nil is never read as absence. It runs wherever
+    # validate_placement! runs, so an API update that names computer_name and
+    # cluster_name is gated by the same rule (the web edit form never triggers
+    # it: its disabled Computer Name select submits no owner), and its
+    # house-voice "nothing was created" reads on that path as the literal
+    # truth it is — the refusal lands before fog is asked for anything.
     def validate_nic_switches_on_node!(attr)
       computer = attr[:computer_name].presence
       cluster_name = attr[:cluster_name].presence
@@ -2640,12 +2647,14 @@ module ForemanHyperv
       return if endpoint.nil?
 
       asked.each do |guid|
-        named = endpoint.detect { |sw| sw[:id].to_s == guid.to_s }
+        named = endpoint.detect { |sw| sw[:id].to_s.casecmp?(guid.to_s) }
         next if named.nil?
         next if present.any? { |name| name.to_s.casecmp?(named[:name].to_s) }
 
         raise ForemanHyperv::OperationRefused,
-              format(NIC_SWITCH_NOT_ON_NODE_REFUSAL, switch: named[:name], node: computer, present: present.join(', '))
+              format(NIC_SWITCH_NOT_ON_NODE_REFUSAL,
+                     switch: named[:name], node: computer,
+                     present: present.empty? ? 'no switches at all' : present.join(', '))
       end
     end
 
