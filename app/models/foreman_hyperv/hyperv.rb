@@ -2588,7 +2588,10 @@ module ForemanHyperv
       # checks so the node and cluster names below are already proven members.
       validate_nic_switches_on_node!(attr)
 
-      asked_volumes = nested_attributes_for(:volumes, attr[:volumes_attributes]).filter_map { |vol| vol[:datastore] }
+      # PLG-60: .presence, not bare truthiness — the form's blank option
+      # submits '' and an empty instruction is the ABSENCE of an instruction
+      # (placement takes its first offered volume), not a volume named ''.
+      asked_volumes = nested_attributes_for(:volumes, attr[:volumes_attributes]).filter_map { |vol| vol[:datastore].presence }
       return if asked_volumes.empty?
 
       cluster = cluster_name ? cluster_named(cluster_name) : endpoint_cluster
@@ -3615,7 +3618,10 @@ module ForemanHyperv
               "(excluded: #{listing})"
       end
 
-      asked = nested_attributes_for(:volumes, attr[:volumes_attributes]).map { |vol| vol[:datastore] }.compact.first
+      # PLG-60: presence, not compact — the form's blank option submits '',
+      # and an empty instruction hands the choice to placement below, it is
+      # not a volume named ''.
+      asked = nested_attributes_for(:volumes, attr[:volumes_attributes]).map { |vol| vol[:datastore].presence }.compact.first
       return offered.first unless asked
 
       match = offered.detect { |domain| domain.name == asked || domain.id == asked }

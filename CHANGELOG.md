@@ -1,5 +1,19 @@
 ## Unreleased
 
+- The VM form can now name the placement target: the Hyper-V volume partial
+  carries a Shared-volume select whose choices are the cluster's PLACEABLE
+  shared volumes (the same offered set placement and the membership check
+  use — a volume the cluster declines is not offered, and the create's
+  refusal names its reason if asked anyway), refilled per cluster from
+  core's nested `available_clusters/:cluster_id/available_storage_domains`
+  when the Cluster select changes — the hidden Add-Volume template refilled
+  too, so volumes added after a cluster change are born with the current
+  choices — and a refill that fails leaves the server-rendered choices
+  standing rather than offering nothing. Placement's two consumers of
+  `volumes_attributes[*][:datastore]` now read the form's blank as the
+  ABSENCE of an instruction (`.presence`): the blank submits `''`, which
+  would otherwise reach the membership check as a volume named `''` and
+  refuse every form create that left the select alone
 - Say which switches a NODE actually has, early and in every place that
   answers the question (option C+A-lite+B). The VM form's switch dropdown
   answered three different questions depending on the path — the endpoint

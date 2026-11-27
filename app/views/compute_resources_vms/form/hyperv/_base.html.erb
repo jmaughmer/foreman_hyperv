@@ -15,7 +15,10 @@
   end
 -%>
 <% if clusters.any? -%>
-  <%= select_f f, :cluster_name, clusters, :to_s, :to_s, { include_blank: true }, label: _('Cluster'), disabled: !new_host %>
+  <%# PLG-60: the cluster select also drives the disk placement select —
+      core's nested cluster route answers a cluster NAME (cluster_named
+      matches names as well as ids), so the URL rides only the resource. -%>
+  <%= select_f f, :cluster_name, clusters, :to_s, :to_s, { include_blank: true }, label: _('Cluster'), disabled: !new_host, onload: 'hypervClusterChange(this);', onchange: 'hypervClusterChange(this);', data: { hyperv_storage_domains_base_url: "/api/v2/compute_resources/#{compute_resource.id}/available_clusters" } %>
   <% if computers.count > 1 -%>
     <%# PLG-59: the switch-hosts endpoint URL rides the host select the hook
         is wired to; the JS reads it off the element (hypervFilterSwitchesForHost). -%>
