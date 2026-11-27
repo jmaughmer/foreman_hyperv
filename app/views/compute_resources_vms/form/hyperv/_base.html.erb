@@ -17,7 +17,9 @@
 <% if clusters.any? -%>
   <%= select_f f, :cluster_name, clusters, :to_s, :to_s, { include_blank: true }, label: _('Cluster'), disabled: !new_host %>
   <% if computers.count > 1 -%>
-    <%= select_f f, :computer_name, computers, :name, :name, {}, label: _('Computer Name'), disabled: !new_host, onload: 'hypervHostChange(this);', onchange: 'hypervHostChange(this);' %>
+    <%# PLG-59: the switch-hosts endpoint URL rides the host select the hook
+        is wired to; the JS reads it off the element (hypervFilterSwitchesForHost). -%>
+    <%= select_f f, :computer_name, computers, :name, :name, {}, label: _('Computer Name'), disabled: !new_host, onload: 'hypervHostChange(this);', onchange: 'hypervHostChange(this);', data: { hyperv_switch_hosts_url: switch_hosts_api_compute_resource_path(compute_resource) } %>
   <% end -%>
   <%# PLG-30: create-only. Failback is a property of the cluster role, and this
       is the one HA setting the cluster takes as a write (fog evidence §60): it

@@ -23,7 +23,107 @@ function hypervHostChange(item) {
   $('table.hyperv-host-info').hide();
   $('table.hyperv-host-info[data-host="'+$(item).val()+'"]').show();
 
-  // TODO: Reload available switches
+  // PLG-59: which switches this node answers is a per-node fact the union
+  // dropdown cannot carry, so the form asks the endpoint for the map and dims
+  // what the chosen node is PROVEN to lack. Fail-open everywhere: an unknown
+  // node, a failed fetch, a GUID the endpoint list does not carry — all leave
+  // every option standing, with one line saying the node could not be
+  // confirmed. The save-time gate in the model is the enforcement; this is
+  // the early word.
+  hypervFilterSwitchesForHost(item);
+}
+
+// The map is fetched once and reused while its key holds. The key is the
+// resource plus the cluster the form currently names, because the map is a
+// statement about that cluster's nodes; changing the cluster and then the
+// host re-fetches, and a cluster change alone cannot strand a wrong dim
+// (the host hook is the only thing that dims).
+function hypervSwitchHosts(hostSelect, done) {
+  var url = $(hostSelect).data('hyperv-switch-hosts-url');
+  if (!url) { done(null); return; }
+
+  var $cluster = $(hostSelect).closest('form').find('select[name$="cluster_name]"]').first();
+  var cluster = $cluster.length ? ($cluster.val() || '') : '';
+  var key = url + '|' + cluster;
+
+  if (window.hypervSwitchHostsCache && window.hypervSwitchHostsCache.key === key) {
+    done(window.hypervSwitchHostsCache.info);
+    return;
+  }
+
+  $.ajax({
+    url: url + (cluster ? '?cluster_name=' + encodeURIComponent(cluster) : ''),
+    type: 'GET',
+    dataType: 'json',
+    success: function (data) {
+      var cr = (data && data.compute_resource) || {};
+      window.hypervSwitchHostsCache = { key: key, info: { switchHosts: cr.switch_hosts || {}, endpointSwitches: cr.endpoint_switches || null } };
+      done(window.hypervSwitchHostsCache.info);
+    },
+    error: function () {
+      // Silence is not absence: the map is simply not held, and the caller
+      // fails open. Nothing is cached for a failed read.
+      done(null);
+    },
+  });
+}
+
+function hypervFilterSwitchesForHost(hostSelect) {
+  var $form = $(hostSelect).closest('form');
+  var switchSelects = $form.find('select[name$="switch_id]"]');
+  if (switchSelects.length === 0) { return; }
+
+  var clear = function (note) {
+    switchSelects.each(function () {
+      var $select = $(this);
+      $select.find('option').prop('disabled', false);
+      $select.next('span.hyperv-switch-hosts-note').remove();
+      if (note) {
+        $select.after('<span class="hyperv-switch-hosts-note help-block">' + note + '</span>');
+      }
+    });
+  };
+
+  if (!$(hostSelect).data('hyperv-switch-hosts-url')) {
+    // No endpoint wired (a resource the plugin did not render the hook for):
+    // nothing to say.
+    clear(null);
+    return;
+  }
+
+  var note = __('Hyper-V switches at this node could not be confirmed.');
+
+  hypervSwitchHosts(hostSelect, function (info) {
+    var host = $(hostSelect).val();
+    if (!info || !host) { clear(note); return; }
+
+    var present = null;
+    Object.keys(info.switchHosts).forEach(function (name) {
+      if (String(name).toLowerCase() === String(host).toLowerCase()) {
+        present = info.switchHosts[name];
+      }
+    });
+    if (!Array.isArray(present)) { clear(note); return; }
+
+    var presentLower = present.map(function (name) { return String(name).toLowerCase(); });
+    var guidToName = {};
+    if (Array.isArray(info.endpointSwitches)) {
+      info.endpointSwitches.forEach(function (sw) { guidToName[String(sw.id)] = sw.name; });
+    }
+
+    clear(null);
+    switchSelects.each(function () {
+      $(this).find('option').each(function () {
+        var guid = String($(this).attr('value') || '');
+        var name = guidToName[guid];
+        // A blank option, or a GUID the endpoint's own list no longer holds,
+        // stays exactly where it was: only a name the node is proven to lack
+        // gets dimmed.
+        if (name === undefined) { return; }
+        $(this).prop('disabled', presentLower.indexOf(String(name).toLowerCase()) === -1);
+      });
+    });
+  });
 }
 
 function hypervVLANModeChange(item) {

@@ -85,6 +85,12 @@ Note that Foreman 5.0 has no `compute_resources/:id/test` endpoint and
 `hammer compute-resource create --provider` does not list Hyper-V, so create and
 check Hyper-V resources over the API.
 
+A clustered resource answers one more question at
+`/api/v2/compute_resources/:id/switch_hosts`: the virtual-switch NAMES each
+node reports, per node — the fact the machine form dims its switch dropdown
+with and the create gate refuses on (`null` for a node means its read did not
+answer, which is not "no switches"; RUNBOOK §14).
+
 ### Cluster nodes and `hyperv_node_overrides`
 
 A clustered compute resource reaches the node it is pointed at and, from
