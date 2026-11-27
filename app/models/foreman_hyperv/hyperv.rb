@@ -814,7 +814,7 @@ module ForemanHyperv
     # dropdown GUID back into a name. Public like its siblings; it is an
     # internal arm, not a consumer API.
     def endpoint_switch_hosts
-      { hosts.first&.name => endpoint_switch_list&.map { |sw| sw[:name] } }
+      { hosts.first&.name => endpoint_switch_list&.pluck(:name) }
     end
 
     # Core's base #available_storage_domains answers "Not implemented for Hyper-V",
