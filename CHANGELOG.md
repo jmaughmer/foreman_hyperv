@@ -1,5 +1,18 @@
 ## Unreleased
 
+- Read a clustered resource's virtual switches CONCURRENTLY instead of one
+  node after another: a cold node switch read costs ~4-5 RTT of its own, so
+  the sequential per-node loop serialized a four-node cluster's cold host-form
+  and /available_networks calls into ~15-20 s of pure wire time at the
+  satellite budget this fork documents (whole-fork review 2026-11-26). Each
+  read rides its own fog client — reachable nodes compose one per node up
+  front, and a node read through the endpoint after failing WinRM is handed
+  a fresh endpoint client for the fan-out — so the reads now run on the same
+  bounded pool the cluster's instance listing uses; the union, the per-node
+  cache, the missing-switch warnings and the fail-soft — a node that cannot
+  answer costs its switches and nothing else — are unchanged, and the
+  answer's order stays the order the cluster names its nodes no matter which
+  node answers first
 - Escape the config-folder pre-flight's path literal through fog's single
   `PsQuote` owner instead of a site-local doubling of the ASCII apostrophe:
   the PowerShell tokenizer ends a single-quoted literal at all five quote

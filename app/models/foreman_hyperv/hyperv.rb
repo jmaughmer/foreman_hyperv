@@ -737,7 +737,9 @@ module ForemanHyperv
     # all of them, including a name one node is missing, because dropping it silently
     # would leave the user wondering where the switch they built went. What is missing
     # where is logged; picking such a name for a machine that lands on the node
-    # without it stays a creation error, which is the honest place to say it.
+    # without it stays a creation error, which is the honest place to say it. The
+    # nodes are asked CONCURRENTLY (PLG-55); what each read costs and why the answer
+    # does not depend on which node answers first is recorded on read_node_switches.
     def available_networks(cluster_id = nil)
       cluster = cluster_named(cluster_id)
       return api_networks(switches(nil)) if cluster.nil?
@@ -745,14 +747,7 @@ module ForemanHyperv
       hosts = cluster_backed_hosts(cluster)
       return api_networks(switches(nil)) if hosts.empty?
 
-      switches_by_host = hosts.each_with_object({}) do |host, acc|
-        acc[host.name] = begin
-          switches(host)
-        rescue StandardError => e
-          Rails.logger.warn "Hyper-V switches for #{host.name} could not be read: #{e.message.lines.first}"
-          []
-        end
-      end
+      switches_by_host = read_node_switches(hosts)
       first_by_name = {}
       switches_by_host.each_value { |list| list.each { |sw| first_by_name[sw.name] ||= sw } }
       shared = switches_by_host.values.map { |list| list.map(&:name) }.reduce(&:&)
@@ -3050,6 +3045,87 @@ module ForemanHyperv
           node_only
         end
       end
+    end
+
+    # PLG-55: the nodes' switch reads fan out CONCURRENTLY, on the same bounded
+    # pool the PLG-33 instance listing runs and for the same measured reason.
+    # One cold node switch read is ~4-5 RTT, so the sequential loop serialized
+    # a four-node cluster's cold host-form and /available_networks calls into
+    # ~15-20 s of pure wire time at the satellite budget this fork documents
+    # (whole-fork review 2026-11-26) — the last sequential remote fan-out on a
+    # user-facing path.
+    #
+    # Nothing is shared across the threads. cluster_backed_hosts has already
+    # resolved every host ON THIS THREAD onto a fog client no other worker
+    # holds: reachable nodes onto their own node's client (client_for_node),
+    # and the unreachable ones — the node_only fallbacks — onto a FRESH
+    # endpoint client handed over here before they are queued, because their
+    # fallback client is the resource's shared one and PLG-33b's doctrine
+    # forbids two threads on one client (the WinRM layer is per-connection
+    # scratch: hyperv.rb's fresh_endpoint_client comment); the swap is
+    # answer-preserving — the read still runs through the endpoint, which is
+    # what node_only has always meant. The resource's own lazy memos this
+    # path reads — the fog client and the cache object — were composed on
+    # this thread by the cluster lookup that precedes this method; and core's
+    # ComputeResourceCache rides Rails.cache, whose stores are mutexed, one
+    # distinct key per node.
+    # The pool cap is the listing's constant rather than a copy of it because
+    # the bound the two fan-outs share is the WinRM per-user shell budget.
+    #
+    # What the fan-out must not change is the answer. Each read is exactly the
+    # switches(host) call the sequential loop made — same per-node cache entry,
+    # same fail-soft (a node that cannot answer costs its switches and nothing
+    # else, logged with the same line, and its absence still lands in the
+    # missing-switch warnings below) — and every answer lands at its SOURCE
+    # POSITION however the threads interleave, so the union's first-wins order
+    # stays the order the cluster names its nodes.
+    def read_node_switches(hosts)
+      answers = Array.new(hosts.size) { [] }
+      queue = Queue.new
+      hosts.each_with_index { |host, index| queue << [index, own_client_host(host)] }
+      workers = [hosts.size, ClusterNodeServers::MAX_CONCURRENT_NODE_READS].min.times.map do
+        Thread.new do
+          until (item = pop_drain(queue)).nil?
+            index, host = item
+            answers[index] =
+              begin
+                switches(host)
+              rescue StandardError => e
+                Rails.logger.warn "Hyper-V switches for #{host.name} could not be read: #{e.message.lines.first}"
+                []
+              end
+          end
+        end
+      end
+      workers.each(&:join)
+      hosts.each_with_index.to_h { |host, index| [host.name, answers[index]] }
+    end
+
+    # Non-blocking pop, the same rule as ClusterNodeServers#pop_drain:
+    # ThreadError means drained for good, because every source is queued
+    # before the first worker starts.
+    def pop_drain(queue)
+      queue.pop(true)
+    rescue ThreadError
+      nil
+    end
+
+    # A host still bound to this resource's shared endpoint client is the
+    # node_only fallback cluster_backed_hosts builds for a node that answers
+    # the cluster but not WinRM (two down nodes are a routine cluster
+    # failure). Its read reaches the node through the ENDPOINT either way —
+    # that is what node_only has always meant — but two of them may not ride
+    # the one shared client at once (PLG-33b: the WinRM layer underneath a
+    # fog client is per-connection scratch). Compose each one its own fresh
+    # endpoint client, ON THIS THREAD, before it is queued: fog's
+    # Collection#new binds the model to the client it came from, so handing
+    # the name to fresh_endpoint_client moves the read to a private
+    # connection with the same trust, opt-out and waits as the shared one,
+    # and the same name keeps the same switches cache key.
+    def own_client_host(host)
+      return host unless host.respond_to?(:service) && host.service.equal?(client)
+
+      fresh_endpoint_client.hosts.new(name: host.name)
     end
 
     # vSphere's clusters endpoint reports a size as a node count; for Hyper-V that is

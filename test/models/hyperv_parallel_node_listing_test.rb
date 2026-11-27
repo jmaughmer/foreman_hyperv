@@ -59,10 +59,21 @@ class HypervParallelNodeListingTest < ActiveSupport::TestCase
         @arrived += 1
         @max_active = @active if @active > @max_active
         if @barrier_expect && @arrived < @barrier_expect
-          @condition.wait(@barrier_deadline)
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @barrier_deadline
+          loop do
+            break if @arrived >= @barrier_expect
+
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            break if remaining <= 0
+
+            # A spurious wake re-checks the count rather than failing a
+            # quorum that IS arriving; only the deadline breaks the wait.
+            @condition.wait(remaining)
+          end
           # Deadline passed without the quorum: a sequential listing cannot
           # assemble it, and that is the failure the barrier exists to catch.
-          raise Timeout::Error, "start barrier met only #{@arrived} of #{@barrier_expect} reads" if @arrived < @barrier_expect
+          met = @arrived >= @barrier_expect
+          raise Timeout::Error, "start barrier met only #{@arrived} of #{@barrier_expect} reads" unless met
         end
         @condition.broadcast
       end
