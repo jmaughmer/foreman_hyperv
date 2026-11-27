@@ -1456,6 +1456,28 @@ module ForemanHyperv
         # The generation of an existing VM can not be changed, only its secure boot setting
         apply_firmware_attributes(attr, set_generation: false)
         vm.secure_boot_enabled = attr[:secure_boot_enabled]
+      elsif attr.key?(:secure_boot_enabled)
+        # PLG-58: a raw-API edit that names Secure Boot without the form's
+        # firmware selector used to answer 200 and change nothing (measured
+        # 2026-11-27 twice): the gate above was the write's only door, and a
+        # plain secure_boot_enabled PUT silently did nothing. The key's
+        # presence IS the request — an explicit null included, which the
+        # shared cast reads as off, the same reading every other flag in
+        # this method gets. Traffic through the form or through core's own
+        # round trip (vm_compute_attributes sets foreman_firmware from the
+        # machine's resolved firmware) keeps riding the door above,
+        # byte-unchanged: a real boolean is merged for every selector value
+        # that reaches the efi gate of this plugin's generate_secure_boot_settings
+        # override (uefi, uefi_secure_boot, and automatic on an
+        # EFI-resolving loader); on the BIOS-resolving ones ('bios',
+        # 'automatic' on a BIOS or absent loader) it answers {}, a stale
+        # companion flag stands, and this cast now reads it by its rule (the
+        # machine's own generation still has the last word — the setter
+        # moves nothing on a BIOS machine). What newly writes is the raw-API
+        # edit that names the flag and no selector: a host re-submitting a
+        # persisted false after its machine was turned on out-of-band now
+        # converges it back instead of silently leaving it on.
+        vm.secure_boot_enabled = attr[:secure_boot_enabled]
       end
 
       update_interfaces(vm, attr)
