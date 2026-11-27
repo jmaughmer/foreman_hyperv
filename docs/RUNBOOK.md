@@ -525,7 +525,9 @@ running guest and the staged file's removal.
 ## 13. Which Windows Server builds this plugin's behavior was measured on
 
 A support matrix is only honest with the measured row and the expected row
-drawn differently, so here they are separately.
+drawn differently, so here they are separately. Both build rows now carry
+lab measurements; what remains expected for 2022 is scoped at the end of
+this section.
 
 *Measured: Windows Server 2025 Standard, build 26100.* Standalone and
 failover-cluster paths were both exercised there, and the documented
@@ -538,14 +540,54 @@ being absent on 26100, nested objects serializing as bare type-name strings
 trap. The version-gated stream rendering was exercised on PS 5.1.26100.7462
 specifically. The boot disk rides of §11 ran against the same build.
 
-*Expected, not measured: Windows Server 2022 (build 20348).* It is expected
-by construction — it ships the same PowerShell 5.1 line, so it takes the
-same version-gated rendering path; the role classifiers key on
-`FullyQualifiedErrorId` prefixes that are build-stable; and no code path
-this era wrote depends on a cmdlet that exists only on 2025 (the measured
-absence of `Remove-ClusterVirtualMachineRole` is the 2025 side of that
-argument). But expectation is not a lab record: no row of this plugin's
-behavior has been measured on 2022. Until a lab pass on a 2022 node
-(cluster join, role read, capacity read, PS-gate probe) is recorded,
-"supported" for 2022 means *expected* here — and this section is where it
-gets upgraded to measured.
+*Measured: Windows Server 2022 Standard, build 20348 (PS 5.1.20348.2849,
+Server Core 21H2).* Upgraded from *expected* by a lab pass on
+2026-11-27 on three domain-joined 2022 nodes (rebuilt lab cluster HV-CL02:
+domain join, Hyper-V and Failover-Clustering roles, persistent iSCSI to
+SAN LUNs visible to no other initiators, cluster creation with all three
+nodes `Up` and three CSVs claimed). The same day's rebuild of the 2025
+trio supplied the counterpart: HV-CL01 through the same node-prep and
+build scripts, 3 of 3 nodes `Up`, 3 CSVs, quorum Majority. The cmdlet
+answers the plugin keys on, the capacity read and the PS-gate probe each
+ran on a 2022 node and on a 2025 node in the same lab the same day — the
+cmdlet probes byte-identical scripts, the capacity read the same probe
+against each lineage's peer node — and every answer that could match
+across builds did, build numbers excepted:
+
+* all-zero-GUID `Get-ClusterGroup -VMId` answers without error on 20348
+  exactly as on 26100;
+* both miss prefixes the role classifiers key on are byte-identical
+  between the builds: a well-formed GUID matching no machine raises
+  `ClusterCmdletException` carrying FullyQualifiedErrorId
+  `PSArgument,Microsoft.FailoverClusters.PowerShell.GetClusterGroupCommand`,
+  and a name miss raises `ClusterCmdletException` carrying
+  `ClusterObjectNotFound,Microsoft.FailoverClusters.PowerShell.GetClusterGroupCommand`;
+* a malformed GUID is a bind failure rather than a miss — it raises
+  `ParameterBindingException` carrying
+  `CannotConvertArgumentNoMessage,Microsoft.FailoverClusters.PowerShell.GetClusterGroupCommand`,
+  which the classifiers do not treat as a miss — and a `Get-VM -Id` miss
+  raises `VirtualizationException` carrying
+  `ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM`; both
+  answers likewise byte-identical between the builds;
+* `Remove-ClusterVirtualMachineRole` is absent on 20348 too — the cmdlet
+  that would be the alternative exists on neither build — so the
+  `Remove-ClusterGroup`-based role removal this fork ships is the chosen
+  path on both builds, not a fallback for either;
+* a remote capacity read on 20348 comes back with the same shape as on
+  26100: type name `Deserialized.Microsoft.HyperV.PowerShell.VMHost`
+  with scalar members (`Name`, `MemoryCapacity`) surviving
+  deserialization while derived members (`ProcessorCount`,
+  `VersionString`) arrive empty — the deserialized shape the capacity
+  rows guard for before trusting a number, measured on both builds the
+  same day;
+* `$PSVersionTable.PSVersion` measures 5.1.20348.2849 against
+  5.1.26100.7462 — the same PowerShell 5.1 line, so the version gate's
+  *input* is measured identical on both builds; the gated stream
+  rendering itself was exercised on 26100 only, so its 2022 path is by
+  measurement of the gate input plus construction from it, not a
+  rendering ride;
+
+Still *expected, not measured* for 2022: the full Foreman-side rides —
+§11's boot disk provisioning round trip ran only against 2025 builds. The
+upgrade recorded here covers the cmdlet-level contract the plugin itself
+consumes.
