@@ -179,7 +179,10 @@ module ForemanHyperv
       # to_prepare re-runs, same filter same options.
       Api::V2::ComputeResourcesController.prepend Api::V2::ComputeResourcesControllerHyperv
       Api::V2::ComputeResourcesController.class_eval do
-        before_action :find_resource, only: [:switch_hosts]
+        # Named door, not find_resource itself — registering the same filter
+        # name twice with different options REPLACES core's callback and
+        # nil-ops every other action (the module documents the measured 500).
+        before_action :find_resource_for_switch_hosts, only: [:switch_hosts]
 
         api :GET, '/compute_resources/:id/switch_hosts',
             N_('List the virtual-switch names each node of a Hyper-V compute resource answers')
