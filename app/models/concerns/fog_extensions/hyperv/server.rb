@@ -113,11 +113,26 @@ module FogExtensions
         end
       end
 
+      # PLG-58: cast, do not judge truthiness. This writer receives the flag
+      # exactly as the request wrote it, and '0' — the string a console sends
+      # for "off" — is truthy Ruby: a create that asked for Secure Boot off
+      # wrote -EnableSecureBoot On (measured 2026-11-27 on build 20348), while
+      # the bootdisk create seam read the same string through
+      # Foreman::Cast.to_bool and answered off — seam and write disagreeing on
+      # one value, the boot disk ride gate refusing the machine it later read
+      # from the endpoint. The cast
+      # sits here, the one choke point every caller passes through (create,
+      # save, and whatever comes next), and it is the same cast the seam and
+      # the dynamic-memory flag use. The firmware path — the form's selector
+      # or a submission carrying a BIOS-resolving value that generates no
+      # settings — arrives with real booleans, which the cast passes
+      # through, or with a submitted flag standing, which the cast reads by
+      # the same rule the seam's check uses.
       def secure_boot_enabled=(enabled)
         return if generation != :UEFI
         return unless persisted?
 
-        firmware.secure_boot = enabled ? :On : :Off
+        firmware.secure_boot = Foreman::Cast.to_bool(enabled) ? :On : :Off
         firmware.save
       end
 

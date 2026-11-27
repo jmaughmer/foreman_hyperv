@@ -102,12 +102,18 @@ Decide on the host — any cluster node, with an administrator logon; the
 cluster service answers role reads for the whole cluster:
 
 ```powershell
-Get-ClusterGroup -Name "Virtual Machine <machine name>"
+Get-ClusterGroup -VMId "<instance uuid>"
 ```
 
-Hyper-V names a machine's cluster group after the machine, in exactly that
-shape; if the name errors or comes back empty, list `Get-ClusterGroup` and
-look for the machine's name before concluding anything.
+Address the group by the machine's instance UUID: `-VMId` is declared on
+both supported builds, and it cannot be confused by Hyper-V's tolerance of
+duplicate machine names. If you are naming instead, know the shape: measured
+on both supported builds, the cluster GROUP carries the machine's BARE name,
+and `Virtual Machine <machine name>` is the name of the Virtual Machine
+RESOURCE inside that group — `Get-ClusterGroup -Name "Virtual Machine
+<name>"` errors against the group. If a name read errors or comes back
+empty, list `Get-ClusterGroup` and look for the machine's name before
+concluding anything.
 
 **The group is there.** The machine is healthy and cluster-owned; the create
 only failed to prove it. If the Foreman host record survived, give it its
@@ -123,12 +129,14 @@ one, and deletes each disk file only when it is attributable and provably
 unshared, the folder only on its own pre-flight verdict. By hand instead:
 
 ```powershell
-Remove-ClusterGroup -Name "Virtual Machine <machine name>" -Force -RemoveResources
+Remove-ClusterGroup -VMId "<instance uuid>" -Force -RemoveResources
 Remove-VM -Name "<machine name>" -Force
 # the machine's folder on the volume the message named:
 Remove-Item -LiteralPath 'C:\ClusterStorage\Volume1\<machine name>' -Recurse
 ```
 
+`Remove-ClusterGroup` declares `-VMId` on both supported builds; naming it
+takes the group's bare machine name, not the resource shape.
 `Remove-ClusterGroup` with plain `-Force` REFUSES a non-empty group (measured:
 "Please use -RemoveResources") — the refusal is the cmdlet protecting
 resources, not a failure to retry. Before deleting a folder, look inside it:
@@ -525,9 +533,10 @@ running guest and the staged file's removal.
 ## 13. Which Windows Server builds this plugin's behavior was measured on
 
 A support matrix is only honest with the measured row and the expected row
-drawn differently, so here they are separately. Both build rows now carry
-lab measurements; what remains expected for 2022 is scoped at the end of
-this section.
+drawn differently, so here they are separately. As of 2026-11-27 both build
+rows carry lab measurements — the cluster paths and the boot disk round
+trip included on each lineage — and the section ends with the last row
+that closed.
 
 *Measured: Windows Server 2025 Standard, build 26100.* Standalone and
 failover-cluster paths were both exercised there, and the documented
@@ -587,7 +596,17 @@ across builds did, build numbers excepted:
   measurement of the gate input plus construction from it, not a
   rendering ride;
 
-Still *expected, not measured* for 2022: the full Foreman-side rides —
-§11's boot disk provisioning round trip ran only against 2025 builds. The
-upgrade recorded here covers the cmdlet-level contract the plugin itself
-consumes.
+The Foreman-side rides closed this section's last expected row on
+2026-11-27: §11's boot disk round trip ran against a Server-2022
+(build 20348) machine, and against a clustered one — a virtual machine
+with a role group, its disk on a cluster shared volume, installed while
+the cluster owned it. The rebuild staging the ISO onto the volume, the
+build chain completing 5 of 5, the media boot (the guest's own fetch of
+/unattended/provision), and the built close — the eject, the DVD-first
+boot order left standing, the build flag cleared, the token rows gone,
+the staged file swept from the volume — were each measured there with the
+same answers the 2025 rides recorded. The ride also measured the
+raw-API shapes the forms never submit — a string `secure_boot_enabled`
+and a per-volume `datastore`, both now pinned suite-side by PLG-58 —
+and the bare-named role group, which §2's recipe records. No row of
+this matrix is expected-only.

@@ -1,5 +1,20 @@
 ## Unreleased
 
+- Cast the submitted Secure-Boot flag in the writer that sends it to the
+  host: a raw-API create carrying `secure_boot_enabled: '0'` met a
+  truthiness test, and `'0'` is truthy Ruby, so `-EnableSecureBoot On` was
+  written onto a machine that asked out of Secure Boot — while the bootdisk
+  create seam cast the same string and answered off, leaving the seam's
+  answer and the endpoint's verb disagreeing on one value until the ride
+  gate later refused that machine (measured 2026-11-27 on build 20348). A
+  raw-API edit naming Secure Boot without the form's firmware selector now
+  writes too (it used to answer 200 and change nothing, measured twice),
+  and the per-volume `datastore` key core documents for
+  `volumes_attributes` survives `new_vm`'s volume assignment instead of
+  dying `undefined method 'datastore='` — placement already read meaning
+  from that key in the request hash (membership check, volume selection);
+  the accessor rides it on the model, and fog never persists it (the
+  `iso_upload_storage` pattern)
 - Read a clustered resource's virtual switches CONCURRENTLY instead of one
   node after another: a cold node switch read costs ~4-5 RTT of its own, so
   the sequential per-node loop serialized a four-node cluster's cold host-form
