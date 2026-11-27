@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Escape the config-folder pre-flight's path literal through fog's single
+  `PsQuote` owner instead of a site-local doubling of the ASCII apostrophe:
+  the PowerShell tokenizer ends a single-quoted literal at all five quote
+  characters (ASCII and the four typographic single quotes), the folder-name
+  rule allows them all, so a legal machine name like `lab’vm2` closed its own
+  literal at the pre-flight — and a crafted name carrying a typographic quote
+  followed by `;` `(` `)` ran the tail as code under the WinRM account
 - Refuse virtual machine creates, destroys and disk removals on every Hyper-V
   compute resource until the reviewed cluster-safe enablement has merged, and
   check every identifier the forms and the URL carry before it reaches the
