@@ -809,9 +809,12 @@ module ForemanHyperv
     # PLG-59: the stand-alone arm of switch_hosts_map. The endpoint's name is
     # whatever the endpoint's hosts listing reports — the same name the form's
     # Computer Name select would hold (form_computers answers #hosts here).
-    # Public like its siblings; it is an internal arm, not a consumer API.
+    # The value is the list of NAMES, matching the clustered arm's shape: the
+    # pairs live only in endpoint_switch_list, for consumers that must turn a
+    # dropdown GUID back into a name. Public like its siblings; it is an
+    # internal arm, not a consumer API.
     def endpoint_switch_hosts
-      { hosts.first&.name => endpoint_switch_list }
+      { hosts.first&.name => endpoint_switch_list&.map { |sw| sw[:name] } }
     end
 
     # Core's base #available_storage_domains answers "Not implemented for Hyper-V",

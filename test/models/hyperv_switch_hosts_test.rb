@@ -77,6 +77,11 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     def initialize(name:)
       @name = name
     end
+
+    # available_hypervisors' cache block maps #attributes over the listing.
+    def attributes
+      { 'name' => name }
+    end
   end
 
   class NodeFog
@@ -126,6 +131,17 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     class HostCollection
       def initialize(owner)
         @owner = owner
+      end
+
+      # switches(nil) reads hosts.first — the alias available_hypervisors —
+      # which lists through #all inside the cache block and rebuilds models
+      # through #load, so the endpoint's hosts double plays both arms.
+      def all(_filters = {})
+        [host_for(HOST.upcase)]
+      end
+
+      def load(attribute_hashes)
+        attribute_hashes.map { |attrs| host_for(attrs['name']) }
       end
 
       def first
@@ -333,7 +349,7 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     silence_warnings
 
     error = assert_raises(ForemanHyperv::OperationRefused) do
-      cr.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1'))
+      cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1'))
     end
 
     assert_includes error.message, 'SRV-3'
@@ -345,32 +361,32 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     cr = build_cr
     silence_warnings
 
-    cr.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_2, computer: 'HV-NODE2'))
+    cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_2, computer: 'HV-NODE2'))
   end
 
   def test_the_gate_passes_every_silence_and_lets_fog_keep_the_last_word
     # Node silent: the map holds nil and absence cannot be proven.
     silent_node = build_cr(node_raise: 'HV-NODE2')
     silence_warnings
-    silent_node.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_3, computer: 'HV-NODE2'))
+    silent_node.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, computer: 'HV-NODE2'))
 
     # Endpoint list silent: GUIDs cannot be named at all.
     silent_endpoint = build_cr(endpoint_raise: SocketError)
     silence_warnings
-    silent_endpoint.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1'))
+    silent_endpoint.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1'))
 
     # No named owner node (a plain API create onto the cluster).
-    build_cr.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_3, computer: nil))
+    build_cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, computer: nil))
 
     # No cluster (a stand-alone create: the dropdown IS the endpoint's list).
-    build_cr.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_3, cluster: nil))
+    build_cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, cluster: nil))
 
     # A GUID the endpoint list does not hold: it escapes name evaluation and
     # the loud fog error stays its honest answer (PLG-26 doctrine).
-    build_cr.validate_nic_switches_on_node!(nic_attr(switch_guid: 'no-such-guid', computer: 'HV-NODE1'))
+    build_cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: 'no-such-guid', computer: 'HV-NODE1'))
 
     # No switch asked (a blank selection).
-    build_cr.validate_nic_switches_on_node!(nic_attr(switch_guid: nil, computer: 'HV-NODE1'))
+    build_cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: nil, computer: 'HV-NODE1'))
   end
 
   def test_the_gate_reads_the_compute_attributes_shape_too
@@ -381,7 +397,7 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     silence_warnings
 
     assert_raises(ForemanHyperv::OperationRefused) do
-      cr.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1', nested: true))
+      cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1', nested: true))
     end
   end
 
@@ -393,7 +409,7 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     silence_warnings
 
     assert_raises(ForemanHyperv::OperationRefused) do
-      cr.validate_nic_switches_on_node!(nic_attr(switch_guid: GUID_3, computer: 'hv-node1'))
+      cr.send(:validate_nic_switches_on_node!, nic_attr(switch_guid: GUID_3, computer: 'hv-node1'))
     end
   end
 
@@ -406,12 +422,12 @@ class HypervSwitchHostsTest < ActiveSupport::TestCase
     silence_warnings
 
     error = assert_raises(ForemanHyperv::OperationRefused) do
-      cr.validate_placement!(nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1'))
+      cr.send(:validate_placement!, nic_attr(switch_guid: GUID_3, computer: 'HV-NODE1'))
     end
     assert_includes error.message, 'SRV-3'
 
     # And the same create with a deliverable switch passes placement untouched
     # (no volumes, so the early return is the end of the road).
-    cr.validate_placement!(nic_attr(switch_guid: GUID_1, computer: 'HV-NODE1'))
+    cr.send(:validate_placement!, nic_attr(switch_guid: GUID_1, computer: 'HV-NODE1'))
   end
 end
