@@ -14,9 +14,11 @@ require 'fog/hyperv/compute/models/vhd'
 # The forms and the raw API do not send the same hashes. The compute form
 # (compute_resources_vms/form/hyperv/_base.html.erb) carries a firmware radio
 # and NO Secure-Boot checkbox, so a form rider never submits
-# secure_boot_enabled on its own — the boolean the write receives is the one
-# generate_secure_boot_settings resolved from the firmware name. It also
-# never submits a per-volume datastore. A raw API creator documents BOTH keys
+# secure_boot_enabled on its own — the write's boolean normally arrives
+# merged from the firmware name (the BIOS-resolving corner generates no
+# settings, leaving a submitted flag for the setter's cast to read). It
+# also never submits a per-volume datastore. A raw API creator
+# documents BOTH keys
 # (core documents datastore on volumes_attributes, and this plugin gives the
 # key meaning: validate_placement! checks its membership against the
 # cluster's own shared-volume listing and placement_storage composes the

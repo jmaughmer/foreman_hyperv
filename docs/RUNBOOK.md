@@ -605,7 +605,8 @@ build chain completing 5 of 5, the media boot (the guest's own fetch of
 /unattended/provision), and the built close — the eject, the DVD-first
 boot order left standing, the build flag cleared, the token rows gone,
 the staged file swept from the volume — were each measured there with the
-same answers the 2025 rides recorded. The ride also measured the raw-API shapes the forms never submit — a
-string `secure_boot_enabled` and a per-volume `datastore`, which PLG-58's
-suite pins what this plugin now does with, and the bare-named role group,
-which §2's recipe records. No row of this matrix is expected-only.
+same answers the 2025 rides recorded. The ride also measured the
+raw-API shapes the forms never submit — a string `secure_boot_enabled`
+and a per-volume `datastore`, both now pinned suite-side by PLG-58 —
+and the bare-named role group, which §2's recipe records. No row of
+this matrix is expected-only.
