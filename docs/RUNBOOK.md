@@ -7,7 +7,10 @@ manual path for an operator: reading and clearing the sightings ledger,
 resolving a stranded cluster-role write, an endpoint whose reads can never
 answer, per-node addressing, storage and disk-file refusals, a fog that
 is not the plugin's partner, and the boot disk: its drop-in, its janitor,
-and the opt-in and the ride that turn them on (§§8–11).
+and the opt-in and the ride that turn them on (§§8–11); and what changes
+when the endpoint is far from Foreman, which transport is a posture rather
+than a setting, and which Windows Server builds this plugin's behavior was
+actually measured on (§4, §§12–13).
 
 Everything here describes the era the enablement names: the installed
 `fog-hyperv` answers all six behaviours listed in
@@ -194,6 +197,20 @@ endpoint is not a license to create and not a license to delete.
 * *"hyperv_ca_trust_path is not set"* — an https resource routes per-node
   work only with an explicit CA file to verify against.
 
+Those bullets are about addressing; the TRANSPORT they validate is a posture,
+and the two families the matrix validated are not equal postures. Over
+HTTP + Negotiate the WinRM password/NTLM hash rides a plaintext channel, and
+the listener is configured to accept unencrypted payloads (`AllowUnencrypted`
+enabled — which is what lab prep configures); whether a given client seals
+payloads on top of that is not recorded here, and the posture should be
+designed as if it does not. And `hyperv_ssl_verify` has no certificate to
+consult. That is a lab VLAN posture, not a production one. The production
+posture is the https family — a certificate-verifiable hostname, an explicit
+`hyperv_ca_trust_path`, verification left on. The verify-off checkbox is a
+deliberate, per-resource MITM window (it exists so https can compose for any
+endpoint identity); keep it loud in the UI and keep production resources out
+of it.
+
 ## 5. Storage refusals
 
 * Membership comes before anything: every placement string on the form
@@ -292,6 +309,20 @@ answers this one instead, and the first two messages mean what they say
 (`is not installed` is true absence only). This refusal is not a drop-in
 fault: the file is correct, the policy is not — the remedy is §10's local
 policy module, and no amount of copying or editing the drop-in changes it.
+
+One posture note rides this endpoint. The shipped drop-in is
+`Require all granted`: what authenticates a pull is the 128-bit random nonce
+in the URL, and that nonce is the whole secret — the endpoint has no login.
+The host verifies status, size and sha256 before it moves the staged file
+into place, so INTEGRITY is enforced by the transfer itself; CONFIDENTIALITY
+is whatever the wire provides. Over plain http the ISO crosses in clear
+text, and a Hyper-V boot disk embeds the host's provisioning payload — the
+build token among it. The design already treats the nonce as the short-lived
+capability it is (§9's janitor caps strays), and step 1's https copy exists
+for exactly this: on any network an operator would not read bytes off, serve
+the pull over the TLS vhost and set `unattended_url` to match — then the
+plugin's own gate requires the ssl-side drop-in, and the check enforces the
+posture rather than merely permitting it.
 
 ## 9. The janitor: what the hourly cron line means
 
@@ -427,3 +458,64 @@ rebuild is the one an operator drives day to day):
    roots for the host-named ISO, and nothing restores the boot order — DVD
    stays first, harmless with an empty drive. Debris from a crashed ride
    ages out under §9's janitor.
+
+## 12. When the endpoint is far from Foreman
+
+Everything measured in this file so far rode lab-VLAN endpoints, where a
+round trip is invisible. When the Hyper-V endpoint sits behind a WAN or satellite
+link — hundreds of milliseconds per round trip — two facts about this
+plugin's behavior decide the cost, and one setting is the operator's lever.
+
+*Keepalive.* A keepalive tick replays one page load of endpoint reads so the
+next human load is warm; the interval comes from
+`hyperv_keepalive_interval_seconds`, defaults to 60 and is clamped to
+60–3600 — there is no faster-than-a-minute beat to configure, anything typed
+below a minute clamps up to one. One beat per interval runs
+across ALL Foreman processes — a Postgres advisory-lock election — so the
+cost is per beat, not per process. On a high-RTT link each beat pays that
+RTT for a full listing replay, and 60 s is a lab rhythm: satellite installs
+should set the interval to 300 or more unless a specific cold-window
+requirement says otherwise. A page load itself rides the cluster listing
+pipeline, whose endpoint hops run overlapped — a slow link pays for its
+slowest single hop, not for the sum of them.
+
+*The boot disk ride.* The ISO transfer is a host-side pull (§8): the
+Hyper-V host fetches the staged file from the pull endpoint, so Foreman's
+wire carries the WinRM command and its answer, not the 245 MB of ISO bytes.
+RTT adds command round trips, not volume; what a slow link does stretch is
+the transfer's wall-clock time inside the one long-running command the host
+runs for it. That command's deadline is the WinRM transport's operation
+timeout — the 90 s this plugin hands the fog (§2 counts the same wait; the
+fog's own default applies only when the compute resource sets no timeout
+option) — and the plugin layers no transfer deadline of its own. The
+transfer math is therefore one window: the 245 MB ISO must cross the link
+inside the endpoint-side 90 s operation window, roughly 3 MB/s sustained;
+the measured LAN pull cleared it with room to spare (234 MiB in 1.6 s).
+
+## 13. Which Windows Server builds this plugin's behavior was measured on
+
+A support matrix is only honest with the measured row and the expected row
+drawn differently, so here they are separately.
+
+*Measured: Windows Server 2025 Standard, build 26100.* Standalone and
+failover-cluster paths were both exercised there, and the documented
+quirks are responses to what that build actually answered: the
+`Get-ClusterGroup -VMId` all-zero-GUID binder behavior, the two
+`FullyQualifiedErrorId` miss prefixes, `VmID` NULL on real cluster groups
+resolved through `Get-ClusterParameter`, `Remove-ClusterVirtualMachineRole`
+being absent on 26100, nested objects serializing as bare type-name strings
+(guarded on every capacity row), and the PowerShell 5.1 `if`-paren parse
+trap. The version-gated stream rendering was exercised on PS 5.1.26100.7462
+specifically. The boot disk rides of §11 ran against the same build.
+
+*Expected, not measured: Windows Server 2022 (build 20348).* It is expected
+by construction — it ships the same PowerShell 5.1 line, so it takes the
+same version-gated rendering path; the role classifiers key on
+`FullyQualifiedErrorId` prefixes that are build-stable; and no code path
+this era wrote depends on a cmdlet that exists only on 2025 (the measured
+absence of `Remove-ClusterVirtualMachineRole` is the 2025 side of that
+argument). But expectation is not a lab record: no row of this plugin's
+behavior has been measured on 2022. Until a lab pass on a 2022 node
+(cluster join, role read, capacity read, PS-gate probe) is recorded,
+"supported" for 2022 means *expected* here — and this section is where it
+gets upgraded to measured.
