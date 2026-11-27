@@ -610,3 +610,58 @@ raw-API shapes the forms never submit — a string `secure_boot_enabled`
 and a per-volume `datastore`, both now pinned suite-side by PLG-58 —
 and the bare-named role group, which §2's recipe records. No row of
 this matrix is expected-only.
+
+## 14. The switch dropdown and the machine disagree
+
+*Sighting.* A machine form offers a virtual switch; the machine is placed on
+the cluster node the dropdown never mentioned lacking it; the create fails —
+historically after the machine already existed, with fog's
+`Get-VMSwitch -Name` answer "No Ethernet switch could be found matching the
+specified criteria", naming neither switch nor node (measured on two builds).
+Or its sibling: a switch built on one node seems to "vanish" from the API's
+network list for minutes at a time.
+
+*What was actually answering.* Before PLG-59 the question "what switches are
+there?" had three different answers depending on the path. The VM form's
+NIC dropdown rode `switches(nil)` — the ENDPOINT node's list, with that
+node's GUIDs. `available_networks` rode a concurrent read of every cluster
+node and answered the UNION of names — a truthful choice list for a machine
+that connects by NAME (a switch exists per node; the same name is a
+different switch with a different GUID on every node, which is why names,
+not the offered GUIDs, are what survives to fog — §2's PLG-26 truth) — but
+it computed which node had which name and discarded the answer, logging only
+a `Rails.logger.warn` line. And fog answered from the owner node, too late
+and too quietly. Worse, a node whose read RAISED was folded into "this node
+has no switches", so one down node shrank the union's shared set and made
+every switch log as missing there — an outage rewriting the cluster's facts.
+
+*What answers now.* Three things, one per moment of the decision.
+The form asks `GET /api/v2/compute_resources/:id/switch_hosts` — this
+plugin's first API route — whenever the Computer Name select changes, and
+dims (without removing) every switch option that node's COMPLETED read
+proves absent; the response carries the map plus the endpoint's own
+`{id, name}` pairs, because the dropdown holds GUIDs and only names are
+comparable across nodes. The create gate runs inside the placement
+membership checks, before anything is asked of the host: a named owner node
+whose completed read lacks the requested switch earns a refusal naming the
+switch, the node, and what that node DOES answer. And a silent node — one
+whose read raised — now holds nil, "could not be confirmed", never an empty
+list: the dropdown keeps every option standing beside a one-line note, the
+gate passes the create, and fog keeps the last word. Fail-open is one rule
+everywhere; absence of an answer is never read as an answer of absence.
+
+*What it does not do.* The dropdown is still the union, not a
+per-node filter of what EXISTS: an option dimmed for one node is fully
+selectable for another, and a doomed selection that bypasses the form (a
+raw API create with `computer_name` and a `switch_id` GUID) is caught by
+the gate before the machine exists, not after. A create that names no
+owner node cannot be gated — fog's placement wins, and fog's error stays
+as measured. An API UPDATE naming both owner and cluster is gated by the
+same rule; the web edit page cannot reach the gate, because its disabled
+Computer Name select submits no owner. The JS path has no harness in this fork: the dimming is
+verified by reading, the gate and the map by the model suite
+(`test/models/hyperv_switch_hosts_test.rb`), and the route by live read-backs
+against the lab: the stand-alone endpoint's own map, the clustered three-node
+map plus endpoint pairs, a 404 for an unknown resource id, and the core
+sibling routes answering unregressed beside them (§13's builds).
+

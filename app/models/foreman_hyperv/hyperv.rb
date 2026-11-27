@@ -490,6 +490,14 @@ module ForemanHyperv
                                  'or disk folder may be guessed from its name — a guessed path lands ' \
                                  'the files on one node’s local disk, off the cluster. Nothing was ' \
                                  'asked of the host and nothing was created.'
+    # PLG-59 (option B): the switch the machine asks for, named by the node that
+    # would own it, WITH that node's answer — the create used to reach fog and
+    # hear only "No Ethernet switch could be found matching the specified
+    # criteria" after the machine already existed (measured, fog evidence E12b).
+    NIC_SWITCH_NOT_ON_NODE_REFUSAL = 'Refusing to attach the virtual machine to the switch %<switch>s: ' \
+                                     'the node %<node>s answers a completed switch read that does not ' \
+                                     'include it (that node answers: %<present>s). Nothing was asked of ' \
+                                     'the host and nothing was created.'
 
     # PLG-46 (review observation 1): a create ROUTED to a named node used to take
     # its config root from the endpoint's own hypervisor read even when no volume
@@ -736,10 +744,12 @@ module ForemanHyperv
     # with two GUIDs. A machine is connected by name, so names are what this lists —
     # all of them, including a name one node is missing, because dropping it silently
     # would leave the user wondering where the switch they built went. What is missing
-    # where is logged; picking such a name for a machine that lands on the node
-    # without it stays a creation error, which is the honest place to say it. The
-    # nodes are asked CONCURRENTLY (PLG-55); what each read costs and why the answer
-    # does not depend on which node answers first is recorded on read_node_switches.
+    # where is logged, and what a node ANSWERS it is missing (as opposed to what its
+    # read left unknown — PLG-59, see read_node_switches) now also gates the create
+    # before any machine exists (validate_nic_switches_on_node!) and dims the option
+    # in the form (hypervHostChange). The nodes are asked CONCURRENTLY (PLG-55); what
+    # each read costs and why the answer does not depend on which node answers first
+    # is recorded on read_node_switches.
     def available_networks(cluster_id = nil)
       cluster = cluster_named(cluster_id)
       return api_networks(switches(nil)) if cluster.nil?
@@ -749,14 +759,64 @@ module ForemanHyperv
 
       switches_by_host = read_node_switches(hosts)
       first_by_name = {}
-      switches_by_host.each_value { |list| list.each { |sw| first_by_name[sw.name] ||= sw } }
-      shared = switches_by_host.values.map { |list| list.map(&:name) }.reduce(&:&)
+      switches_by_host.each_value { |list| Array(list).each { |sw| first_by_name[sw.name] ||= sw } }
+      # PLG-59: only a COMPLETED read can prove absence. A node that did not
+      # answer holds nil and is excluded from the shared set and from the
+      # missing-where warnings below — folding silence into an empty list let
+      # one down node shrink the shared set and log every switch as missing
+      # there, which is how an outage used to rewrite the cluster's facts.
+      answered = switches_by_host.compact
+      shared = answered.values.map { |list| list.map(&:name) }.reduce(:&) || []
       (first_by_name.keys - shared).each do |name|
-        without = switches_by_host.reject { |_host, list| list.any? { |sw| sw.name == name } }.keys
+        without = answered.reject { |_host, list| list.any? { |sw| sw.name == name } }.keys
         Rails.logger.warn "Hyper-V switch #{name} is missing from #{without.join(', ')} in cluster #{cluster.name}"
       end
 
       first_by_name.values.map { |sw| ApiNetwork.new(sw.name, sw.id, nil, sw.name, nil) }
+    end
+
+    # PLG-59: which switch NAMES each node of the placement answers, as
+    # {host name => [names] | nil}. This is the per-node membership
+    # available_networks already computes and discards, kept: the VM form's
+    # Computer Name select filters its switch dropdown with it (the web edit
+    # form offers no owner change — its host select is disabled and submits no
+    # computer — but the map is not create-only: see the gate's note on
+    # updates), and the gate reuses it from the same per-node cache entries
+    # switches(host) maintains. nil is
+    # UNKNOWN, never empty-by-assumption: a node whose read raised says
+    # "could not be confirmed", and every consumer must fail open on it.
+    # A stand-alone resource (or a cluster read that gave no nodes) answers
+    # with the endpoint alone — the same fallback available_networks takes.
+    def switch_hosts_map(cluster_id = nil)
+      cluster = cluster_named(cluster_id)
+      hosts = cluster ? cluster_backed_hosts(cluster) : []
+      return endpoint_switch_hosts if hosts.empty?
+
+      read_node_switches(hosts).transform_values { |list| list&.map(&:name) }
+    end
+
+    # PLG-59: the endpoint's own switch list as plain {id, name} pairs — the
+    # exact pairs the NIC partial's dropdown is built from (hyperv_networks →
+    # switches(nil)), which lets a consumer turn a dropdown GUID back into
+    # the name the nodes actually speak (PLG-26: names survive to fog, GUIDs
+    # do not). nil on a read that did not answer, same three states as
+    # switch_hosts_map.
+    def endpoint_switch_list
+      switches(nil).map { |sw| { id: sw.id, name: sw.name } }
+    rescue StandardError => e
+      Rails.logger.warn "Hyper-V switches for the endpoint could not be read: #{e.message.lines.first}"
+      nil
+    end
+
+    # PLG-59: the stand-alone arm of switch_hosts_map. The endpoint's name is
+    # whatever the endpoint's hosts listing reports — the same name the form's
+    # Computer Name select would hold (form_computers answers #hosts here).
+    # The value is the list of NAMES, matching the clustered arm's shape: the
+    # pairs live only in endpoint_switch_list, for consumers that must turn a
+    # dropdown GUID back into a name. Public like its siblings; it is an
+    # internal arm, not a consumer API.
+    def endpoint_switch_hosts
+      { hosts.first&.name => endpoint_switch_list&.pluck(:name) }
     end
 
     # Core's base #available_storage_domains answers "Not implemented for Hyper-V",
@@ -2523,6 +2583,11 @@ module ForemanHyperv
               'endpoint; nothing was asked of the host with that name'
       end
 
+      # PLG-59 (option B): the switch ask is placement too — the name must live
+      # on the node that will own the machine. Runs after both membership
+      # checks so the node and cluster names below are already proven members.
+      validate_nic_switches_on_node!(attr)
+
       asked_volumes = nested_attributes_for(:volumes, attr[:volumes_attributes]).filter_map { |vol| vol[:datastore] }
       return if asked_volumes.empty?
 
@@ -2543,6 +2608,53 @@ module ForemanHyperv
         raise ForemanHyperv::OperationRefused,
               'Refusing to place a disk on a shared volume this compute resource has not read from ' \
               'its cluster; nothing was asked of the host with that name'
+      end
+    end
+
+    # PLG-59 (option B): refuse, before the machine exists, a NIC attach to a
+    # switch the chosen owner node cannot deliver. A virtual switch exists per
+    # node and the machine attaches by NAME on its owner (PLG-26); a node that
+    # lacks the name answers fog's Get-VMSwitch -Name with "No Ethernet switch
+    # could be found matching the specified criteria" — measured, and after the
+    # machine was already created. The form carries the endpoint list's GUID,
+    # so the ask is named back through the endpoint's own listing first: a GUID
+    # that listing does not hold escapes name evaluation entirely, and the loud
+    # error it earns stays the honest answer (the resolve_nic_switch doctrine,
+    # kept verbatim). Every silence passes the create through with fog keeping
+    # the last word — no named owner node (a plain API create), a node the map
+    # holds nil for, an endpoint list that did not answer: fail-open is one
+    # rule everywhere, and nil is never read as absence. It runs wherever
+    # validate_placement! runs, so an API update that names computer_name and
+    # cluster_name is gated by the same rule (the web edit form never triggers
+    # it: its disabled Computer Name select submits no owner), and its
+    # house-voice "nothing was created" reads on that path as the literal
+    # truth it is — the refusal lands before fog is asked for anything.
+    def validate_nic_switches_on_node!(attr)
+      computer = attr[:computer_name].presence
+      cluster_name = attr[:cluster_name].presence
+      return if computer.blank? || cluster_name.blank?
+
+      asked = nested_attributes_for(:interfaces, attr[:interfaces_attributes]).filter_map do |iface|
+        compute = iface[:compute_attributes] || iface
+        compute[:switch_id].presence
+      end
+      return if asked.empty?
+
+      _node, present = switch_hosts_map(cluster_name).find { |node, _names| node.to_s.casecmp?(computer.to_s) }
+      return if present.nil?
+
+      endpoint = endpoint_switch_list
+      return if endpoint.nil?
+
+      asked.each do |guid|
+        named = endpoint.detect { |sw| sw[:id].to_s.casecmp?(guid.to_s) }
+        next if named.nil?
+        next if present.any? { |name| name.to_s.casecmp?(named[:name].to_s) }
+
+        raise ForemanHyperv::OperationRefused,
+              format(NIC_SWITCH_NOT_ON_NODE_REFUSAL,
+                     switch: named[:name], node: computer,
+                     present: present.empty? ? 'no switches at all' : present.join(', '))
       end
     end
 
@@ -3097,12 +3209,14 @@ module ForemanHyperv
     # What the fan-out must not change is the answer. Each read is exactly the
     # switches(host) call the sequential loop made — same per-node cache entry,
     # same fail-soft (a node that cannot answer costs its switches and nothing
-    # else, logged with the same line, and its absence still lands in the
-    # missing-switch warnings below) — and every answer lands at its SOURCE
+    # else, logged with the same line) — and every answer lands at its SOURCE
     # POSITION however the threads interleave, so the union's first-wins order
-    # stays the order the cluster names its nodes.
+    # stays the order the cluster names its nodes. PLG-59 changed one thing:
+    # an unanswered node holds NIL, not the empty list, so downstream readers
+    # say "could not be confirmed" for it instead of counting its switches as
+    # known-absent (see the rescue below for the harm the old fold caused).
     def read_node_switches(hosts)
-      answers = Array.new(hosts.size) { [] }
+      answers = Array.new(hosts.size)
       queue = Queue.new
       hosts.each_with_index { |host, index| queue << [index, own_client_host(host)] }
       workers = [hosts.size, ClusterNodeServers::MAX_CONCURRENT_NODE_READS].min.times.map do
@@ -3114,7 +3228,13 @@ module ForemanHyperv
                 switches(host)
               rescue StandardError => e
                 Rails.logger.warn "Hyper-V switches for #{host.name} could not be read: #{e.message.lines.first}"
-                []
+                # PLG-59: silence is NOT "no switches". A node whose read
+                # raised answers nil, and every consumer downstream must say
+                # "could not be confirmed" for it — folding silence into the
+                # empty list let one down node pose as a node holding no
+                # switches, which shrank available_networks' shared set and
+                # logged every switch as missing there.
+                nil
               end
           end
         end

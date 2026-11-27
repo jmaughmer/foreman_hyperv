@@ -1,5 +1,23 @@
 ## Unreleased
 
+- Say which switches a NODE actually has, early and in every place that
+  answers the question (option C+A-lite+B). The VM form's switch dropdown
+  answered three different questions depending on the path — the endpoint
+  node's list with that node's GUIDs, the union of the cluster's node names
+  with per-node membership computed and discarded, and fog's post-create
+  `Get-VMSwitch -Name` raise naming neither switch nor node (measured, fog
+  evidence E12b) — so a doomed node/switch combination cost the whole form.
+  Now: the node fan-out tells silence from emptiness (a read that raised
+  holds nil, never the `[]` that let one down node shrink the union's shared
+  set and log every switch as missing there); `switch_hosts_map` keeps the
+  per-node membership and the plugin's FIRST API route,
+  `GET /api/v2/compute_resources/:id/switch_hosts`, serves it with the
+  endpoint's `{id, name}` pairs alongside (GUIDs do not survive to fog,
+  names do — PLG-26); the host-change hook finally does its TODO, dimming —
+  fail-open on every silence — what the chosen node is proven to lack; and
+  the create gate refuses, before the machine exists, an attach to a switch
+  the named owner node's completed read lacks, naming switch, node, and
+  what the node does answer
 - Cast the submitted Secure-Boot flag in the writer that sends it to the
   host: a raw-API create carrying `secure_boot_enabled: '0'` met a
   truthiness test, and `'0'` is truthy Ruby, so `-EnableSecureBoot On` was

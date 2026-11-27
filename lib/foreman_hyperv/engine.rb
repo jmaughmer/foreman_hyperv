@@ -167,6 +167,37 @@ module ForemanHyperv
       # the concern only ADDS methods — unlike HostManagedExtensions above,
       # it overrides no core method, so it needs no precedence.
       Host::Managed.include ::ForemanHyperv::BootdiskSeam
+
+      # PLG-59: the plugin's first API endpoint (config/routes.rb), served by
+      # an action bolted onto CORE's compute-resources controller — the same
+      # extend-the-core-controller pattern the form partials already ride.
+      # The action and its Apipie docs ride class_eval (the `api` DSL needs
+      # the method adjacent in the class body); authorization rides a
+      # prepended module so core's own action_permission keeps answering for
+      # every other action (see the module for why that mapping is
+      # load-bearing). before_action :find_resource is deduped by Rails when
+      # to_prepare re-runs, same filter same options.
+      Api::V2::ComputeResourcesController.prepend Api::V2::ComputeResourcesControllerHyperv
+      Api::V2::ComputeResourcesController.class_eval do
+        # Named door, not find_resource itself — registering the same filter
+        # name twice with different options REPLACES core's callback and
+        # nil-ops every other action (the module documents the measured 500).
+        before_action :find_resource_for_switch_hosts, only: [:switch_hosts]
+
+        api :GET, '/compute_resources/:id/switch_hosts',
+            N_('List the virtual-switch names each node of a Hyper-V compute resource answers')
+        param :id, :number, desc: N_('ID of a compute resource')
+        param :cluster_name, String, desc: N_('Optional name of the cluster whose nodes to map. ' \
+                                              'A stand-alone resource, and a clustered one asked without this, answer their endpoint alone.'),
+              allow_blank: true
+        def switch_hosts
+          @switch_hosts = @compute_resource.switch_hosts_map(params[:cluster_name].presence)
+          @endpoint_switches = @compute_resource.endpoint_switch_list
+          # layout: false — this payload is one object's map, not a
+          # collection; core's index layout belongs to the paginated actions.
+          render :switch_hosts, layout: false
+        end
+      end
     end
     #
     # initializer 'foreman_hyperv.register_gettext', after: :load_config_initializers do
