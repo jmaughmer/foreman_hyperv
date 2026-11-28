@@ -665,3 +665,45 @@ against the lab: the stand-alone endpoint's own map, the clustered three-node
 map plus endpoint pairs, a 404 for an unknown resource id, and the core
 sibling routes answering unregressed beside them (§13's builds).
 
+## 15. Proving what no unit test and no page can: the runner harness
+
+Two surfaces of this plugin were only ever proven by driving the installed
+code directly on the lab VM, and both recipes are worth keeping.
+
+**The runner is this fork's view-render proxy.** A partial calling a private
+method on the compute resource NoMethodErrors at render — and no unit test
+sees it (the suite reaches private reads through `send`; there is no view
+harness), while a `respond_to?` pin now guards the whole read-set
+(`VIEW_READS`, `test/models/hyperv_available_storage_domains_test.rb`,
+PLG-61). The reproduction is `rails runner` calling what the partial calls.
+Three measured traps: `ComputeResource.find` is taxonomy-scoped in the
+anonymous runner context (`WHERE (1=0)`) — use `.unscoped`; `cr.client` is
+protected — the created fog model reloads itself instead; and the UI-session
+curl (`/users/extlogin` + cookie jar, even against the FQDN) does not
+authenticate here — stop paying for it. The command shape:
+`cd /usr/share/foreman && sudo -u foreman HOME=/usr/share/foreman
+RAILS_ENV=production bundle exec rails runner /tmp/script.rb`.
+
+**The placement e2e: the datastore key rides to the CSV.** 2026-11-28,
+HV-CL01 via CR 5, asking for `Cluster Volume2` — deliberately NOT the first
+offered volume, so placement cannot satisfy it by accident. `create_vm` with
+`cluster_name`, one NIC (`switch_id` GUID **and** `vlan_operation_mode:
+'Untagged'` — the validator refuses a mode-less NIC; keys per
+`InputValidation`'s NIC allowlist: `switch_id`, not `switch`, no `type`) and
+one disk (`basename` WITHOUT extension — `.vhdx` is refused; `size_bytes`;
+`datastore`) — read-back of the created machine answered
+`path=C:\ClusterStorage\Volume2\e2e-plg61` (fog's Server `#path`, the `Path`
+property Get-VM itself answers), and
+`destroy` left nothing behind. The refused twin in the same run: `datastore:
+'Cluster Volume9'` heard the membership refusal (`Refusing to place a disk on
+a shared volume this compute resource has not read from its cluster...`) and
+nothing was asked of the host. What this run did NOT read back: the VHD file
+path itself (fog's reload answers `volumes=nil` for a re-fetched model) —
+the config root is the measured marker; the disk folder composes from the
+same placement by the §13/PLG-14 rules, not by this read. `vm.destroy` in an
+`ensure` is the whole cleanup contract: two earlier iterations of the same
+script died between create and the final read-back (private `client`, then a
+guessed attribute name) and each still cleaned up after itself. The script
+lives with the sandbox tools (`e2e_plg61_placement.rb`).
+
+
