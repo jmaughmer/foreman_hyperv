@@ -855,6 +855,25 @@ module ForemanHyperv
               .detect { |domain| domain.id == name || domain.name == name }
     end
 
+    # The cluster an endpoint belongs to, or nil for a stand-alone host — and for a
+    # fog too old to have read a cluster's node list, which is the same nothing as far
+    # as a caller is concerned. PUBLIC by view contract (PLG-61): the VM form's volume
+    # partial reads it on the resource to key the Shared-volume select, and a unit
+    # suite that reaches private reads through send cannot see the NoMethodError the
+    # page would hit at render — so every read the PLUGIN defines that the views and
+    # helpers make on the resource belongs in this section. The pin in
+    # test/models/hyperv_available_storage_domains_test.rb gates that set plus the
+    # core-defined reads the views call, where a future plugin shadow below private
+    # would fail exactly this way.
+    def endpoint_cluster
+      return nil unless client.respond_to?(:supports_clusters?) && client.respond_to?(:cluster_nodes)
+      return nil unless client.supports_clusters?
+
+      clusters.first
+    rescue StandardError
+      nil
+    end
+
     # --- bootdisk PR-2: the iso_* quartet --------------------------------------
     #
     # foreman_bootdisk's Orchestration::Compute calls exactly these four on the
@@ -3132,18 +3151,6 @@ module ForemanHyperv
 
         flap_pause
       end
-    end
-
-    # The cluster an endpoint belongs to, or nil for a stand-alone host — and for a
-    # fog too old to have read a cluster's node list, which is the same nothing as far
-    # as a caller is concerned.
-    def endpoint_cluster
-      return nil unless client.respond_to?(:supports_clusters?) && client.respond_to?(:cluster_nodes)
-      return nil unless client.supports_clusters?
-
-      clusters.first
-    rescue StandardError
-      nil
     end
 
     def cluster_named(identifier)
