@@ -422,4 +422,33 @@ class HypervAvailableStorageDomainsTest < ActiveSupport::TestCase
                  'the stand-alone fallback rides unchanged'
     assert_nil vm.placement_path, 'a stand-alone machine gets no shared-volume disk folder'
   end
+
+  # PLG-61: the view/helper read contract. Every name here is called with an
+  # explicit receiver on the compute resource from a plugin view or helper:
+  # the volume partial (endpoint_cluster, available_storage_domains), the
+  # base partial (clusters, form_computers, cluster_preferred_owners_for,
+  # cluster_node_names, firmware_type, firmware_types), the VM detail view
+  # (cluster_ha_settings), the instance table (vm_registration), and the NIC
+  # helper (switches). The firmware pair is core-defined today — pinning it
+  # costs nothing and gates the one way the plugin could break it: a shadow
+  # below private. The unit suite reaches private reads through send, so a
+  # visibility move reddens no test there while every form page touching the
+  # read NoMethodErrors at render — exactly how the PLG-60 volume select
+  # shipped against a method that has sat below private since it entered the
+  # codebase, caught post-merge by a rails-runner reproduction (this fork
+  # has no view harness). respond_to? is the one gate for the view's call
+  # shape.
+  VIEW_READS = %i[
+    available_storage_domains cluster_ha_settings cluster_node_names
+    cluster_preferred_owners_for clusters endpoint_cluster firmware_type
+    firmware_types form_computers switches vm_registration
+  ].freeze
+
+  def test_every_compute_resource_read_the_views_and_helpers_make_is_public
+    cr = ForemanHyperv::Hyperv.new
+    VIEW_READS.each do |name|
+      assert cr.respond_to?(name),
+             "#{name} is called on the resource by a view or helper, but is not public"
+    end
+  end
 end

@@ -1,5 +1,16 @@
 ## Unreleased
 
+- The VM form's volume partial reads `endpoint_cluster` on the compute
+  resource, and that read shipped against a method sitting in the private
+  section — every VM form a Hyper-V resource renders, create or edit,
+  clustered or stand-alone (the call runs before any cluster gate and
+  outside the partial's rescue), would have 500'd with `NoMethodError` at
+  render, and no unit test could have caught it, because the suite reaches
+  private reads through `send` (found post-PLG-60-merge by a rails-runner
+  reproduction; this fork has no view harness). The read now sits in the
+  public section with the other reads the forms make, and one test pins
+  every read the views and helpers call on the resource with
+  `respond_to?` — the only gate for the view's call shape
 - The VM form can now name the placement target: the Hyper-V volume partial
   carries a Shared-volume select whose choices are the cluster's PLACEABLE
   shared volumes (the same offered set placement and the membership check
