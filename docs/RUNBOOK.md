@@ -700,10 +700,10 @@ a shared volume this compute resource has not read from its cluster...`) and
 nothing was asked of the host. What this run did NOT read back: the VHD file
 path itself (fog's reload answers `volumes=nil` for a re-fetched model) —
 the config root is the measured marker; the disk folder composes from the
-same placement by the §13/PLG-14 rules, not by this read. `vm.destroy` in an
-`ensure` is the whole cleanup contract: two earlier iterations of the same
+same placement by the §5/PLG-14 rules, not by this read. `vm.destroy` in an
+`ensure` is the whole cleanup contract — it came back clean
+(`MARK-destroy=OK`); folder removal itself rides §2's destroy semantics, not
+a check this script made. Two earlier iterations of the same
 script died between create and the final read-back (private `client`, then a
 guessed attribute name) and each still cleaned up after itself. The script
 lives with the sandbox tools (`e2e_plg61_placement.rb`).
-
-
